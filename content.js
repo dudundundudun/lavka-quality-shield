@@ -1,26 +1,36 @@
 /**
- * Lavka Quality Shield v1.0.1 — Content Script
- * Устойчив к React 18 Hydration (F5 refresh), поддерживает мульти-ключевой поиск
- * (URL slug + productId + imageKey + нормализованное название без мягких переносов)
+ * Lavka Quality Shield v2.0.0 — Content Script
+ * - Светлый минимализм в стиле Лавки (ровно 2 компактные строчки + спойлер по клику)
+ * - Никаких громоздких баннеров над заголовком товара
+ * - Поддержка локального FastAPI (127.0.0.1:8765) + прямого подключения к Gemini 4 Argon (localhost:8083/v1) или облачным ИИ
  */
 
 (function () {
   'use strict';
 
   const STORAGE_KEY = 'lqs_reviews_v1';
+  const SETTINGS_KEY = 'lqs_settings_v2';
+
+  const DEFAULT_SETTINGS = {
+    backendUrl: 'http://127.0.0.1:8765',
+    aiBaseUrl: 'http://localhost:8083/v1',
+    aiApiKey: '',
+    aiModel: 'gemini-4-argon',
+    useDirectBrowserAiFallback: true
+  };
+
   const PRESET_TAGS = [
-    '🔥 Топ за свои деньги',
+    '🔥 Топ',
     '🥩 В аэрогриль / су-вид',
-    '🥑 Кето / Мало углей',
+    '🥑 Кето',
     '🧂 Пересолено',
-    '💧 Водянистое / Резина',
-    '🤢 Химозный состав',
-    '💀 Никогда не брать'
+    '💧 Водянистое',
+    '🤢 Химоза',
+    '💀 Не брать'
   ];
 
   let isRenderingProduct = false;
 
-  // Очистка строки от мягких переносов (\u00ad), неразрывных пробелов, тегов и лишних кавычек
   function normalizeTitle(raw) {
     if (!raw) return '';
     return raw
@@ -33,14 +43,12 @@
       .toLowerCase();
   }
 
-  // Извлечение уникального ключа картинки вида "6247604/609844f8-3e8a-4172-9f44-b26854ac51e5"
   function extractImageKey(src) {
     if (!src) return null;
     const m = src.match(/get-grocery-goods\/(\d+\/[a-f0-9-]+)/i);
     return m ? m[1].toLowerCase() : null;
   }
 
-  // Извлечение канонического slug товара из URL вида /good/pelmeni-sochnye-...
   function extractSlugFromUrl(urlStr) {
     if (!urlStr) return null;
     try {
@@ -52,7 +60,6 @@
     }
   }
 
-  // Чтение базы отзывов из chrome.storage.local
   async function getReviewsDB() {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -69,15 +76,24 @@
     });
   }
 
-  // Универсальный поиск отзыва в базе по любому совпадению: slug, productId, imageKey или cleanTitle
+  async function getSettings() {
+    return new Promise((resolve) => {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.get([SETTINGS_KEY], (res) => {
+          resolve({ ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) });
+        });
+      } else {
+        resolve(DEFAULT_SETTINGS);
+      }
+    });
+  }
+
   function findReviewInDB(db, keys) {
     if (!db) return null;
     const { slug, productId, imageKey, cleanTitle } = keys;
-
     if (slug && db[slug]) return db[slug];
 
-    const entries = Object.values(db);
-    for (const item of entries) {
+    for (const item of Object.values(db)) {
       if (!item) continue;
       if (slug && item.slug && item.slug.toLowerCase() === slug) return item;
       if (productId && item.productId && item.productId === productId) return item;
@@ -87,7 +103,6 @@
     return null;
   }
 
-  // Сохранение отзыва в chrome.storage.local
   async function saveProductReview(slug, data) {
     const db = await getReviewsDB();
     const existing = findReviewInDB(db, {
@@ -115,7 +130,6 @@
     });
   }
 
-  // Извлечение актуальных метаданных со страницы товара
   function extractProductPageMetadata() {
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
     const titleEl = (mainPage && mainPage.querySelector('h1[data-testid="product-title"]')) ||
@@ -132,8 +146,7 @@
                        document.querySelector('img[data-testid="snippet-image"]');
 
     let ldData = {};
-    const ldJsonEls = document.querySelectorAll('script[data-testid="ldjson"], script[type="application/ld+json"]');
-    ldJsonEls.forEach((el) => {
+    document.querySelectorAll('script[data-testid="ldjson"], script[type="application/ld+json"]').forEach((el) => {
       try {
         const parsed = JSON.parse(el.textContent);
         const graph = parsed['@graph'] || [parsed];
@@ -146,7 +159,7 @@
           };
         }
       } catch {
-        // Игнорируем невалидный JSON
+        // ignore
       }
     });
 
@@ -173,21 +186,45 @@
     };
   }
 
-  // Смарт-анализатор: пересчет цены за 1 кг/л и радар стоп-ингредиентов / БЖУ
   function analyzeProductQuality(meta) {
     const flags = [];
     let pricePerKg = null;
+    let weightGrams = null;
+    let proteinPer100g = null;
+    let pricePer100gProtein = null;
 
-    if (meta.price && meta.amountText) {
+    if (meta.amountText) {
       const m = meta.amountText.match(/([\d.,]+)\s*(г|кг|мл|л)/i);
       if (m) {
         const val = parseFloat(m[1].replace(',', '.'));
         const unit = m[2].toLowerCase();
         if (val > 0) {
-          if (unit === 'г' || unit === 'мл') {
-            pricePerKg = Math.round((meta.price / val) * 1000);
-          } else if (unit === 'кг' || unit === 'л') {
-            pricePerKg = Math.round(meta.price / val);
+          weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
+          if (meta.price) {
+            pricePerKg = Math.round((meta.price / weightGrams) * 1000);
+          }
+        }
+      }
+    }
+
+    if (meta.traitsText) {
+      const protMatch = meta.traitsText.match(/([\d.,]+)\s*белк/i) || meta.traitsText.match(/белки[^\d]*([\d.,]+)/i);
+      if (protMatch) {
+        proteinPer100g = parseFloat(protMatch[1].replace(',', '.'));
+        if (proteinPer100g > 0 && pricePerKg) {
+          const totalProteinInKg = proteinPer100g * 10;
+          pricePer100gProtein = Math.round((pricePerKg / totalProteinInKg) * 100);
+        }
+      }
+
+      const carbMatch = meta.traitsText.match(/([\d.,]+)\s*углевод/i) || meta.traitsText.match(/углеводы[^\d]*([\d.,]+)/i);
+      if (carbMatch) {
+        const carbs = parseFloat(carbMatch[1].replace(',', '.'));
+        if (!isNaN(carbs)) {
+          if (carbs <= 5) {
+            flags.push({ type: 'good', text: `🥑 Кето (${carbs}г угл)` });
+          } else if (carbs >= 22) {
+            flags.push({ type: 'bad', text: `🍞 ${carbs}г угл` });
           }
         }
       }
@@ -196,12 +233,12 @@
     const ingLower = (meta.ingredientsText || '').toLowerCase();
     if (ingLower) {
       const badMatchers = [
-        { regex: /механической обвалки|ммо/i, label: '⚠️ Мясо мех. обвалки' },
-        { regex: /мальтодекстрин|патока|глюкозно-фруктозный/i, label: '🍬 Скрытые сахара / патока' },
-        { regex: /заменитель молочного жира|пальмовое масло/i, label: '🛢️ Заменитель молочного жира' },
-        { regex: /соевый белок|соевая мука|клетчатка пшеничная/i, label: '🌾 Дешевый наполнитель (соя/клетчатка)' },
-        { regex: /глутамат|е621|ароматизатор/i, label: '🧪 Усилители вкуса / ароматизаторы' },
-        { regex: /крахмал/i, label: '🥔 Крахмал в составе' }
+        { regex: /механической обвалки|ммо/i, label: '⚠️ ММО' },
+        { regex: /мальтодекстрин|патока|глюкозно-фруктозный/i, label: '🍬 Сахар/патока' },
+        { regex: /заменитель молочного жира|пальмовое масло/i, label: '🛢️ ЗМЖ/пальма' },
+        { regex: /соевый белок|соевая мука|клетчатка пшеничная/i, label: '🌾 Соя/клетчатка' },
+        { regex: /глутамат|е621|ароматизатор/i, label: '🧪 Ароматизатор' },
+        { regex: /крахмал/i, label: '🥔 Крахмал' }
       ];
 
       badMatchers.forEach((item) => {
@@ -211,132 +248,160 @@
       });
 
       if (flags.length === 0 && ingLower.length > 10) {
-        flags.push({ type: 'good', text: '✅ Чистый состав без стоп-слов' });
+        flags.push({ type: 'good', text: '✅ Чистый состав' });
       }
     }
 
-    if (meta.traitsText) {
-      const carbMatch = meta.traitsText.match(/([\d.,]+)\s*углевод/i) || meta.traitsText.match(/углеводы[^\d]*([\d.,]+)/i);
-      if (carbMatch) {
-        const carbs = parseFloat(carbMatch[1].replace(',', '.'));
-        if (!isNaN(carbs)) {
-          if (carbs <= 5) {
-            flags.push({ type: 'good', text: `🥑 Кето-френдли (${carbs} г угл.)` });
-          } else if (carbs >= 20) {
-            flags.push({ type: 'bad', text: `🍞 Много углеводов (${carbs} г / 100 г)` });
-          }
-        }
-      }
-    }
-
-    return { pricePerKg, flags };
+    return { pricePerKg, pricePer100gProtein, flags: flags.slice(0, 3) };
   }
 
-  function getStatusMeta(r, banned) {
-    if (banned || (r > 0 && r <= 2)) return { cls: 'lqs-status-trash', bannerCls: 'trash', text: `💀 ШЛАК / В БАНЕ (${r || 1}/5)` };
-    if (r >= 4) return { cls: 'lqs-status-god', bannerCls: 'god', text: `🔥 ГОДНОТА (${r}/5)` };
-    if (r === 3) return { cls: 'lqs-status-ok', bannerCls: 'ok', text: '😐 СРЕДНЯЧОК (3/5)' };
-    return { cls: 'lqs-status-unrated', bannerCls: '', text: 'ЕЩЁ НЕ ОЦЕНЕНО' };
-  }
-
-  // Отрисовка наглядного баннера с твоим сохраненным отзывом прямо под заголовком товара h1[data-testid="product-title"]
-  function renderVerdictBanner(mainPage, review) {
-    const headerBlock = mainPage.querySelector('div[data-testid="product-card-header"]') ||
-                        mainPage.querySelector('h1[data-testid="product-title"]')?.parentElement;
-    if (!headerBlock) return;
-
-    let banner = mainPage.querySelector('.lqs-verdict-banner');
-    const hasVerdict = review && (review.rating > 0 || review.banned || (review.note && review.note.trim()) || (review.tags && review.tags.length > 0));
-
-    if (!hasVerdict) {
-      if (banner) banner.remove();
-      return;
-    }
-
-    const st = getStatusMeta(review.rating, review.banned);
-    const starsStr = review.rating > 0 ? '⭐'.repeat(review.rating) + '☆'.repeat(5 - review.rating) : (review.banned ? '💀 ЧЁРНЫЙ СПИСОК' : '');
-
-    if (!banner) {
-      banner = document.createElement('div');
-      headerBlock.insertAdjacentElement('afterend', banner);
-    }
-
-    banner.className = `lqs-verdict-banner ${st.bannerCls || 'ok'}`;
-    banner.innerHTML = `
-      <div class="lqs-verdict-top">
-        <span>🛡️ Твой вердикт: ${st.text}</span>
-        <span>${starsStr}</span>
-      </div>
-      ${review.note && review.note.trim() ? `<div class="lqs-verdict-note">💬 ${review.note.replace(/</g, '&lt;')}</div>` : ''}
-      ${review.tags && review.tags.length ? `
-        <div class="lqs-verdict-tags">
-          ${review.tags.map((t) => `<span class="lqs-verdict-tag">${t}</span>`).join('')}
-        </div>
-      ` : ''}
-    `;
-  }
-
-  // Синхронизация значений уже вставленной формы с базой (защита от сброса при React 18 Hydration после F5)
+  // Синхронизация компактного 2-строчного UI после F5 / React Hydration
   function syncExistingPanelUI(panel, review, meta) {
     const r = (review && review.rating) ? Number(review.rating) : 0;
     const banned = Boolean(review && review.banned);
     const tags = (review && Array.isArray(review.tags)) ? review.tags : [];
     const note = (review && review.note) ? String(review.note) : '';
 
-    const st = getStatusMeta(r, banned);
-    const badge = panel.querySelector('#lqs-status-badge');
-    if (badge) {
-      badge.className = `lqs-status-pill ${st.cls}`;
-      badge.textContent = st.text;
-    }
+    panel.classList.toggle('is-banned', banned || (r > 0 && r <= 2));
+    panel.classList.toggle('is-god', !banned && r >= 4);
 
     panel.querySelectorAll('.lqs-star-btn').forEach((b) => {
       const s = parseInt(b.dataset.star, 10);
-      const isActive = r >= s;
-      b.classList.toggle('active', isActive);
-      b.textContent = isActive ? '⭐' : '☆';
+      b.classList.toggle('active', r >= s);
     });
 
     const banBtn = panel.querySelector('#lqs-ban-toggle');
     if (banBtn) {
-      banBtn.classList.toggle('banned', banned);
-      banBtn.textContent = banned ? '💀 В чёрном списке (разбанить)' : '🚫 В чёрный список';
+      banBtn.classList.toggle('ban-active', banned);
+      banBtn.textContent = banned ? '💀 В бане' : '🚫';
     }
 
-    panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
-      const t = chip.dataset.tag;
-      chip.classList.toggle('selected', tags.includes(t));
-    });
-
-    const noteArea = panel.querySelector('#lqs-note-area');
-    if (noteArea && document.activeElement !== noteArea) {
-      if (noteArea.value !== note) {
-        noteArea.value = note;
+    const notePill = panel.querySelector('#lqs-inline-note');
+    if (notePill) {
+      const summaryText = note.trim() || tags.join(' ');
+      if (summaryText) {
+        notePill.style.display = 'inline-block';
+        notePill.textContent = `💬 ${summaryText}`;
+        notePill.title = summaryText;
+      } else {
+        notePill.style.display = 'none';
       }
     }
 
-    // Обновляем смарт-бокс, если подгрузились цена/вес/состав
-    const smartBox = panel.querySelector('#lqs-smart-box');
-    if (smartBox && meta) {
+    panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
+      chip.classList.toggle('selected', tags.includes(chip.dataset.tag));
+    });
+
+    const noteArea = panel.querySelector('#lqs-note-area');
+    if (noteArea && document.activeElement !== noteArea && noteArea.value !== note) {
+      noteArea.value = note;
+    }
+
+    const row2 = panel.querySelector('#lqs-row-2');
+    if (row2 && meta) {
       const smart = analyzeProductQuality(meta);
-      smartBox.innerHTML = `
-        <div class="lqs-smart-line">
-          <span>⚖️ <strong>Реальная цена:</strong></span>
-          <span>${smart.pricePerKg ? `<strong>~${smart.pricePerKg} ₽</strong> за 1 кг/л` : 'Вес уточняется...'}</span>
-        </div>
-        <div class="lqs-flag-list">
-          ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
-        </div>
+      row2.innerHTML = `
+        <span class="lqs-metric-pill">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/кг` : 'Цена/кг —'}</span>
+        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
+        ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
       `;
     }
   }
 
-  // Рендер смарт-панели на странице товара main[data-testid="good-page-desktop"]
+  // Запрос к локальному FastAPI (или напрямую к мосту Gemini 4 Argon :8083)
+  async function requestAiProductReview(meta, panel) {
+    const drawer = panel.querySelector('#lqs-drawer');
+    const aiBox = panel.querySelector('#lqs-ai-box');
+    const aiContent = panel.querySelector('#lqs-ai-content');
+    const aiSources = panel.querySelector('#lqs-ai-sources');
+
+    drawer.classList.add('open');
+    aiBox.classList.add('visible');
+    aiContent.textContent = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора...';
+    aiSources.innerHTML = '';
+
+    const settings = await getSettings();
+
+    // 1. Пробуем локальный FastAPI сервер (который парсит Отзовик/IRecommend/Роскачество + вызывает Gemini 4 Argon / Cloud AI)
+    try {
+      const resp = await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/analyze-product`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slug: extractSlugFromUrl(window.location.href),
+          title: meta.title,
+          brand: meta.brand,
+          amount: meta.amountText,
+          price: meta.price,
+          ingredients: meta.ingredientsText,
+          traits: meta.traitsText,
+          aiBaseUrl: settings.aiBaseUrl,
+          aiApiKey: settings.aiApiKey,
+          aiModel: settings.aiModel
+        })
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        aiContent.innerHTML = (data.verdict || 'Вердикт получен.').replace(/\n/g, '<br>');
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          aiSources.innerHTML = data.sources
+            .map((s) => `<a href="${s.url}" target="_blank" rel="noopener noreferrer">🔗 ${s.title || 'Источник'}</a>`)
+            .join('');
+        }
+        return;
+      }
+    } catch {
+      // Если FastAPI не запущен, переходим к прямому вызову Cookie-моста Gemini 4 Argon (localhost:8083/v1)
+    }
+
+    // 2. Прямой фоллбэк к локальному мосту Antigravity/Gemini 4 Argon (http://localhost:8083/v1/chat/completions)
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (settings.aiApiKey) {
+        headers.Authorization = `Bearer ${settings.aiApiKey}`;
+      }
+      const prompt = [
+        `Сделай ультра-короткий (максимум 3 строчки) разбор продукта из Яндекс Лавки в стиле честного продуктового ревизора:`,
+        `Товар: ${meta.title} (${meta.amountText || 'вес не указан'}, цена: ${meta.price || '?'} ₽)`,
+        `Состав: ${meta.ingredientsText || 'не указан'}`,
+        `КБЖУ: ${meta.traitsText || 'не указано'}`,
+        `Формат: 1) Что по составу/белку и реальной цене, 2) Главный подвох или плюс, 3) Вердикт (Брать или Скипать).`
+      ].join('\n');
+
+      const directResp = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: settings.aiModel || 'gemini-4-argon',
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.3
+        })
+      });
+
+      if (directResp.ok) {
+        const json = await directResp.json();
+        const reply = json.choices?.[0]?.message?.content || 'Нет ответа от модели.';
+        aiContent.innerHTML = reply.replace(/\n/g, '<br>');
+        aiSources.innerHTML = `<span style="color:#7a7875">⚡ Напрямую через ${settings.aiModel} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
+        return;
+      }
+    } catch {
+      // ignore
+    }
+
+    aiContent.innerHTML = `⚠️ Не удалось достучаться до локального FastAPI (<code>${settings.backendUrl}</code>) или моста Gemini Argon (<code>${settings.aiBaseUrl}</code>). Запусти <code>start_server.bat</code> или проверь настройки в иконке расширения!`;
+  }
+
   async function renderProductPageWidget() {
     if (isRenderingProduct) return;
     const slug = extractSlugFromUrl(window.location.href);
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
     if (!slug || !mainPage) return;
+
+    // Удаляем старый громоздкий баннер над заголовком, если он остался
+    const oldVerdictBanner = mainPage.querySelector('.lqs-verdict-banner');
+    if (oldVerdictBanner) oldVerdictBanner.remove();
 
     const infoBlock = mainPage.querySelector('div[data-testid="product-info"]') ||
                       mainPage.querySelector('div[data-testid="product-card-header"]');
@@ -360,8 +425,6 @@
         banned: Boolean(savedReview && savedReview.banned)
       };
 
-      // Всегда рисуем/обновляем верхний баннер вердикта под заголовком товара
-      renderVerdictBanner(mainPage, current);
       guardAddToCartButton(current);
 
       let existing = mainPage.querySelector('.lqs-product-panel');
@@ -372,54 +435,62 @@
       if (existing) existing.remove();
 
       const smart = analyzeProductQuality(meta);
-      const status = getStatusMeta(current.rating, current.banned);
+      const summaryText = current.note.trim() || current.tags.join(' ');
 
       const panel = document.createElement('div');
-      panel.className = 'lqs-product-panel';
+      panel.className = `lqs-product-panel ${current.banned || (current.rating > 0 && current.rating <= 2) ? 'is-banned' : (current.rating >= 4 ? 'is-god' : '')}`;
       panel.dataset.slug = slug;
 
       panel.innerHTML = `
-        <div class="lqs-header">
-          <div class="lqs-title">🛡️ Lavka Quality Shield</div>
-          <span class="lqs-status-pill ${status.cls}" id="lqs-status-badge">${status.text}</span>
-        </div>
-
-        <div class="lqs-rating-row">
-          <div class="lqs-stars" id="lqs-stars-box">
+        <!-- Строка 1: Звезды + превью заметки + кнопки ИИ и выпадающего списка -->
+        <div class="lqs-compact-row-1">
+          <div class="lqs-stars-inline" id="lqs-stars-box">
             ${[1, 2, 3, 4, 5].map((n) => `
-              <button type="button" class="lqs-star-btn ${current.rating >= n ? 'active' : ''}" data-star="${n}" title="Оценить на ${n}">
-                ${current.rating >= n ? '⭐' : '☆'}
-              </button>
+              <button type="button" class="lqs-star-btn ${current.rating >= n ? 'active' : ''}" data-star="${n}" title="Оценить на ${n}">★</button>
             `).join('')}
           </div>
-          <button type="button" class="lqs-ban-btn ${current.banned ? 'banned' : ''}" id="lqs-ban-toggle">
-            ${current.banned ? '💀 В чёрном списке (разбанить)' : '🚫 В чёрный список'}
-          </button>
-        </div>
 
-        <div class="lqs-tags-row" id="lqs-tags-box">
-          ${PRESET_TAGS.map((tag) => `
-            <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${tag}">
-              ${tag}
-            </span>
-          `).join('')}
-        </div>
+          <span class="lqs-inline-note-pill" id="lqs-inline-note" style="display:${summaryText ? 'inline-block' : 'none'}" title="${summaryText.replace(/"/g, '&quot;')}">
+            💬 ${summaryText}
+          </span>
 
-        <div class="lqs-note-wrap">
-          <textarea class="lqs-note-input" id="lqs-note-area" placeholder="Твой личный вердикт (например: «Тесто разваливается, начинка из сои, больше не брать»)..."></textarea>
-          <div class="lqs-save-row">
-            <span class="lqs-save-toast" id="lqs-save-toast">✅ Сохранено в базу!</span>
-            <button type="button" class="lqs-save-btn" id="lqs-save-btn">💾 Сохранить отзыв</button>
+          <div class="lqs-actions-inline">
+            <button type="button" class="lqs-mini-btn ${current.banned ? 'ban-active' : ''}" id="lqs-ban-toggle" title="В чёрный список">
+              ${current.banned ? '💀 В бане' : '🚫'}
+            </button>
+            <button type="button" class="lqs-mini-btn ai-btn" id="lqs-ai-btn" title="Найти отзывы в сети и спросить ИИ">
+              🤖 ИИ-обзор
+            </button>
+            <button type="button" class="lqs-mini-btn" id="lqs-drawer-toggle" title="Открыть заметку и теги">
+              ▾ Отзыв
+            </button>
           </div>
         </div>
 
-        <div class="lqs-smart-box" id="lqs-smart-box">
-          <div class="lqs-smart-line">
-            <span>⚖️ <strong>Реальная цена:</strong></span>
-            <span>${smart.pricePerKg ? `<strong>~${smart.pricePerKg} ₽</strong> за 1 кг/л` : 'Вес уточняется...'}</span>
+        <!-- Строка 2: Цена за 1 кг + цена за 100 г белка + мини-индикаторы состава -->
+        <div class="lqs-compact-row-2" id="lqs-row-2">
+          <span class="lqs-metric-pill">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/кг` : 'Цена/кг —'}</span>
+          ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
+          ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
+        </div>
+
+        <!-- Выпадающий спойлер (скрыт по умолчанию) -->
+        <div class="lqs-drawer" id="lqs-drawer">
+          <div class="lqs-tags-row">
+            ${PRESET_TAGS.map((tag) => `
+              <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${tag}">${tag}</span>
+            `).join('')}
           </div>
-          <div class="lqs-flag-list">
-            ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
+          <div class="lqs-note-wrap">
+            <textarea class="lqs-note-input" id="lqs-note-area" rows="2" placeholder="Короткая заметка о товаре..."></textarea>
+            <button type="button" class="lqs-save-btn" id="lqs-save-btn">💾 Ок</button>
+          </div>
+          <div class="lqs-ai-box" id="lqs-ai-box">
+            <div class="lqs-ai-header">
+              <span>🤖 Сводка отзывов из интернета + анализ состава</span>
+            </div>
+            <div id="lqs-ai-content"></div>
+            <div class="lqs-ai-sources" id="lqs-ai-sources"></div>
           </div>
         </div>
       `;
@@ -431,18 +502,8 @@
         infoBlock.prepend(panel);
       }
 
-      // Явно выставляем .value для textarea после вставки в DOM (чтобы React Hydration не сбрасывал текст)
       const noteArea = panel.querySelector('#lqs-note-area');
       noteArea.value = current.note;
-
-      let toastTimer = null;
-      const showSavedToast = () => {
-        const toast = panel.querySelector('#lqs-save-toast');
-        if (!toast) return;
-        toast.classList.add('visible');
-        clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => toast.classList.remove('visible'), 2000);
-      };
 
       const persistState = async () => {
         const latestMeta = extractProductPageMetadata();
@@ -459,12 +520,9 @@
           tags: current.tags,
           note: current.note
         });
-
         syncExistingPanelUI(panel, updated, latestMeta);
-        renderVerdictBanner(mainPage, updated);
         guardAddToCartButton(updated);
         decorateCatalogCards();
-        showSavedToast();
       };
 
       panel.querySelectorAll('.lqs-star-btn').forEach((btn) => {
@@ -490,6 +548,21 @@
         persistState();
       });
 
+      panel.querySelector('#lqs-drawer-toggle').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const drawer = panel.querySelector('#lqs-drawer');
+        const isOpen = drawer.classList.toggle('open');
+        e.currentTarget.textContent = isOpen ? '▴ Скрыть' : '▾ Отзыв';
+      });
+
+      panel.querySelector('#lqs-ai-btn').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const latestMeta = extractProductPageMetadata();
+        requestAiProductReview(latestMeta, panel);
+      });
+
       panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
         chip.addEventListener('click', (e) => {
           e.preventDefault();
@@ -511,20 +584,20 @@
         noteTimeout = setTimeout(persistState, 400);
       });
 
-      noteArea.addEventListener('change', persistState);
-
       panel.querySelector('#lqs-save-btn').addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         clearTimeout(noteTimeout);
         persistState();
+        const saveBtn = e.currentTarget;
+        saveBtn.textContent = '✅ Ок';
+        setTimeout(() => { saveBtn.textContent = '💾 Ок'; }, 1200);
       });
     } finally {
       isRenderingProduct = false;
     }
   }
 
-  // Защита кнопки «В корзину» button[data-testid="snippet-control"] от случайной покупки шлака
   function guardAddToCartButton(review) {
     const addBtn = document.querySelector('main[data-testid="good-page-desktop"] button[data-testid="snippet-control"]');
     if (!addBtn) return;
@@ -535,15 +608,14 @@
     addBtn.dataset.lqsRating = (review && review.rating) ? String(review.rating) : '1';
 
     if (isBad) {
-      addBtn.style.background = '#7f1d1d';
-      addBtn.style.color = '#fecaca';
-      addBtn.title = `Твой отзыв: ${review.note || 'Не брать!'}`;
+      addBtn.style.background = '#fee2e2';
+      addBtn.style.color = '#991b1b';
       if (!addBtn.dataset.lqsGuarded) {
         addBtn.dataset.lqsGuarded = 'true';
         addBtn.addEventListener('click', (e) => {
           if (addBtn.dataset.lqsBad === 'true') {
             const ok = window.confirm(
-              `⚠️ СТОП! Ты сам забанил этот продукт (${addBtn.dataset.lqsRating}⭐).\n\nТвоя заметка: "${addBtn.dataset.lqsNote || 'Плохое качество'}"\n\nТочно хочешь положить его в корзину?`
+              `⚠️ Этот товар у тебя в чёрном списке (${addBtn.dataset.lqsRating}★).\nЗаметка: "${addBtn.dataset.lqsNote || 'Не брать'}"\n\nВсё равно добавить в корзину?`
             );
             if (!ok) {
               e.stopPropagation();
@@ -558,7 +630,6 @@
     }
   }
 
-  // Извлечение ключей карточки каталога (работает и для карточек со ссылкой /good/, и для карточек в /recents с product-id-...)
   function extractCardIdentifiers(card) {
     const linkEl = card.querySelector('a[href*="/good/"]') || card.closest('a[href*="/good/"]');
     const slug = linkEl ? extractSlugFromUrl(linkEl.getAttribute('href')) : null;
@@ -578,7 +649,6 @@
     return { slug, productId, imageKey, cleanTitle };
   }
 
-  // Разметка всех карточек каталога, поиска, апсейла и «Вы покупали» div[data-testid="product-card"]
   async function decorateCatalogCards() {
     const db = await getReviewsDB();
     const cards = document.querySelectorAll('div[data-testid="product-card"]');
@@ -601,14 +671,14 @@
       const isBad = review.banned || (review.rating > 0 && review.rating <= 2);
       if (isBad) {
         badge.className = 'lqs-card-badge trash';
-        badge.textContent = `💀 ${review.rating ? review.rating + '★' : 'БАН'} НЕ БРАТЬ`;
+        badge.textContent = `💀 ${review.rating ? review.rating + '★' : 'БАН'}`;
         card.classList.add('lqs-card-dimmed');
       } else if (review.rating >= 4) {
         badge.className = 'lqs-card-badge god';
-        badge.textContent = `🔥 ${review.rating}★ ТОП`;
+        badge.textContent = `★ ${review.rating}`;
       } else {
         badge.className = 'lqs-card-badge ok';
-        badge.textContent = `😐 ${review.rating}★ НОРМ`;
+        badge.textContent = `★ ${review.rating}`;
       }
 
       card.appendChild(badge);
@@ -622,14 +692,13 @@
     });
   }
 
-  // Запуск и серия контрольных синхронизаций после гидратации React 18 (при F5 и SPA-переходах)
   let debounceTimer = null;
   function scheduleUpdate() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       renderProductPageWidget();
       decorateCatalogCards();
-    }, 150);
+    }, 140);
   }
 
   function runHydrationResyncWave() {
@@ -652,7 +721,7 @@
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local' && changes[STORAGE_KEY]) {
+      if (area === 'local' && (changes[STORAGE_KEY] || changes[SETTINGS_KEY])) {
         renderProductPageWidget();
         decorateCatalogCards();
       }

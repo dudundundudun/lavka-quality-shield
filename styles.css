@@ -1,196 +1,200 @@
-/* Lavka Quality Shield v1.0.1 — Стили виджета, баннера вердикта и меток каталога */
+/* Lavka Quality Shield v2.0.0 — Нативный светлый минимализм Яндекс Лавки (2 строчки + выпадающий спойлер) */
 
 :root {
-  --lqs-bg: #18181b;
-  --lqs-card: #27272a;
-  --lqs-border: #3f3f46;
-  --lqs-text: #f4f4f5;
-  --lqs-muted: #a1a1aa;
-  --lqs-gold: #fbbf24;
-  --lqs-green: #22c55e;
-  --lqs-red: #ef4444;
+  --lqs-surface: #f5f4f2;
+  --lqs-surface-hover: #eceae6;
+  --lqs-card-bg: #ffffff;
+  --lqs-border: #e5e2dd;
+  --lqs-text: #21201f;
+  --lqs-muted: #7a7875;
+  --lqs-yellow: #fce000;
+  --lqs-yellow-hover: #f2d600;
+  --lqs-star-active: #f59e0b;
+  --lqs-star-idle: #c8c4be;
+  --lqs-green-bg: #e8f7ed;
+  --lqs-green-text: #15803d;
+  --lqs-red-bg: #fdecec;
+  --lqs-red-text: #dc2626;
 }
 
-/* Баннер сохраненного вердикта прямо под заголовком товара h1[data-testid="product-title"] */
-.lqs-verdict-banner {
-  margin: 10px 0 6px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
-}
-
-.lqs-verdict-banner.god {
-  background: #14532d;
-  color: #f0fdf4;
-  border: 1.5px solid #22c55e;
-}
-
-.lqs-verdict-banner.ok {
-  background: #422006;
-  color: #fefce8;
-  border: 1.5px solid #eab308;
-}
-
-.lqs-verdict-banner.trash {
-  background: #7f1d1d;
-  color: #fef2f2;
-  border: 1.5px solid #ef4444;
-}
-
-.lqs-verdict-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.lqs-verdict-note {
-  font-size: 13px;
-  line-height: 1.4;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 7px 10px;
-  border-radius: 8px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.lqs-verdict-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  font-size: 11px;
-  opacity: 0.92;
-}
-
-.lqs-verdict-tag {
-  background: rgba(255, 255, 255, 0.14);
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-/* Виджет редактирования на странице товара main[data-testid="good-page-desktop"] */
+/* Компактный 2-строчный блок под кнопкой корзины */
 .lqs-product-panel {
-  background: var(--lqs-bg);
+  background: var(--lqs-surface);
   color: var(--lqs-text);
   border: 1px solid var(--lqs-border);
-  border-radius: 20px;
-  padding: 16px 18px;
-  margin: 14px 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  position: relative;
-  z-index: 10;
+  border-radius: 16px;
+  padding: 10px 14px;
+  margin: 10px 0 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "YS Text", "Segoe UI", Roboto, sans-serif;
+  box-sizing: border-box;
+  transition: background 0.15s ease;
 }
 
-.lqs-header {
+.lqs-product-panel.is-banned {
+  background: #fff5f5;
+  border-color: #fca5a5;
+}
+
+.lqs-product-panel.is-god {
+  background: #f4fbf6;
+  border-color: #bbf7d0;
+}
+
+/* Строка 1: Звездочки + краткий вердикт + кнопки ИИ и спойлера */
+.lqs-compact-row-1 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
   gap: 8px;
-}
-
-.lqs-title {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.lqs-status-pill {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 3px 9px;
-  border-radius: 999px;
-  text-transform: uppercase;
-}
-
-.lqs-status-unrated { background: #3f3f46; color: #d4d4d8; }
-.lqs-status-god { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid #22c55e; }
-.lqs-status-ok { background: rgba(251, 191, 36, 0.2); color: #fde047; border: 1px solid #fbbf24; }
-.lqs-status-trash { background: rgba(239, 68, 68, 0.25); color: #fca5a5; border: 1px solid #ef4444; }
-
-/* Звезды рейтинга */
-.lqs-rating-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
   flex-wrap: wrap;
 }
 
-.lqs-stars {
-  display: flex;
-  gap: 6px;
+.lqs-stars-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .lqs-star-btn {
-  background: var(--lqs-card);
-  border: 1px solid var(--lqs-border);
-  border-radius: 10px;
-  width: 38px;
-  height: 36px;
-  font-size: 18px;
+  background: transparent;
+  border: none;
+  padding: 2px 3px;
+  font-size: 19px;
+  line-height: 1;
   cursor: pointer;
-  transition: all 0.15s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fbbf24;
+  color: var(--lqs-star-idle);
+  transition: transform 0.12s ease, color 0.12s ease;
 }
 
 .lqs-star-btn:hover {
-  transform: translateY(-2px);
-  border-color: var(--lqs-gold);
+  transform: scale(1.18);
+  color: var(--lqs-star-active);
 }
 
 .lqs-star-btn.active {
-  background: rgba(251, 191, 36, 0.22);
-  border-color: var(--lqs-gold);
-  box-shadow: 0 0 8px rgba(251, 191, 36, 0.35);
+  color: var(--lqs-star-active);
 }
 
-/* Быстрый бан-тумблер */
-.lqs-ban-btn {
-  background: var(--lqs-card);
+.lqs-inline-note-pill {
+  font-size: 12px;
+  color: var(--lqs-text);
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid var(--lqs-border);
+  padding: 2px 8px;
+  border-radius: 999px;
+  max-width: 190px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.lqs-actions-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.lqs-mini-btn {
+  background: #ffffff;
   color: var(--lqs-text);
   border: 1px solid var(--lqs-border);
   border-radius: 10px;
-  padding: 7px 12px;
+  padding: 4px 9px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.12s ease;
 }
 
-.lqs-ban-btn.banned {
-  background: #7f1d1d;
-  border-color: var(--lqs-red);
-  color: #fecaca;
+.lqs-mini-btn:hover {
+  background: var(--lqs-surface-hover);
 }
 
-/* Быстрые теги */
+.lqs-mini-btn.ai-btn {
+  background: var(--lqs-yellow);
+  border-color: #ebd000;
+  color: #21201f;
+}
+
+.lqs-mini-btn.ai-btn:hover {
+  background: var(--lqs-yellow-hover);
+}
+
+.lqs-mini-btn.ban-active {
+  background: var(--lqs-red-bg);
+  color: var(--lqs-red-text);
+  border-color: #f87171;
+}
+
+/* Строка 2: Цена за 1 кг + цена за 100 г белка + мини-индикаторы состава */
+.lqs-compact-row-2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--lqs-muted);
+}
+
+.lqs-metric-pill {
+  background: #ffffff;
+  color: var(--lqs-text);
+  border: 1px solid var(--lqs-border);
+  border-radius: 8px;
+  padding: 2px 7px;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.lqs-flag-bad {
+  background: var(--lqs-red-bg);
+  color: var(--lqs-red-text);
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.lqs-flag-good {
+  background: var(--lqs-green-bg);
+  color: var(--lqs-green-text);
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Выпадающий спойлер по клику */
+.lqs-drawer {
+  display: none;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--lqs-border);
+}
+
+.lqs-drawer.open {
+  display: block;
+}
+
 .lqs-tags-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
+  gap: 5px;
+  margin-bottom: 8px;
 }
 
 .lqs-tag-chip {
-  background: var(--lqs-card);
+  background: #ffffff;
   color: var(--lqs-muted);
   border: 1px solid var(--lqs-border);
   border-radius: 999px;
-  padding: 4px 10px;
+  padding: 3px 9px;
   font-size: 11px;
   cursor: pointer;
   user-select: none;
@@ -198,182 +202,158 @@
 }
 
 .lqs-tag-chip.selected {
-  background: rgba(59, 130, 246, 0.22);
-  color: #93c5fd;
-  border-color: #3b82f6;
+  background: #21201f;
+  color: #ffffff;
+  border-color: #21201f;
   font-weight: 600;
 }
 
-/* Поле отзыва + кнопка сохранения */
 .lqs-note-wrap {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 6px;
+  align-items: flex-start;
 }
 
 .lqs-note-input {
-  width: 100%;
+  flex: 1;
   box-sizing: border-box;
-  background: var(--lqs-card);
+  background: #ffffff;
   color: var(--lqs-text);
   border: 1px solid var(--lqs-border);
-  border-radius: 12px;
-  padding: 9px 12px;
-  font-size: 13px;
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
   resize: vertical;
-  min-height: 58px;
+  min-height: 38px;
   font-family: inherit;
 }
 
 .lqs-note-input:focus {
   outline: none;
-  border-color: var(--lqs-gold);
-}
-
-.lqs-save-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  border-color: #21201f;
 }
 
 .lqs-save-btn {
-  background: #fbbf24;
-  color: #18181b;
+  background: #21201f;
+  color: #ffffff;
   border: none;
   border-radius: 10px;
-  padding: 7px 14px;
+  padding: 8px 12px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.15s ease;
+  white-space: nowrap;
 }
 
 .lqs-save-btn:hover {
-  opacity: 0.9;
+  opacity: 0.88;
 }
 
-.lqs-save-toast {
-  font-size: 12px;
-  color: #4ade80;
-  font-weight: 600;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.lqs-save-toast.visible {
-  opacity: 1;
-}
-
-/* Смарт-аналитика: Цена за кг, БЖУ и радар состава */
-.lqs-smart-box {
-  background: #1f1f23;
+/* Блок ответа ИИ-ревизора внутри выпадающего списка */
+.lqs-ai-box {
+  display: none;
+  margin-top: 8px;
+  background: #ffffff;
+  border: 1px solid var(--lqs-border);
   border-radius: 12px;
   padding: 10px 12px;
   font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-left: 3px solid var(--lqs-gold);
+  line-height: 1.45;
+  color: var(--lqs-text);
 }
 
-.lqs-smart-line {
+.lqs-ai-box.visible {
+  display: block;
+}
+
+.lqs-ai-header {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  align-items: center;
+  font-weight: 700;
+  margin-bottom: 6px;
+  font-size: 12px;
 }
 
-.lqs-flag-list {
+.lqs-ai-sources {
+  margin-top: 6px;
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 4px;
+  gap: 6px;
+  font-size: 11px;
 }
 
-.lqs-flag-bad {
-  background: rgba(239, 68, 68, 0.18);
-  color: #fca5a5;
+.lqs-ai-sources a {
+  color: #2563eb;
+  text-decoration: none;
+  background: #eff6ff;
   padding: 2px 7px;
   border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
 }
 
-.lqs-flag-good {
-  background: rgba(34, 197, 94, 0.18);
-  color: #86efac;
-  padding: 2px 7px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-/* Оверлей на карточках в каталоге div[data-testid="product-card"] */
+/* Компактные метки на карточках в каталоге div[data-testid="product-card"] */
 .lqs-card-badge {
   position: absolute;
   top: 8px;
   left: 8px;
   z-index: 30;
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: 8px;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
   pointer-events: none;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 
 .lqs-card-badge.god {
-  background: #14532d;
-  color: #86efac;
-  border: 1px solid #22c55e;
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #86efac;
 }
 
 .lqs-card-badge.ok {
-  background: #422006;
-  color: #fde047;
-  border: 1px solid #eab308;
+  background: #fef9c3;
+  color: #854d0e;
+  border: 1px solid #fde047;
 }
 
 .lqs-card-badge.trash {
-  background: #7f1d1d;
-  color: #fecaca;
-  border: 1px solid #ef4444;
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
 }
 
-/* Визуальная блокировка плохих товаров в сетке */
 .lqs-card-dimmed {
-  filter: grayscale(85%) opacity(0.52) !important;
+  filter: grayscale(85%) opacity(0.55) !important;
   transition: filter 0.2s ease !important;
-  outline: 2px dashed #ef4444 !important;
+  outline: 1.5px dashed #ef4444 !important;
   outline-offset: -2px;
   border-radius: 16px;
 }
 
 .lqs-card-dimmed:hover {
-  filter: grayscale(20%) opacity(0.95) !important;
+  filter: grayscale(15%) opacity(0.95) !important;
 }
 
 .lqs-card-note-preview {
   position: absolute;
-  bottom: 48px;
+  bottom: 46px;
   left: 6px;
   right: 6px;
   z-index: 29;
-  background: rgba(24, 24, 27, 0.94);
-  color: #fca5a5;
+  background: rgba(255, 255, 255, 0.95);
+  color: #991b1b;
   font-size: 10px;
   line-height: 1.25;
-  padding: 4px 6px;
+  padding: 3px 6px;
   border-radius: 6px;
-  border: 1px solid rgba(239, 68, 68, 0.5);
+  border: 1px solid #fca5a5;
   pointer-events: none;
-  max-height: 36px;
+  max-height: 32px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
