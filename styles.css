@@ -1,0 +1,274 @@
+/* Lavka Quality Shield v1.0.0 — Стили виджета и меток каталога */
+
+:root {
+  --lqs-bg: #18181b;
+  --lqs-card: #27272a;
+  --lqs-border: #3f3f46;
+  --lqs-text: #f4f4f5;
+  --lqs-muted: #a1a1aa;
+  --lqs-gold: #fbbf24;
+  --lqs-green: #22c55e;
+  --lqs-red: #ef4444;
+  --lqs-orange: #f97316;
+  --lqs-accent: #fcd34d;
+}
+
+/* Виджет на странице товара main[data-testid="good-page-desktop"] */
+.lqs-product-panel {
+  background: var(--lqs-bg);
+  color: var(--lqs-text);
+  border: 1px solid var(--lqs-border);
+  border-radius: 20px;
+  padding: 16px 18px;
+  margin: 14px 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+.lqs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 8px;
+}
+
+.lqs-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lqs-status-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+
+.lqs-status-unrated { background: #3f3f46; color: #d4d4d8; }
+.lqs-status-god { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid #22c55e; }
+.lqs-status-ok { background: rgba(251, 191, 36, 0.2); color: #fde047; border: 1px solid #fbbf24; }
+.lqs-status-trash { background: rgba(239, 68, 68, 0.25); color: #fca5a5; border: 1px solid #ef4444; }
+
+/* Звезды рейтинга */
+.lqs-rating-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.lqs-stars {
+  display: flex;
+  gap: 6px;
+}
+
+.lqs-star-btn {
+  background: var(--lqs-card);
+  border: 1px solid var(--lqs-border);
+  border-radius: 10px;
+  width: 38px;
+  height: 36px;
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lqs-star-btn:hover {
+  transform: translateY(-2px);
+  border-color: var(--lqs-gold);
+}
+
+.lqs-star-btn.active {
+  background: rgba(251, 191, 36, 0.18);
+  border-color: var(--lqs-gold);
+}
+
+/* Быстрый бан-тумблер */
+.lqs-ban-btn {
+  background: var(--lqs-card);
+  color: var(--lqs-text);
+  border: 1px solid var(--lqs-border);
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lqs-ban-btn.banned {
+  background: #7f1d1d;
+  border-color: var(--lqs-red);
+  color: #fecaca;
+}
+
+/* Быстрые теги */
+.lqs-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.lqs-tag-chip {
+  background: var(--lqs-card);
+  color: var(--lqs-muted);
+  border: 1px solid var(--lqs-border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.12s ease;
+}
+
+.lqs-tag-chip.selected {
+  background: #3b82f626;
+  color: #93c5fd;
+  border-color: #3b82f6;
+  font-weight: 600;
+}
+
+/* Поле отзыва */
+.lqs-note-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--lqs-card);
+  color: var(--lqs-text);
+  border: 1px solid var(--lqs-border);
+  border-radius: 12px;
+  padding: 9px 12px;
+  font-size: 13px;
+  resize: vertical;
+  min-height: 54px;
+  margin-bottom: 10px;
+  font-family: inherit;
+}
+
+.lqs-note-input:focus {
+  outline: none;
+  border-color: var(--lqs-gold);
+}
+
+/* Смарт-аналитика: Цена за кг, БЖУ и радар состава */
+.lqs-smart-box {
+  background: #1f1f23;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 3px solid var(--lqs-gold);
+}
+
+.lqs-smart-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.lqs-flag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.lqs-flag-bad {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.lqs-flag-good {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Оверлей на карточках в каталоге div[data-testid="product-card"] */
+.lqs-card-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 30;
+  padding: 3px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lqs-card-badge.god {
+  background: #14532d;
+  color: #86efac;
+  border: 1px solid #22c55e;
+}
+
+.lqs-card-badge.ok {
+  background: #422006;
+  color: #fde047;
+  border: 1px solid #eab308;
+}
+
+.lqs-card-badge.trash {
+  background: #7f1d1d;
+  color: #fecaca;
+  border: 1px solid #ef4444;
+}
+
+/* Визуальная блокировка плохих товаров в сетке */
+.lqs-card-dimmed {
+  filter: grayscale(85%) opacity(0.52) !important;
+  transition: filter 0.2s ease !important;
+  outline: 2px dashed #ef4444 !important;
+  outline-offset: -2px;
+  border-radius: 16px;
+}
+
+.lqs-card-dimmed:hover {
+  filter: grayscale(20%) opacity(0.95) !important;
+}
+
+.lqs-card-note-preview {
+  position: absolute;
+  bottom: 48px;
+  left: 6px;
+  right: 6px;
+  z-index: 29;
+  background: rgba(24, 24, 27, 0.92);
+  color: #fca5a5;
+  font-size: 10px;
+  line-height: 1.25;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  pointer-events: none;
+  max-height: 36px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Lavka Quality Shield — Личный рейтинг и анти-шлак фильтр",
+  "version": "1.0.0",
+  "description": "Смарт-дополнение для Яндекс Лавки: личные оценки, отзывы, блокировка плохих товаров в каталоге, сканер состава/углеводов и пересчёт цены за кг.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://lavka.yandex.ru/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Lavka Quality Shield — База отзывов"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://lavka.yandex.ru/*"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
