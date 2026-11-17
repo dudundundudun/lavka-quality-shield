@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Минималистичный рейтинг и ИИ-ревизор",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Компактный рейтинг (2 строчки), цена за кг и 100 г белка, спойлер с заметками и ИИ-агрегатор отзывов (FastAPI + Gemini Argon / Cloud AI).",
   "permissions": [
     "storage"
@@ -15,7 +15,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.0"
+    "default_title": "Lavka Quality Shield v2.0.1"
   },
   "content_scripts": [
     {

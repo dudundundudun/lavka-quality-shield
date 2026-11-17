@@ -15,8 +15,8 @@ function loadReviews() {
     const db = res[STORAGE_KEY] || {};
     const items = Object.values(db).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
 
-    const godCount = items.filter((i) => i.rating >= 4 && !i.banned).length;
-    const trashCount = items.filter((i) => i.banned || (i.rating > 0 && i.rating <= 2)).length;
+    const godCount = items.filter((item) => item.rating >= 4 && !item.banned).length;
+    const trashCount = items.filter((item) => item.banned || (item.rating > 0 && item.rating <= 2)).length;
 
     document.getElementById('count-all').textContent = items.length;
     document.getElementById('count-god').textContent = godCount;
@@ -26,7 +26,7 @@ function loadReviews() {
     listEl.innerHTML = '';
 
     const filtered = items.filter((item) => {
-      if (currentFilter === 'god') return item.rating >= 4 && !i.banned;
+      if (currentFilter === 'god') return item.rating >= 4 && !item.banned;
       if (currentFilter === 'trash') return item.banned || (item.rating > 0 && item.rating <= 2);
       return true;
     });

@@ -1,8 +1,8 @@
 /**
- * Lavka Quality Shield v2.0.0 — Content Script
- * - Светлый минимализм в стиле Лавки (ровно 2 компактные строчки + спойлер по клику)
- * - Никаких громоздких баннеров над заголовком товара
- * - Поддержка локального FastAPI (127.0.0.1:8765) + прямого подключения к Gemini 4 Argon (localhost:8083/v1) или облачным ИИ
+ * Lavka Quality Shield v2.0.1 — Content Script
+ * - Исправлена верстка и защита от наследования нулевого line-height/height из CSS Яндекс Лавки
+ * - Аккуратная двухстрочная панель + выпадающий спойлер + кнопка принудительного пересчета ИИ (🔄)
+ * - Поддержка локального FastAPI (127.0.0.1:8765) и прямого подключения к Gemini 4 Argon (localhost:8083/v1)
  */
 
 (function () {
@@ -53,11 +53,22 @@
     if (!urlStr) return null;
     try {
       const u = new URL(urlStr, window.location.origin);
-      const match = u.pathname.match(/\/good\/([^/?#]+)/i);
+      const match = u.pathname.replace(/\/+$/, '').match(/\/good\/([^/?#]+)/i);
       return match ? decodeURIComponent(match[1]).toLowerCase().trim() : null;
     } catch {
       return null;
     }
+  }
+
+  function formatAiTextToHtml(rawText) {
+    if (!rawText) return '';
+    const escaped = String(rawText)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    return escaped
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>');
   }
 
   async function getReviewsDB() {
@@ -252,10 +263,9 @@
       }
     }
 
-    return { pricePerKg, pricePer100gProtein, flags: flags.slice(0, 3) };
+    return { pricePerKg, pricePer100gProtein, flags: flags.slice(0, 4) };
   }
 
-  // Синхронизация компактного 2-строчного UI после F5 / React Hydration
   function syncExistingPanelUI(panel, review, meta) {
     const r = (review && review.rating) ? Number(review.rating) : 0;
     const banned = Boolean(review && review.banned);
@@ -280,11 +290,12 @@
     if (notePill) {
       const summaryText = note.trim() || tags.join(' ');
       if (summaryText) {
-        notePill.style.display = 'inline-block';
+        notePill.classList.remove('is-hidden');
         notePill.textContent = `💬 ${summaryText}`;
         notePill.title = summaryText;
       } else {
-        notePill.style.display = 'none';
+        notePill.classList.add('is-hidden');
+        notePill.textContent = '';
       }
     }
 
@@ -308,21 +319,22 @@
     }
   }
 
-  // Запрос к локальному FastAPI (или напрямую к мосту Gemini 4 Argon :8083)
-  async function requestAiProductReview(meta, panel) {
+  async function requestAiProductReview(meta, panel, forceRefresh = false) {
     const drawer = panel.querySelector('#lqs-drawer');
+    const drawerToggle = panel.querySelector('#lqs-drawer-toggle');
     const aiBox = panel.querySelector('#lqs-ai-box');
     const aiContent = panel.querySelector('#lqs-ai-content');
     const aiSources = panel.querySelector('#lqs-ai-sources');
 
     drawer.classList.add('open');
+    if (drawerToggle) drawerToggle.textContent = '▴ Скрыть';
     aiBox.classList.add('visible');
-    aiContent.textContent = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора...';
+    aiContent.innerHTML = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора...';
     aiSources.innerHTML = '';
 
     const settings = await getSettings();
 
-    // 1. Пробуем локальный FastAPI сервер (который парсит Отзовик/IRecommend/Роскачество + вызывает Gemini 4 Argon / Cloud AI)
+    // 1. Локальный FastAPI сервер (парсинг Отзовик/IRecommend/Роскачество + кэш SQLite)
     try {
       const resp = await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/analyze-product`, {
         method: 'POST',
@@ -337,13 +349,14 @@
           traits: meta.traitsText,
           aiBaseUrl: settings.aiBaseUrl,
           aiApiKey: settings.aiApiKey,
-          aiModel: settings.aiModel
+          aiModel: settings.aiModel,
+          forceRefresh: Boolean(forceRefresh)
         })
       });
 
       if (resp.ok) {
         const data = await resp.json();
-        aiContent.innerHTML = (data.verdict || 'Вердикт получен.').replace(/\n/g, '<br>');
+        aiContent.innerHTML = formatAiTextToHtml(data.verdict || 'Вердикт получен.');
         if (Array.isArray(data.sources) && data.sources.length > 0) {
           aiSources.innerHTML = data.sources
             .map((s) => `<a href="${s.url}" target="_blank" rel="noopener noreferrer">🔗 ${s.title || 'Источник'}</a>`)
@@ -352,10 +365,10 @@
         return;
       }
     } catch {
-      // Если FastAPI не запущен, переходим к прямому вызову Cookie-моста Gemini 4 Argon (localhost:8083/v1)
+      // Переходим к прямому вызову Cookie-моста
     }
 
-    // 2. Прямой фоллбэк к локальному мосту Antigravity/Gemini 4 Argon (http://localhost:8083/v1/chat/completions)
+    // 2. Прямой фоллбэк к локальному мосту Gemini 4 Argon (localhost:8083/v1)
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (settings.aiApiKey) {
@@ -382,15 +395,17 @@
       if (directResp.ok) {
         const json = await directResp.json();
         const reply = json.choices?.[0]?.message?.content || 'Нет ответа от модели.';
-        aiContent.innerHTML = reply.replace(/\n/g, '<br>');
-        aiSources.innerHTML = `<span style="color:#7a7875">⚡ Напрямую через ${settings.aiModel} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
+        aiContent.innerHTML = formatAiTextToHtml(reply);
+        aiSources.innerHTML = `<span style="color:#75736f;font-size:11.5px;">⚡ Напрямую через ${settings.aiModel} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
         return;
       }
     } catch {
       // ignore
     }
 
-    aiContent.innerHTML = `⚠️ Не удалось достучаться до локального FastAPI (<code>${settings.backendUrl}</code>) или моста Gemini Argon (<code>${settings.aiBaseUrl}</code>). Запусти <code>start_server.bat</code> или проверь настройки в иконке расширения!`;
+    aiContent.innerHTML =
+      `⚠️ Не удалось подключиться к локальному серверу <code>${settings.backendUrl}</code> или ИИ-мосту <code>${settings.aiBaseUrl}</code>.<br>` +
+      `Запусти <code>start_server.bat</code> или проверь API Key в настройках иконки расширения.`;
   }
 
   async function renderProductPageWidget() {
@@ -399,7 +414,6 @@
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
     if (!slug || !mainPage) return;
 
-    // Удаляем старый громоздкий баннер над заголовком, если он остался
     const oldVerdictBanner = mainPage.querySelector('.lqs-verdict-banner');
     if (oldVerdictBanner) oldVerdictBanner.remove();
 
@@ -442,17 +456,18 @@
       panel.dataset.slug = slug;
 
       panel.innerHTML = `
-        <!-- Строка 1: Звезды + превью заметки + кнопки ИИ и выпадающего списка -->
         <div class="lqs-compact-row-1">
-          <div class="lqs-stars-inline" id="lqs-stars-box">
-            ${[1, 2, 3, 4, 5].map((n) => `
-              <button type="button" class="lqs-star-btn ${current.rating >= n ? 'active' : ''}" data-star="${n}" title="Оценить на ${n}">★</button>
-            `).join('')}
-          </div>
+          <div class="lqs-left-group">
+            <div class="lqs-stars-inline" id="lqs-stars-box">
+              ${[1, 2, 3, 4, 5].map((n) => `
+                <button type="button" class="lqs-star-btn ${current.rating >= n ? 'active' : ''}" data-star="${n}" title="Оценить на ${n}">★</button>
+              `).join('')}
+            </div>
 
-          <span class="lqs-inline-note-pill" id="lqs-inline-note" style="display:${summaryText ? 'inline-block' : 'none'}" title="${summaryText.replace(/"/g, '&quot;')}">
-            💬 ${summaryText}
-          </span>
+            <span class="lqs-inline-note-pill ${summaryText ? '' : 'is-hidden'}" id="lqs-inline-note" title="${summaryText.replace(/"/g, '&quot;')}">
+              💬 ${summaryText}
+            </span>
+          </div>
 
           <div class="lqs-actions-inline">
             <button type="button" class="lqs-mini-btn ${current.banned ? 'ban-active' : ''}" id="lqs-ban-toggle" title="В чёрный список">
@@ -467,14 +482,12 @@
           </div>
         </div>
 
-        <!-- Строка 2: Цена за 1 кг + цена за 100 г белка + мини-индикаторы состава -->
         <div class="lqs-compact-row-2" id="lqs-row-2">
           <span class="lqs-metric-pill">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/кг` : 'Цена/кг —'}</span>
           ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
           ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
         </div>
 
-        <!-- Выпадающий спойлер (скрыт по умолчанию) -->
         <div class="lqs-drawer" id="lqs-drawer">
           <div class="lqs-tags-row">
             ${PRESET_TAGS.map((tag) => `
@@ -487,14 +500,16 @@
           </div>
           <div class="lqs-ai-box" id="lqs-ai-box">
             <div class="lqs-ai-header">
-              <span>🤖 Сводка отзывов из интернета + анализ состава</span>
+              <span>🤖 Сводка отзывов + разбор состава</span>
+              <button type="button" class="lqs-ai-refresh-btn" id="lqs-ai-refresh" title="Принудительно обновить ИИ-обзор">🔄 Обновить</button>
             </div>
-            <div id="lqs-ai-content"></div>
+            <div class="lqs-ai-content" id="lqs-ai-content"></div>
             <div class="lqs-ai-sources" id="lqs-ai-sources"></div>
           </div>
         </div>
       `;
 
+      // Вставляем строго как соседний блок после bar-container (снаружи его внутренности), чтобы не ловить чужой flex/grid
       const barContainer = infoBlock.querySelector('div[data-testid="bar-container"]');
       if (barContainer && barContainer.parentNode) {
         barContainer.parentNode.insertBefore(panel, barContainer.nextSibling);
@@ -560,7 +575,14 @@
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel);
+        requestAiProductReview(latestMeta, panel, false);
+      });
+
+      panel.querySelector('#lqs-ai-refresh').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const latestMeta = extractProductPageMetadata();
+        requestAiProductReview(latestMeta, panel, true);
       });
 
       panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
@@ -635,13 +657,14 @@
     const slug = linkEl ? extractSlugFromUrl(linkEl.getAttribute('href')) : null;
 
     let productId = null;
-    const idHolder = card.closest('[data-testid^="product-id-"]') || card.querySelector('[data-testid^="product-id-"]');
+    const idHolder = card.closest('[data-testid^="product-id-"], [data-testid^="cart_item_"]') ||
+                     card.querySelector('[data-testid^="product-id-"], [data-testid^="cart_item_"]');
     if (idHolder) {
       const tid = idHolder.getAttribute('data-testid') || '';
-      productId = tid.replace(/^product-id-/, '').trim() || null;
+      productId = tid.replace(/^(product-id-|cart_item_)/, '').trim() || null;
     }
 
-    const imgEl = card.querySelector('img[data-testid="product-snippet-thumb-image"], img');
+    const imgEl = card.querySelector('img[data-testid="product-snippet-thumb-image"], img[data-testid="snippet-image"], img');
     const imageKey = imgEl ? extractImageKey(imgEl.getAttribute('src')) : null;
     const imgAlt = imgEl ? imgEl.getAttribute('alt') : '';
     const cleanTitle = normalizeTitle(imgAlt);
@@ -702,7 +725,7 @@
   }
 
   function runHydrationResyncWave() {
-    [100, 400, 900, 1800].forEach((delay) => {
+    [0, 150, 400, 900, 1800, 3000].forEach((delay) => {
       setTimeout(() => {
         renderProductPageWidget();
         decorateCatalogCards();
