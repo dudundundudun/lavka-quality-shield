@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lavka Quality Shield — Минималистичный рейтинг и ИИ-ревизор",
-  "version": "2.0.3",
-  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), мгновенный спойлер без DOM-фризов, встроенная диагностика и ИИ-агрегатор отзывов.",
+  "name": "Lavka Quality Shield — Рейтинг, КБЖУ-радар и ИИ-ревизор",
+  "version": "2.1.0",
+  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), анти-мусор фильтр каталога, ИИ-агрегатор отзывов и бортовой журнал для ИИ-дебаггинга.",
   "permissions": [
     "storage",
     "tabs"
@@ -16,7 +16,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.0.3"
+    "default_title": "Lavka Quality Shield v2.1.0"
   },
   "content_scripts": [
     {

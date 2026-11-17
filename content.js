@@ -1,26 +1,31 @@
 /**
- * Lavka Quality Shield v2.0.3 — Content Script (Zero-Thrash & Built-in Diagnostics)
- * Что исправлено в v2.0.3:
- * 1. Устранён бесконечный цикл MutationObserver (каждые 140 мс):
- *    - Мутации внутри собственных элементов расширения (.lqs-*) полностью игнорируются наблюдателем.
- *    - Кнопка «▾ Подробнее» больше НЕ перезаписывает свой innerHTML при фоновых синхронизациях,
- *      благодаря чему дочерний <span> не уничтожается между mousedown и mouseup (клики срабатывают с 1-го раза 100% времени).
- *    - Все дочерние элементы внутри кнопок получили pointer-events: none !important.
- *    - Метрики, флаги и бейджи каталога обновляются только при реальном изменении данных (проверка хеша состояния).
- * 2. Сохранение состояния открытого спойлера (drawerOpenBySlug) даже при полном пересоздании DOM-контейнера React-ом Лавки.
- * 3. Встроенная система диагностики и телеметрии (LQS Diagnostics):
- *    - Отслеживает мутации DOM, сэкономленные перезаписи, задержку кликов (pointerdown -> click), осиротевшие клики,
- *      найденные селекторы Лавки и статус связи с FastAPI (:8765) и Gemini Argon (:8083).
- *    - Открывается кнопкой «🩺 Диаг.» внутри спойлера, хоткеем Alt+Shift+D или из popup-окна расширения.
+ * Lavka Quality Shield v2.1.0 — Content Script
+ * Архитектура v2.1.0:
+ * 1. Чистый интерфейс на странице Лавки: кнопка и панель диагностики полностью убраны из DOM страницы
+ *    и перенесены в «⚙️ Настройки -> 🛠️ Бортовой журнал для ИИ» внутри popup-окна расширения.
+ * 2. Бортовой самописец (LQS Flight Recorder):
+ *    - Пошагово логирует работу каждого из 8 функциональных модулей расширения (Router, Parser, Calculator,
+ *      Widget UI, Catalog Decorator, Cart Guard, Storage DB, AI Reviewer) с входными/выходными данными.
+ *    - Сохраняет кольцевой буфер событий (до 120 записей) в chrome.storage.local между перезагрузками страниц.
+ *    - При отсутствии любого DOM-селектора Лавки автоматически собирает карту актуальных data-testid на странице,
+ *      чтобы при отправке лога в ИИ нейросеть сразу видела изменения вёрстки Яндекса и давала готовый фикс.
+ * 3. Исправления по результатам аудита кода:
+ *    - Исправлен баг регулярки КБЖУ, из-за которого при вёрстке «250 ккал \n белки 12 г» число калорий (250)
+ *      захватывалось как количество белка. Добавлен построчный/поблочный парсер КБЖУ.
+ *    - Добавлена поддержка мультипаков («2 × 150 г», «3 x 80 г») при расчёте честной цены за 1 кг/л.
+ *    - Добавлен in-memory кэш базы отзывов (reviewsDbCache): скролл каталога больше не дёргает асинхронный
+ *      chrome.storage.local.get каждые 120 мс.
+ *    - Добавлен детектор SPA-навигации (pushState/replaceState), отслеживающий переходы между товарами и каталогом.
+ *    - Добавлено экранирование HTML (защита от XSS) при рендере источников ИИ и быстрая кнопка «🗑️ Сброс» в спойлере.
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.0.3';
+  const VERSION = '2.1.0';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
-  const DIAG_STORAGE_KEY = 'lqs_diag_snapshot_v1';
+  const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
 
   const DEFAULT_SETTINGS = {
     backendUrl: 'http://127.0.0.1:8765',
@@ -43,17 +48,31 @@
   // Память открытых спойлеров по slug товара, чтобы React-ререндер Лавки не захлопывал меню
   const drawerOpenBySlug = new Map();
 
+  // Синхронный кэш базы отзывов в памяти для мгновенной отрисовки каталога без лишних обращений к chrome.storage
+  let reviewsDbCache = null;
   let isRenderingProduct = false;
   let pendingProductRender = false;
   let currentReviewCache = null;
+  let lastObservedUrl = window.location.href;
+
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
 
   // ==========================================================================
-  // ВСТРОЕННАЯ СИСТЕМА ДИАГНОСТИКИ И ТЕЛЕМЕТРИИ (LQS_DIAG)
+  // БОРТОВОЙ САМОПИСЕЦ (LQS FLIGHT RECORDER) — ЛОГ ДЛЯ ДЕБАГГИНГА ЧЕРЕЗ ИИ
   // ==========================================================================
-  const LQS_DIAG = {
+  const LQS_RECORDER = {
     version: VERSION,
-    startedAt: new Date().toISOString(),
+    sessionStartedAt: new Date().toISOString(),
     counters: {
+      spaTransitions: 0,
       extMutations: 0,
       selfMutationsIgnored: 0,
       scheduleCalls: 0,
@@ -66,44 +85,104 @@
       catalogBadgesSkipped: 0,
       clicksTotal: 0,
       drawerToggles: 0,
-      missedClicks: 0,
+      missedClicksRecovered: 0,
       errors: 0
     },
     lastClickLatencyMs: null,
-    lastAiCall: {
-      time: null,
-      mode: 'none',
-      status: 'idle',
-      latencyMs: null,
-      error: null
+    // Состояние каждого из 8 ключевых модулей расширения
+    modules: {
+      router: { status: 'INIT', lastRun: null, summary: 'Ожидание инициализации роутера' },
+      parser: { status: 'IDLE', lastRun: null, summary: 'Страница товара ещё не открывалась', data: null },
+      calculator: { status: 'IDLE', lastRun: null, summary: 'Расчёт КБЖУ и цены ещё не выполнялся', data: null },
+      widget: { status: 'IDLE', lastRun: null, summary: 'Виджет не смонтирован' },
+      catalog: { status: 'IDLE', lastRun: null, summary: 'Каталог ещё не сканировался' },
+      cartGuard: { status: 'IDLE', lastRun: null, summary: 'Перехватчик корзины в режиме ожидания' },
+      storage: { status: 'INIT', lastRun: null, summary: 'Загрузка базы отзывов...' },
+      aiReviewer: { status: 'IDLE', lastRun: null, summary: 'Запросы к ИИ в этой сессии не выполнялись', lastCall: null }
     },
-    lastDomAudit: {},
-    logs: [],
+    events: [],
+    _initialized: false,
+    _saveTimer: null,
 
-    log(type, msg, extra = null) {
+    init() {
+      if (this._initialized) return;
+      this._initialized = true;
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
+          const saved = res && res[FLIGHT_LOG_KEY];
+          if (saved && Array.isArray(saved.events)) {
+            // Сохраняем историю предыдущих событий и добавляем в начало новые
+            const combined = [...this.events, ...saved.events];
+            this.events = combined.slice(0, 120);
+          }
+          this.record('INIT', 'Session started on ' + window.location.pathname, {
+            ua: navigator.userAgent.slice(0, 90),
+            viewport: `${window.innerWidth}x${window.innerHeight}`
+          });
+        });
+      }
+    },
+
+    updateModule(moduleName, status, summary, data = undefined) {
+      if (!this.modules[moduleName]) return;
       const now = new Date();
       const ts = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
-      const entry = {
-        ts,
-        type,
-        msg,
-        extra: extra ? (typeof extra === 'string' ? extra : JSON.stringify(extra)) : ''
-      };
-      this.logs.unshift(entry);
-      if (this.logs.length > 45) {
-        this.logs.length = 45;
+      this.modules[moduleName].status = status;
+      this.modules[moduleName].lastRun = ts;
+      this.modules[moduleName].summary = summary;
+      if (data !== undefined) {
+        this.modules[moduleName].data = data;
       }
-      this.refreshDiagnosticBoxUI();
-      this.persistSnapshotThrottled();
+      this.persistThrottled();
     },
 
-    error(where, err) {
+    record(category, message, payload = null) {
+      const now = new Date();
+      const ts = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+      let cleanPayload = '';
+      if (payload !== null && payload !== undefined) {
+        if (typeof payload === 'string') {
+          cleanPayload = payload;
+        } else {
+          try {
+            cleanPayload = JSON.stringify(payload);
+          } catch {
+            cleanPayload = String(payload);
+          }
+        }
+      }
+      if (cleanPayload.length > 360) {
+        cleanPayload = cleanPayload.slice(0, 360) + '…';
+      }
+
+      this.events.unshift({
+        ts,
+        url: window.location.pathname,
+        cat: category,
+        msg: message,
+        data: cleanPayload
+      });
+
+      if (this.events.length > 120) {
+        this.events.length = 120;
+      }
+      this.persistThrottled();
+    },
+
+    error(where, err, extraContext = null) {
       this.counters.errors += 1;
-      const errMsg = err && err.message ? err.message : String(err);
-      this.log('ERROR', `[${where}] ${errMsg}`);
+      const errMsg = err && err.stack ? err.stack.split('\n').slice(0, 2).join(' | ') : (err && err.message ? err.message : String(err));
+      this.record('ERROR', `[${where}] ${errMsg}`, extraContext);
     },
 
-    auditCurrentPageSelectors() {
+    clearLogs() {
+      this.events = [];
+      this.counters.errors = 0;
+      this.record('INIT', 'Лог очищен пользователем вручную');
+      this.persistNow();
+    },
+
+    auditDomSelectors() {
       const slug = extractSlugFromUrl(window.location.href);
       const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
       const infoBlock = mainPage
@@ -115,14 +194,31 @@
       const amountEl = document.querySelector('span[data-testid="product-amount"]');
       const ingredientsEl = document.querySelector('section[data-testid="ingredients-block"]');
       const traitsEl = document.querySelector('section[data-testid="traits-block"]');
+      const addBtnEl = document.querySelector('main[data-testid="good-page-desktop"] button[data-testid="snippet-control"]');
       const panelEl = document.querySelector('.lqs-product-panel');
       const drawerEl = panelEl ? panelEl.querySelector('#lqs-drawer') : null;
       const catalogCardsCount = document.querySelectorAll('div[data-testid="product-card"]').length;
 
-      this.lastDomAudit = {
+      // Если мы на странице товара, но какой-то из ключевых селекторов не найден —
+      // собираем список реальных data-testid на странице для подсказки ИИ!
+      let discoveredTestIds = [];
+      if (slug && (!mainPage || !infoBlock || !titleEl || !priceEl)) {
+        const allTestIdNodes = document.querySelectorAll('[data-testid]');
+        const set = new Set();
+        allTestIdNodes.forEach((n) => {
+          const tid = n.getAttribute('data-testid');
+          if (tid && !tid.startsWith('product-id-') && set.size < 35) {
+            set.add(`${n.tagName.toLowerCase()}[data-testid="${tid}"]`);
+          }
+        });
+        discoveredTestIds = Array.from(set);
+      }
+
+      return {
         url: window.location.href,
+        pathname: window.location.pathname,
         slug: slug || null,
-        isProductPage: Boolean(slug && mainPage),
+        pageType: slug ? 'PRODUCT_PAGE' : 'CATALOG_OR_HOME',
         selectors: {
           mainPage: Boolean(mainPage),
           infoBlock: Boolean(infoBlock),
@@ -132,110 +228,146 @@
           amountEl: Boolean(amountEl),
           ingredientsEl: Boolean(ingredientsEl),
           traitsEl: Boolean(traitsEl),
+          addBtnEl: Boolean(addBtnEl),
           panelMounted: Boolean(panelEl),
           drawerOpen: Boolean(drawerEl && drawerEl.classList.contains('open'))
         },
-        catalogCardsCount
+        catalogCardsCount,
+        discoveredTestIds
       };
-      return this.lastDomAudit;
     },
 
-    buildTextReport() {
-      const audit = this.auditCurrentPageSelectors();
+    buildAiDebugReport(backendDiag = null) {
+      const dom = this.auditDomSelectors();
+      const s = dom.selectors;
       const c = this.counters;
-      const s = audit.selectors || {};
-      const flag = (v) => (v ? 'OK' : 'MISS');
+      const m = this.modules;
+      const flag = (v) => (v ? '✅ OK' : '❌ MISS');
 
       const lines = [
-        `=== LAVKA QUALITY SHIELD v${this.version} DIAGNOSTIC REPORT ===`,
-        `Time: ${new Date().toISOString()}`,
-        `URL: ${audit.url}`,
-        `Slug: ${audit.slug || 'N/A (каталог)'} | Карточек в каталоге: ${audit.catalogCardsCount}`,
+        `# 🛠️ LAVKA QUALITY SHIELD v${this.version} — AI DIAGNOSTIC & FLIGHT RECORDER LOG`,
+        `> **Инструкция для ИИ-ассистента**: Ниже представлена полная телеметрия работы расширения Lavka Quality Shield (Manifest V3) на сайте Яндекс Лавки. Изучи матрицу состояния всех 8 функций, распарсенные метаданные, аудит селекторов DOM и хронологический стек событий, чтобы точно локализовать любую проблему.`,
         ``,
-        `[DOM SELECTORS AUDIT]`,
-        `mainPage: ${flag(s.mainPage)} | infoBlock: ${flag(s.infoBlock)} | barContainer: ${flag(s.barContainer)}`,
-        `title: ${flag(s.titleEl)} | price: ${flag(s.priceEl)} | amount: ${flag(s.amountEl)} | ingredients: ${flag(s.ingredientsEl)} | traits: ${flag(s.traitsEl)}`,
-        `panelMounted: ${flag(s.panelMounted)} | drawerOpen: ${s.drawerOpen ? 'OPEN' : 'CLOSED'}`,
+        `## 1. СВОДКА ОКРУЖЕНИЯ И СТРАНИЦЫ`,
+        `- **Timestamp**: ${new Date().toISOString()} (сессия с ${this.sessionStartedAt})`,
+        `- **URL**: ${dom.url}`,
+        `- **Тип страницы**: ${dom.pageType} (Slug: \`${dom.slug || 'нет'}\`, Карточек в каталоге: ${dom.catalogCardsCount})`,
+        `- **База отзывов в памяти**: ${reviewsDbCache ? Object.keys(reviewsDbCache).length : 0} записей`,
         ``,
-        `[TELEMETRY & ANTI-LOOP COUNTERS]`,
-        `Panel Mounts: ${c.panelMounts} | Panel Syncs: ${c.panelSyncs}`,
-        `DOM Writes Executed: ${c.domWritesExecuted} | DOM Writes Skipped (cached): ${c.domWritesSkipped}`,
-        `Observer External Mutations: ${c.extMutations} | Self-Mutations Ignored: ${c.selfMutationsIgnored}`,
-        `Catalog Passes: ${c.catalogPasses} (Updated: ${c.catalogBadgesUpdated}, Skipped: ${c.catalogBadgesSkipped})`,
-        `Clicks Total: ${c.clicksTotal} | Drawer Toggles: ${c.drawerToggles} | Missed Clicks: ${c.missedClicks} | Last Click Latency: ${this.lastClickLatencyMs !== null ? this.lastClickLatencyMs + 'ms' : 'N/A'}`,
-        `Errors: ${c.errors}`,
-        ``,
-        `[AI & BACKEND STATUS]`,
-        `Last Call: ${this.lastAiCall.time || 'never'} | Mode: ${this.lastAiCall.mode} | Status: ${this.lastAiCall.status} | Latency: ${this.lastAiCall.latencyMs ? this.lastAiCall.latencyMs + 'ms' : 'N/A'}`,
-        this.lastAiCall.error ? `Last AI Error: ${this.lastAiCall.error}` : `Last AI Error: none`,
-        ``,
-        `[RECENT EVENT LOG (latest 20)]`,
-        ...this.logs.slice(0, 20).map((l) => `${l.ts} [${l.type}] ${l.msg}${l.extra ? ' -> ' + l.extra : ''}`)
+        `## 2. МАТРИЦА ФУНКЦИОНИРОВАНИЯ МОДУЛЕЙ (FUNCTION HEALTH MATRIX)`,
+        `1. **[ROUTER] SPA-навигация и гидратация**: \`${m.router.status}\` (${m.router.lastRun || '—'}) — ${m.router.summary}`,
+        `2. **[PARSER] Парсер метаданных и JSON-LD**: \`${m.parser.status}\` (${m.parser.lastRun || '—'}) — ${m.parser.summary}`,
+        `3. **[CALCULATOR] Расчёт цены/кг, белка и КБЖУ**: \`${m.calculator.status}\` (${m.calculator.lastRun || '—'}) — ${m.calculator.summary}`,
+        `4. **[WIDGET] Панель товара и спойлер**: \`${m.widget.status}\` (${m.widget.lastRun || '—'}) — ${m.widget.summary}`,
+        `5. **[CATALOG] Разметка карточек каталога**: \`${m.catalog.status}\` (${m.catalog.lastRun || '—'}) — ${m.catalog.summary}`,
+        `6. **[CART_GUARD] Защита от покупки бана**: \`${m.cartGuard.status}\` (${m.cartGuard.lastRun || '—'}) — ${m.cartGuard.summary}`,
+        `7. **[STORAGE] Хранилище chrome.storage.local**: \`${m.storage.status}\` (${m.storage.lastRun || '—'}) — ${m.storage.summary}`,
+        `8. **[AI_REVIEWER] Локальный сервер :8765 и ИИ :8083**: \`${m.aiReviewer.status}\` (${m.aiReviewer.lastRun || '—'}) — ${m.aiReviewer.summary}`
       ];
+
+      if (backendDiag) {
+        lines.push(`   - **Пинг серверов из Popup**: ${backendDiag}`);
+      }
+
+      lines.push(
+        ``,
+        `## 3. АУДИТ DOM-СЕЛЕКТОРОВ ЯНДЕКС ЛАВКИ`,
+        `- \`main[data-testid="good-page-desktop"]\`: ${flag(s.mainPage)}`,
+        `- \`div[data-testid="product-info" | "product-card-header"]\`: ${flag(s.infoBlock)}`,
+        `- \`div[data-testid="bar-container"]\`: ${flag(s.barContainer)}`,
+        `- \`h1[data-testid="product-title"]\`: ${flag(s.titleEl)}`,
+        `- \`span[data-testid="price-text"]\`: ${flag(s.priceEl)}`,
+        `- \`span[data-testid="product-amount"]\`: ${flag(s.amountEl)}`,
+        `- \`section[data-testid="ingredients-block"]\`: ${flag(s.ingredientsEl)}`,
+        `- \`section[data-testid="traits-block"]\`: ${flag(s.traitsEl)}`,
+        `- \`button[data-testid="snippet-control"]\`: ${flag(s.addBtnEl)}`,
+        `- **Статус нашего виджета (.lqs-product-panel)**: ${s.panelMounted ? '✅ Смонтирован' : '⚪ Не смонтирован'} (Спойлер: ${s.drawerOpen ? 'ОТКРЫТ' : 'ЗАКРЫТ'})`
+      );
+
+      if (dom.discoveredTestIds && dom.discoveredTestIds.length > 0) {
+        lines.push(
+          `- **⚠️ ВНИМАНИЕ (Подсказка для ИИ — обнаруженные data-testid на странице)**:`,
+          `  \`${dom.discoveredTestIds.join('`, `')}\``
+        );
+      }
+
+      if (m.parser.data) {
+        const pd = m.parser.data;
+        lines.push(
+          ``,
+          `## 4. ПОСЛЕДНИЕ РАСПАРСЕННЫЕ ДАННЫЕ ТОВАРА (PARSER & CALCULATOR DUMP)`,
+          `- **Title**: "${pd.title || ''}" (clean: "${pd.cleanTitle || ''}")`,
+          `- **Цена / Старая цена / Вес**: ${pd.price ?? 'null'} ₽ / ${pd.oldPrice ?? 'null'} ₽ / "${pd.amountText || ''}"`,
+          `- **ProductId / ImageKey / Brand**: \`${pd.productId || 'null'}\` / \`${pd.imageKey || 'null'}\` / "${pd.brand || ''}"`,
+          `- **Текст КБЖУ (traitsText)**: "${(pd.traitsText || '').replace(/\s+/g, ' ').slice(0, 180)}"`,
+          `- **Текст состава (ingredientsText)**: "${(pd.ingredientsText || '').replace(/\s+/g, ' ').slice(0, 220)}"`
+        );
+      }
+
+      if (m.calculator.data) {
+        const cd = m.calculator.data;
+        lines.push(
+          `- **Результат калькулятора**: Вес=${cd.weightGrams ?? 'null'}г (${cd.unitLabel}), Цена/кг=${cd.pricePerKg ?? 'null'}₽, Белки=${cd.proteinPer100g ?? 'null'}г, Жиры=${cd.fatPer100g ?? 'null'}г, Угли=${cd.carbsPer100g ?? 'null'}г, Ккал=${cd.kcalPer100g ?? 'null'}, Цена/100г белка=${cd.pricePer100gProtein ?? 'null'}₽`,
+          `- **Флаги состава**: ${cd.flags && cd.flags.length ? cd.flags.map((f) => `[${f.type.toUpperCase()}] ${f.text}`).join(', ') : 'нет'}`
+        );
+      }
+
+      lines.push(
+        ``,
+        `## 5. СЧЁТЧИКИ ПРОИЗВОДИТЕЛЬНОСТИ И СТАБИЛЬНОСТИ DOM`,
+        `- **SPA переходов**: ${c.spaTransitions} | **Маунтов панели**: ${c.panelMounts} | **Синхронизаций UI**: ${c.panelSyncs}`,
+        `- **Записей в DOM выполнено**: ${c.domWritesExecuted} | **Пропущено дублей (кэш хеша)**: ${c.domWritesSkipped}`,
+        `- **Мутаций Лавки обработано**: ${c.extMutations} | **Собственных мутаций .lqs-* отсечено**: ${c.selfMutationsIgnored}`,
+        `- **Проходов каталога**: ${c.catalogPasses} (обновлено бейджей: ${c.catalogBadgesUpdated}, пропущено без изменений: ${c.catalogBadgesSkipped})`,
+        `- **Кликов по виджету**: ${c.clicksTotal} | **Переключений спойлера**: ${c.drawerToggles} | **Задержка клика**: ${this.lastClickLatencyMs !== null ? this.lastClickLatencyMs + ' мс' : '—'} | **Авто-восстановлений сорванных кликов**: ${c.missedClicksRecovered}`,
+        `- **Перехвачено ошибок (Errors)**: ${c.errors}`,
+        ``,
+        `## 6. ХРОНОЛОГИЧЕСКИЙ БОРТОВОЙ ЖУРНАЛ (ПОСЛЕДНИЕ ${Math.min(this.events.length, 60)} СОБЫТИЙ)`,
+        ...(this.events.slice(0, 60).map((e) => `${e.ts} [${e.cat}] (${e.url}) ${e.msg}${e.data ? ' -> ' + e.data : ''}`))
+      );
+
       return lines.join('\n');
     },
 
-    refreshDiagnosticBoxUI() {
-      const box = document.querySelector('#lqs-diag-box');
-      if (!box || !box.classList.contains('visible')) return;
-
-      const audit = this.auditCurrentPageSelectors();
-      const s = audit.selectors || {};
-      const c = this.counters;
-
-      const metricsEl = box.querySelector('#lqs-diag-metrics');
-      if (metricsEl) {
-        const badge = (ok, label) =>
-          `<span class="lqs-diag-pill ${ok ? 'ok' : 'warn'}">${ok ? '✅' : '⚠️'} ${label}</span>`;
-
-        metricsEl.innerHTML = `
-          <div class="lqs-diag-pills-row">
-            ${badge(s.mainPage && s.infoBlock, 'DOM Лавки')}
-            ${badge(s.titleEl && s.priceEl, 'Цена/Название')}
-            ${badge(s.amountEl, 'Вес')}
-            ${badge(s.ingredientsEl, 'Состав')}
-            ${badge(s.traitsEl, 'КБЖУ')}
-            ${badge(c.missedClicks === 0 && c.errors === 0, `Ошибок: ${c.errors}, Потерь клика: ${c.missedClicks}`)}
-          </div>
-          <div class="lqs-diag-stats-grid">
-            <div><b>Маунтов панели:</b> ${c.panelMounts} (синков: ${c.panelSyncs})</div>
-            <div><b>Записей в DOM:</b> ${c.domWritesExecuted} (пропущено дублей: ${c.domWritesSkipped})</div>
-            <div><b>Мутаций Лавки:</b> ${c.extMutations} (отсечено своих: ${c.selfMutationsIgnored})</div>
-            <div><b>Кликов / Спойлер:</b> ${c.clicksTotal} / ${c.drawerToggles} (${this.lastClickLatencyMs !== null ? this.lastClickLatencyMs + ' мс' : '—'})</div>
-          </div>
-        `;
-      }
-
-      const logEl = box.querySelector('#lqs-diag-log');
-      if (logEl) {
-        logEl.textContent = this.logs
-          .slice(0, 15)
-          .map((l) => `${l.ts} [${l.type}] ${l.msg}${l.extra ? ' ' + l.extra : ''}`)
-          .join('\n') || 'Лог пуст';
+    persistNow() {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        const payload = {
+          updatedAt: new Date().toISOString(),
+          version: this.version,
+          counters: this.counters,
+          modules: this.modules,
+          events: this.events.slice(0, 120),
+          reportText: this.buildAiDebugReport()
+        };
+        chrome.storage.local.set({ [FLIGHT_LOG_KEY]: payload });
       }
     },
 
-    _saveTimer: null,
-    persistSnapshotThrottled() {
+    persistThrottled() {
       if (this._saveTimer) return;
       this._saveTimer = setTimeout(() => {
         this._saveTimer = null;
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          const snapshot = {
-            updatedAt: new Date().toISOString(),
-            counters: this.counters,
-            lastClickLatencyMs: this.lastClickLatencyMs,
-            lastAiCall: this.lastAiCall,
-            lastDomAudit: this.auditCurrentPageSelectors(),
-            reportText: this.buildTextReport()
-          };
-          chrome.storage.local.set({ [DIAG_STORAGE_KEY]: snapshot });
-        }
-      }, 600);
+        this.persistNow();
+      }, 500);
     }
   };
 
-  // Перехватчик «осиротевших» кликов (если pointerdown на кнопке LQS был, а click за 400 мс не произошёл)
+  LQS_RECORDER.init();
+
+  // Перехват глобальных ошибок и необработанных промисов внутри content script
+  window.addEventListener('error', (ev) => {
+    if (ev && ev.error) {
+      LQS_RECORDER.error('window.onerror', ev.error);
+    }
+  });
+
+  window.addEventListener('unhandledrejection', (ev) => {
+    if (ev && ev.reason) {
+      LQS_RECORDER.error('unhandledrejection', ev.reason);
+    }
+  });
+
+  // Защита от сорванных кликов (если React Лавки перебил pointerdown -> click на кнопке спойлера)
   let pendingPointerDown = null;
   document.addEventListener('pointerdown', (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
@@ -246,9 +378,8 @@
       clearTimeout(pendingPointerDown.timer);
     }
     const timer = setTimeout(() => {
-      LQS_DIAG.counters.missedClicks += 1;
-      LQS_DIAG.log('WARN', `Потерян click после pointerdown на [${role}]! Выполняю авто-восстановление.`);
-      // Если по какой-то внешней причине Лавка перебила нативный click на кнопке спойлера — дожимаем программно:
+      LQS_RECORDER.counters.missedClicksRecovered += 1;
+      LQS_RECORDER.record('WIDGET', `Orphaned pointerdown on [${role}], running click recovery`);
       if (btn.id === 'lqs-drawer-toggle') {
         toggleDrawerState(btn.closest('.lqs-product-panel'), 'auto-recovery');
       }
@@ -260,64 +391,65 @@
   document.addEventListener('click', (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
     if (!btn) return;
-    LQS_DIAG.counters.clicksTotal += 1;
+    LQS_RECORDER.counters.clicksTotal += 1;
     if (pendingPointerDown) {
       clearTimeout(pendingPointerDown.timer);
       const dt = Math.round(performance.now() - pendingPointerDown.t0);
-      LQS_DIAG.lastClickLatencyMs = dt;
+      LQS_RECORDER.lastClickLatencyMs = dt;
       pendingPointerDown = null;
     }
   }, true);
 
-  // Горячая клавиша Alt + Shift + D для быстрого открытия диагностики
+  // Скрытый хоткей Alt + Shift + D — тихо копирует полный ИИ-отчёт в буфер обмена без засорения страницы
   window.addEventListener('keydown', (e) => {
     if (e.altKey && e.shiftKey && (e.code === 'KeyD' || e.key === 'D' || e.key === 'd' || e.key === 'в' || e.key === 'В')) {
       e.preventDefault();
-      const panel = document.querySelector('.lqs-product-panel');
-      if (panel) {
-        const drawer = panel.querySelector('#lqs-drawer');
-        if (drawer && !drawer.classList.contains('open')) {
-          toggleDrawerState(panel, 'hotkey-AltShiftD');
-        }
-        toggleDiagnosticsPanel(panel);
-      } else {
-        const report = LQS_DIAG.buildTextReport();
-        navigator.clipboard.writeText(report).catch(() => {});
-        alert('🩺 Lavka Quality Shield v' + VERSION + '\nДиагностический отчёт скопирован в буфер обмена!\n\n' + report.slice(0, 600));
-      }
+      LQS_RECORDER.record('USER_ACTION', 'Triggered Alt+Shift+D AI log copy');
+      const report = LQS_RECORDER.buildAiDebugReport();
+      navigator.clipboard.writeText(report).catch(() => {});
     }
   });
 
-  // Ответ на запросы из popup.js (живой пинг вкладки)
+  // Обработка запросов из popup.js (получение живого ИИ-лога и очистка буфера)
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-      if (msg && msg.type === 'LQS_GET_DIAGNOSTICS') {
+      if (!msg) return false;
+      if (msg.type === 'LQS_GET_DIAGNOSTICS') {
         sendResponse({
           ok: true,
-          reportText: LQS_DIAG.buildTextReport(),
-          counters: LQS_DIAG.counters,
-          audit: LQS_DIAG.auditCurrentPageSelectors(),
-          lastAiCall: LQS_DIAG.lastAiCall
+          reportText: LQS_RECORDER.buildAiDebugReport(msg.backendDiag || null),
+          counters: LQS_RECORDER.counters,
+          modules: LQS_RECORDER.modules,
+          audit: LQS_RECORDER.auditDomSelectors()
         });
         return true;
       }
+      if (msg.type === 'LQS_CLEAR_DIAGNOSTICS') {
+        LQS_RECORDER.clearLogs();
+        sendResponse({
+          ok: true,
+          reportText: LQS_RECORDER.buildAiDebugReport()
+        });
+        return true;
+      }
+      return false;
     });
   }
 
   // ==========================================================================
-  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ
+  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ (С IN-MEMORY КЭШИРОВАНИЕМ)
   // ==========================================================================
   function setHtmlIfChanged(el, nextHtml, tagKey = '') {
     if (!el) return false;
     if (el.dataset.lqsHtmlCache === nextHtml) {
-      LQS_DIAG.counters.domWritesSkipped += 1;
+      LQS_RECORDER.counters.domWritesSkipped += 1;
       return false;
     }
     el.dataset.lqsHtmlCache = nextHtml;
     el.innerHTML = nextHtml;
-    LQS_DIAG.counters.domWritesExecuted += 1;
+    LQS_RECORDER.counters.domWritesExecuted += 1;
     if (tagKey) {
-      LQS_DIAG.log('DOM_WRITE', `Updated ${tagKey}`);
+      LQS_RECORDER.record('WIDGET', `DOM write executed for ${tagKey}`);
     }
     return true;
   }
@@ -353,27 +485,31 @@
 
   function formatAiTextToHtml(rawText) {
     if (!rawText) return '';
-    const escaped = String(rawText)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    const escaped = escapeHtml(rawText);
     return escaped
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\n/g, '<br>');
   }
 
-  async function getReviewsDB() {
+  async function getReviewsDB(forceReload = false) {
+    if (reviewsDbCache && !forceReload) {
+      return reviewsDbCache;
+    }
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
         chrome.storage.local.get([STORAGE_KEY], (res) => {
-          resolve((res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : {});
+          reviewsDbCache = (res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : {};
+          const count = Object.keys(reviewsDbCache).length;
+          LQS_RECORDER.updateModule('storage', 'OK', `База загружена в память (${count} товаров)`);
+          resolve(reviewsDbCache);
         });
       } else {
         try {
-          resolve(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'));
+          reviewsDbCache = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
         } catch {
-          resolve({});
+          reviewsDbCache = {};
         }
+        resolve(reviewsDbCache);
       }
     });
   }
@@ -393,27 +529,47 @@
   function findReviewInDB(db, keys) {
     if (!db) return null;
     const { slug, productId, imageKey, cleanTitle } = keys;
-    if (slug && db[slug]) return db[slug];
+    if (slug && db[slug]) {
+      return { item: db[slug], matchedBy: 'slug_exact' };
+    }
 
     for (const item of Object.values(db)) {
       if (!item) continue;
-      if (slug && item.slug && item.slug.toLowerCase() === slug) return item;
-      if (productId && item.productId && item.productId === productId) return item;
-      if (imageKey && item.imageKey && item.imageKey === imageKey) return item;
-      if (cleanTitle && item.cleanTitle && item.cleanTitle === cleanTitle) return item;
+      if (slug && item.slug && item.slug.toLowerCase() === slug) return { item, matchedBy: 'slug_case' };
+      if (productId && item.productId && item.productId === productId) return { item, matchedBy: 'productId' };
+      if (imageKey && item.imageKey && item.imageKey === imageKey) return { item, matchedBy: 'imageKey' };
+      if (cleanTitle && item.cleanTitle && item.cleanTitle === cleanTitle) return { item, matchedBy: 'cleanTitle' };
     }
     return null;
   }
 
   async function saveProductReview(slug, data) {
     const db = await getReviewsDB();
-    const existing = findReviewInDB(db, {
+    const match = findReviewInDB(db, {
       slug,
       productId: data.productId,
       imageKey: data.imageKey,
       cleanTitle: data.cleanTitle
     });
+    const existing = match ? match.item : null;
     const canonicalKey = (existing && existing.slug) ? existing.slug : slug;
+
+    const isEmpty = !data.rating && !data.banned && (!data.tags || data.tags.length === 0) && (!data.note || !data.note.trim());
+
+    if (isEmpty) {
+      delete db[canonicalKey];
+      reviewsDbCache = db;
+      LQS_RECORDER.record('STORAGE', `Deleted empty review for ${canonicalKey}`);
+      LQS_RECORDER.updateModule('storage', 'OK', `Удалён сброшенный отзыв ${canonicalKey} (всего: ${Object.keys(db).length})`);
+      return new Promise((resolve) => {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.set({ [STORAGE_KEY]: db }, () => resolve(null));
+        } else {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+          resolve(null);
+        }
+      });
+    }
 
     db[canonicalKey] = {
       ...(existing || {}),
@@ -421,12 +577,19 @@
       slug: canonicalKey,
       updatedAt: new Date().toISOString()
     };
+    reviewsDbCache = db;
 
-    LQS_DIAG.log('STORAGE_SAVE', `Saved review for ${canonicalKey}`, {
+    LQS_RECORDER.record('STORAGE', `Saved review for ${canonicalKey}`, {
       rating: data.rating,
       banned: data.banned,
-      tagsCount: (data.tags || []).length
+      tags: data.tags,
+      noteLen: (data.note || '').length
     });
+    LQS_RECORDER.updateModule(
+      'storage',
+      'OK',
+      `Сохранён ${canonicalKey}: ${data.rating}★, бан=${Boolean(data.banned)} (всего: ${Object.keys(db).length})`
+    );
 
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -438,6 +601,9 @@
     });
   }
 
+  // ==========================================================================
+  // ПАРСЕР СТРАНИЦЫ ТОВАРА И ТОЧНЫЙ КАЛЬКУЛЯТОР КБЖУ / ЦЕНЫ ЗА КГ
+  // ==========================================================================
   function extractProductPageMetadata() {
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
     const titleEl = (mainPage && mainPage.querySelector('h1[data-testid="product-title"]')) ||
@@ -462,26 +628,41 @@
         if (prod) {
           ldData = {
             productId: prod['@id'] || null,
-            brand: prod.brand ? prod.brand.name : null,
+            brand: prod.brand ? (typeof prod.brand === 'string' ? prod.brand : prod.brand.name) : null,
             description: prod.description || ''
           };
         }
       } catch {
-        // ignore
+        // ignore malformed JSON-LD
       }
     });
 
     const rawTitle = titleEl ? titleEl.textContent : document.title.split('—')[0];
     const title = rawTitle ? rawTitle.replace(/[\u00ad\u200b]/g, '').trim() : '';
     const cleanTitle = normalizeTitle(title);
-    const amountText = amountEl ? amountEl.textContent.trim() : '';
+    const amountText = amountEl ? amountEl.textContent.replace(/[\u00ad\u200b\u00a0]/g, ' ').trim() : '';
     const priceText = priceEl ? priceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.') : '';
     const oldPriceText = oldPriceEl ? oldPriceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.') : '';
     const ingredientsText = ingredientsEl ? ingredientsEl.innerText.trim() : '';
-    const traitsText = traitsEl ? traitsEl.innerText.trim() : '';
+
+    // Собираем КБЖУ как в виде плоского текста, так и по отдельным парам (ключ-значение) из дочерних блоков
+    const traitsPairs = [];
+    if (traitsEl) {
+      const children = traitsEl.querySelectorAll('li, div > div, dl > div');
+      children.forEach((node) => {
+        const t = (node.innerText || '').replace(/\s+/g, ' ').trim();
+        if (t && t.length < 45 && /\d/.test(t)) {
+          traitsPairs.push(t);
+        }
+      });
+    }
+    const traitsText = traitsPairs.length > 0
+      ? Array.from(new Set(traitsPairs)).join(' | ')
+      : (traitsEl ? traitsEl.innerText.replace(/\n+/g, ' | ').trim() : '');
+
     const imageKey = snippetImg ? extractImageKey(snippetImg.getAttribute('src')) : null;
 
-    return {
+    const meta = {
       title,
       cleanTitle,
       amountText,
@@ -492,6 +673,43 @@
       imageKey,
       ...ldData
     };
+
+    const parserStatus = (meta.title && meta.price) ? 'OK' : 'WARN';
+    LQS_RECORDER.updateModule(
+      'parser',
+      parserStatus,
+      `Товар: "${meta.title.slice(0, 32)}", цена=${meta.price ?? '?'}₽, вес="${meta.amountText || '?'}"`,
+      meta
+    );
+
+    return meta;
+  }
+
+  /**
+   * Извлекает конкретный макронутриент (белки/жиры/углеводы/ккал) без ложного захвата соседних чисел.
+   */
+  function extractNutrientValue(traitsText, keywordRegex, unitHintRegex) {
+    if (!traitsText) return null;
+    const segments = traitsText.split(/[|\n;]+/);
+    for (const seg of segments) {
+      if (keywordRegex.test(seg)) {
+        const m = seg.match(/([\d]+(?:[.,]\d+)?)/);
+        if (m) {
+          const val = parseFloat(m[1].replace(',', '.'));
+          if (!isNaN(val)) return val;
+        }
+      }
+    }
+    // Фоллбэк: ищем в пределах 15 символов с обязательной проверкой единицы измерения или двоеточия
+    const directAfter = new RegExp(keywordRegex.source + '[^\\d|\\n]{0,12}([\\d]+(?:[.,]\\d+)?)', 'i');
+    const m1 = traitsText.match(directAfter);
+    if (m1) return parseFloat(m1[1].replace(',', '.'));
+
+    const directBefore = new RegExp('([\\d]+(?:[.,]\\d+)?)\\s*' + unitHintRegex.source + '\\s*' + keywordRegex.source, 'i');
+    const m2 = traitsText.match(directBefore);
+    if (m2) return parseFloat(m2[1].replace(',', '.'));
+
+    return null;
   }
 
   function analyzeProductQuality(meta) {
@@ -499,44 +717,63 @@
     let pricePerKg = null;
     let weightGrams = null;
     let proteinPer100g = null;
+    let fatPer100g = null;
+    let carbsPer100g = null;
+    let kcalPer100g = null;
     let pricePer100gProtein = null;
     let unitLabel = 'кг';
 
     if (meta.amountText) {
-      const m = meta.amountText.match(/([\d.,]+)\s*(г|кг|мл|л)/i);
-      if (m) {
-        const val = parseFloat(m[1].replace(',', '.'));
-        const unit = m[2].toLowerCase();
+      // 1. Проверка мультипаков вида «2 × 150 г», «2x150 г», «3 шт по 80 г»
+      const multiMatch = meta.amountText.match(/(\d+)\s*[×xх*]\s*([\d.,]+)\s*(г|гр|кг|мл|л)\b/i) ||
+                         meta.amountText.match(/(\d+)\s*шт[^\d]*([\d.,]+)\s*(г|гр|кг|мл|л)\b/i);
+      if (multiMatch) {
+        const count = parseInt(multiMatch[1], 10) || 1;
+        const val = parseFloat(multiMatch[2].replace(',', '.'));
+        const unit = multiMatch[3].toLowerCase();
         unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
         if (val > 0) {
-          weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
-          if (meta.price) {
-            pricePerKg = Math.round((meta.price / weightGrams) * 1000);
+          const singleGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
+          weightGrams = count * singleGrams;
+        }
+      } else {
+        const singleMatch = meta.amountText.match(/([\d.,]+)\s*(г|гр|кг|мл|л)\b/i);
+        if (singleMatch) {
+          const val = parseFloat(singleMatch[1].replace(',', '.'));
+          const unit = singleMatch[2].toLowerCase();
+          unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
+          if (val > 0) {
+            weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
           }
         }
+      }
+
+      if (weightGrams && weightGrams > 0 && meta.price) {
+        pricePerKg = Math.round((meta.price / weightGrams) * 1000);
       }
     }
 
     if (meta.traitsText) {
-      const protMatch = meta.traitsText.match(/([\d.,]+)\s*белк/i) || meta.traitsText.match(/белки[^\d]*([\d.,]+)/i);
-      if (protMatch) {
-        proteinPer100g = parseFloat(protMatch[1].replace(',', '.'));
-        if (proteinPer100g > 0 && pricePerKg) {
-          const totalProteinInKg = proteinPer100g * 10;
-          pricePer100gProtein = Math.round((pricePerKg / totalProteinInKg) * 100);
+      proteinPer100g = extractNutrientValue(meta.traitsText, /белк[иао]?/i, /(?:г|гр)\.?/);
+      fatPer100g = extractNutrientValue(meta.traitsText, /жир[ыаов]?/i, /(?:г|гр)\.?/);
+      carbsPer100g = extractNutrientValue(meta.traitsText, /углевод[ыаов]?/i, /(?:г|гр)\.?/);
+      kcalPer100g = extractNutrientValue(meta.traitsText, /(?:ккал|калор)/i, /(?:ккал)?/);
+
+      if (proteinPer100g !== null && proteinPer100g > 0 && proteinPer100g <= 100 && pricePerKg) {
+        const totalProteinInKg = proteinPer100g * 10;
+        pricePer100gProtein = Math.round((pricePerKg / totalProteinInKg) * 100);
+      }
+
+      if (carbsPer100g !== null && !isNaN(carbsPer100g)) {
+        if (carbsPer100g <= 5) {
+          flags.push({ type: 'good', text: `🥑 Кето (${carbsPer100g}г угл)` });
+        } else if (carbsPer100g >= 22) {
+          flags.push({ type: 'bad', text: `🍞 ${carbsPer100g}г угл` });
         }
       }
 
-      const carbMatch = meta.traitsText.match(/([\d.,]+)\s*углевод/i) || meta.traitsText.match(/углеводы[^\d]*([\d.,]+)/i);
-      if (carbMatch) {
-        const carbs = parseFloat(carbMatch[1].replace(',', '.'));
-        if (!isNaN(carbs)) {
-          if (carbs <= 5) {
-            flags.push({ type: 'good', text: `🥑 Кето (${carbs}г угл)` });
-          } else if (carbs >= 22) {
-            flags.push({ type: 'bad', text: `🍞 ${carbs}г угл` });
-          }
-        }
+      if (proteinPer100g !== null && proteinPer100g >= 15) {
+        flags.push({ type: 'good', text: `💪 Много белка (${proteinPer100g}г)` });
       }
     }
 
@@ -557,19 +794,37 @@
         }
       });
 
-      if (flags.length === 0 && ingLower.length > 10) {
+      const hasBad = flags.some((f) => f.type === 'bad');
+      if (!hasBad && ingLower.length > 10) {
         flags.push({ type: 'good', text: '✅ Чистый состав' });
       }
     }
 
-    return { pricePerKg, unitLabel, pricePer100gProtein, flags: flags.slice(0, 5) };
+    const result = {
+      weightGrams,
+      pricePerKg,
+      unitLabel,
+      proteinPer100g,
+      fatPer100g,
+      carbsPer100g,
+      kcalPer100g,
+      pricePer100gProtein,
+      flags: flags.slice(0, 6)
+    };
+
+    LQS_RECORDER.updateModule(
+      'calculator',
+      pricePerKg ? 'OK' : 'WARN',
+      `Цена/${unitLabel}: ${pricePerKg ?? '—'}₽, Белок/100г: ${proteinPer100g ?? '—'}г (${pricePer100gProtein ? pricePer100gProtein + '₽/100г' : '—'}), Флагов: ${result.flags.length}`,
+      result
+    );
+
+    return result;
   }
 
-  /**
-   * Безопасное обновление кнопки «▾ Подробнее» БЕЗ пересоздания innerHTML!
-   * Дочерние узлы #lqs-drawer-dot и #lqs-drawer-label остаются в DOM всегда,
-   * поэтому клик мышью никогда не срывается между mousedown и mouseup.
-   */
+  // ==========================================================================
+  // ОТРИСОВКА И СИНХРОНИЗАЦИЯ ВИДЖЕТА НА СТРАНИЦЕ ТОВАРА
+  // ==========================================================================
   function updateDrawerToggleButton(panel, isOpen, review, smart) {
     if (!panel) return;
     const dotEl = panel.querySelector('#lqs-drawer-dot');
@@ -593,9 +848,9 @@
 
     if (dotEl.className !== nextDotClass) {
       dotEl.className = nextDotClass;
-      LQS_DIAG.counters.domWritesExecuted += 1;
+      LQS_RECORDER.counters.domWritesExecuted += 1;
     } else {
-      LQS_DIAG.counters.domWritesSkipped += 1;
+      LQS_RECORDER.counters.domWritesSkipped += 1;
     }
     if (dotEl.title !== nextDotTitle) {
       dotEl.title = nextDotTitle;
@@ -604,9 +859,9 @@
     const nextText = isOpen ? '▴ Скрыть' : '▾ Подробнее';
     if (labelEl.textContent !== nextText) {
       labelEl.textContent = nextText;
-      LQS_DIAG.counters.domWritesExecuted += 1;
+      LQS_RECORDER.counters.domWritesExecuted += 1;
     } else {
-      LQS_DIAG.counters.domWritesSkipped += 1;
+      LQS_RECORDER.counters.domWritesSkipped += 1;
     }
   }
 
@@ -625,79 +880,20 @@
     const latestSmart = analyzeProductQuality(latestMeta);
     updateDrawerToggleButton(panel, isOpen, currentReviewCache, latestSmart);
 
-    LQS_DIAG.counters.drawerToggles += 1;
-    LQS_DIAG.log('DRAWER_TOGGLE', `Drawer ${isOpen ? 'OPENED' : 'CLOSED'} via ${source}`, { slug });
+    LQS_RECORDER.counters.drawerToggles += 1;
+    LQS_RECORDER.record('USER_ACTION', `Spoiler drawer ${isOpen ? 'OPENED' : 'CLOSED'} (${source})`, { slug });
     return isOpen;
   }
 
-  function toggleDiagnosticsPanel(panel) {
-    if (!panel) return;
-    const diagBox = panel.querySelector('#lqs-diag-box');
-    if (!diagBox) return;
-    const isVisible = diagBox.classList.toggle('visible');
-    LQS_DIAG.log('DIAG_UI', `Diagnostics box ${isVisible ? 'opened' : 'closed'}`);
-    if (isVisible) {
-      LQS_DIAG.refreshDiagnosticBoxUI();
-    }
-  }
-
-  async function runConnectionHealthCheck(panel) {
-    const statusEl = panel ? panel.querySelector('#lqs-diag-conn-status') : null;
-    if (statusEl) {
-      statusEl.textContent = '⏳ Проверяю связь с FastAPI (:8765) и ИИ-мостом (:8083)...';
-    }
-    const settings = await getSettings();
-    const backendUrl = settings.backendUrl.replace(/\/$/, '');
-    const aiBaseUrl = settings.aiBaseUrl.replace(/\/$/, '');
-
-    const results = [];
-
-    // 1. Проверка локального FastAPI
-    const t0 = performance.now();
-    try {
-      const r = await fetch(`${backendUrl}/api/health`, { method: 'GET' });
-      const dt = Math.round(performance.now() - t0);
-      if (r.ok) {
-        const j = await r.json().catch(() => ({}));
-        results.push(`✅ FastAPI (${backendUrl}): ОК (${dt} мс, кэш: ${j.cachedItems ?? '?'} шт.)`);
-      } else {
-        results.push(`⚠️ FastAPI (${backendUrl}): HTTP ${r.status} (${dt} мс)`);
-      }
-    } catch (err) {
-      results.push(`❌ FastAPI (${backendUrl}): недоступен (${err.message || 'запусти start_server.bat'})`);
-    }
-
-    // 2. Проверка ИИ-моста (:8083/v1/models)
-    const t1 = performance.now();
-    try {
-      const headers = {};
-      if (settings.aiApiKey) headers.Authorization = `Bearer ${settings.aiApiKey}`;
-      const r2 = await fetch(`${aiBaseUrl}/models`, { method: 'GET', headers });
-      const dt2 = Math.round(performance.now() - t1);
-      if (r2.ok) {
-        results.push(`✅ ИИ-мост (${aiBaseUrl}): ОК (${dt2} мс, модель: ${settings.aiModel})`);
-      } else {
-        results.push(`⚠️ ИИ-мост (${aiBaseUrl}): HTTP ${r2.status} (${dt2} мс)`);
-      }
-    } catch (err) {
-      results.push(`❌ ИИ-мост (${aiBaseUrl}): недоступен (${err.message || 'проверь контейнер'})`);
-    }
-
-    const summary = results.join(' | ');
-    LQS_DIAG.log('HEALTH_CHECK', summary);
-    if (statusEl) {
-      statusEl.textContent = summary;
-    }
-  }
-
   function syncExistingPanelUI(panel, review, meta) {
-    LQS_DIAG.counters.panelSyncs += 1;
+    LQS_RECORDER.counters.panelSyncs += 1;
     currentReviewCache = review;
 
     const r = (review && review.rating) ? Number(review.rating) : 0;
     const banned = Boolean(review && review.banned);
     const tags = (review && Array.isArray(review.tags)) ? review.tags : [];
     const note = (review && review.note) ? String(review.note) : '';
+    const hasAnyReviewData = Boolean(r > 0 || banned || tags.length > 0 || note.trim());
 
     const shouldBeBanned = banned || (r > 0 && r <= 2);
     const shouldBeGod = !banned && r >= 4;
@@ -723,14 +919,14 @@
     if (metricsBox && smart) {
       const nextMetricsHtml = `
         <span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/${smart.unitLabel}` : `Цена/${smart.unitLabel} —`}</span>
-        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
+        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
       `.trim();
       setHtmlIfChanged(metricsBox, nextMetricsHtml, 'metrics-inline');
     }
 
     const flagsBox = panel.querySelector('#lqs-drawer-flags');
     if (flagsBox && smart) {
-      const nextFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('');
+      const nextFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
       setHtmlIfChanged(flagsBox, nextFlagsHtml, 'drawer-flags');
     }
 
@@ -743,6 +939,11 @@
       if (banBtn.textContent !== nextBanText) {
         banBtn.textContent = nextBanText;
       }
+    }
+
+    const resetBtn = panel.querySelector('#lqs-reset-review');
+    if (resetBtn) {
+      resetBtn.classList.toggle('is-hidden', !hasAnyReviewData);
     }
 
     const drawer = panel.querySelector('#lqs-drawer');
@@ -783,7 +984,8 @@
 
     const settings = await getSettings();
     const t0 = performance.now();
-    LQS_DIAG.log('AI_REQ_START', `Requesting AI review for "${meta.title}" (force=${forceRefresh})`);
+    LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh})`);
+    LQS_RECORDER.updateModule('aiReviewer', 'RUNNING', `Запрос ИИ-ревизора для "${meta.title.slice(0, 30)}"...`);
 
     // 1. Локальный FastAPI сервер (парсинг Отзовик/IRecommend/Роскачество + кэш SQLite)
     try {
@@ -808,30 +1010,33 @@
       if (resp.ok) {
         const data = await resp.json();
         const dt = Math.round(performance.now() - t0);
-        LQS_DIAG.lastAiCall = {
-          time: new Date().toLocaleTimeString(),
-          mode: data.cached ? 'FastAPI (SQLite Cache)' : 'FastAPI (:8765)',
-          status: 'OK',
-          latencyMs: dt,
-          error: null
-        };
-        LQS_DIAG.log('AI_REQ_OK', `FastAPI response in ${dt}ms (cached=${Boolean(data.cached)})`);
+        const modeStr = data.cached ? 'FastAPI SQLite Cache' : 'FastAPI (:8765)';
+        LQS_RECORDER.updateModule(
+          'aiReviewer',
+          'OK',
+          `Ответ через ${modeStr} за ${dt} мс (источников: ${(data.sources || []).length})`
+        );
+        LQS_RECORDER.record('AI', `FastAPI success in ${dt}ms`, {
+          cached: Boolean(data.cached),
+          sourcesCount: (data.sources || []).length
+        });
 
         aiContent.innerHTML = formatAiTextToHtml(data.verdict || 'Вердикт получен.');
         if (Array.isArray(data.sources) && data.sources.length > 0) {
           aiSources.innerHTML = data.sources
-            .map((s) => `<a href="${s.url}" target="_blank" rel="noopener noreferrer">🔗 ${s.title || 'Источник'}</a>`)
+            .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+            .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
             .join('');
         }
         return;
       } else {
-        LQS_DIAG.log('AI_FASTAPI_HTTP_ERR', `FastAPI HTTP ${resp.status}`);
+        LQS_RECORDER.record('AI', `FastAPI HTTP error ${resp.status}, falling back to direct AI`);
       }
     } catch (err) {
-      LQS_DIAG.log('AI_FASTAPI_SKIP', `FastAPI unreachable, trying direct bridge (:8083)`, err.message || String(err));
+      LQS_RECORDER.record('AI', `FastAPI unreachable (${err.message || err}), trying direct AI bridge`);
     }
 
-    // 2. Прямой фоллбэк к локальному мосту Gemini 4 Argon (localhost:8083/v1)
+    // 2. Прямой фоллбэк к локальному мосту Gemini 4 Argon (localhost:8083/v1) или облачному API
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (settings.aiApiKey) {
@@ -859,36 +1064,36 @@
         const json = await directResp.json();
         const dt = Math.round(performance.now() - t0);
         const reply = json.choices?.[0]?.message?.content || 'Нет ответа от модели.';
-        LQS_DIAG.lastAiCall = {
-          time: new Date().toLocaleTimeString(),
-          mode: `Direct Bridge (${settings.aiModel})`,
-          status: 'OK',
-          latencyMs: dt,
-          error: null
-        };
-        LQS_DIAG.log('AI_DIRECT_OK', `Direct AI response in ${dt}ms`);
+        LQS_RECORDER.updateModule(
+          'aiReviewer',
+          'OK',
+          `Прямой ответ от ${settings.aiModel} за ${dt} мс (FastAPI :8765 был выключен)`
+        );
+        LQS_RECORDER.record('AI', `Direct LLM response (${settings.aiModel}) in ${dt}ms`);
 
         aiContent.innerHTML = formatAiTextToHtml(reply);
-        aiSources.innerHTML = `<span style="color:#75736f;font-size:11.5px;">⚡ Напрямую через ${settings.aiModel} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
+        aiSources.innerHTML = `<span style="color:#75736f;font-size:11.5px;">⚡ Напрямую через ${escapeHtml(settings.aiModel)} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
         return;
       } else {
         throw new Error(`HTTP ${directResp.status}`);
       }
     } catch (err) {
       const dt = Math.round(performance.now() - t0);
-      LQS_DIAG.lastAiCall = {
-        time: new Date().toLocaleTimeString(),
-        mode: 'Failed',
-        status: 'ERROR',
-        latencyMs: dt,
-        error: err.message || String(err)
-      };
-      LQS_DIAG.error('requestAiProductReview', err);
+      LQS_RECORDER.updateModule(
+        'aiReviewer',
+        'ERROR',
+        `Ошибка связи с :8765 и ${settings.aiBaseUrl} (${err.message || err}) за ${dt} мс`
+      );
+      LQS_RECORDER.error('requestAiProductReview', err, {
+        backendUrl: settings.backendUrl,
+        aiBaseUrl: settings.aiBaseUrl,
+        model: settings.aiModel
+      });
     }
 
     aiContent.innerHTML =
-      `⚠️ Не удалось подключиться к локальному серверу <code>${settings.backendUrl}</code> или ИИ-мосту <code>${settings.aiBaseUrl}</code>.<br>` +
-      `Запусти <code>start_server.bat</code> или открой «🩺 Диаг.» для проверки соединения.`;
+      `⚠️ Не удалось подключиться к локальному серверу <code>${escapeHtml(settings.backendUrl)}</code> или ИИ-мосту <code>${escapeHtml(settings.aiBaseUrl)}</code>.<br>` +
+      `Запусти <code>start_server.bat</code> или проверь соединение в окне расширения (⚙️ Настройки).`;
   }
 
   async function renderProductPageWidget() {
@@ -899,25 +1104,31 @@
 
     const slug = extractSlugFromUrl(window.location.href);
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
-    if (!slug || !mainPage) return;
-
-    const oldVerdictBanner = mainPage.querySelector('.lqs-verdict-banner');
-    if (oldVerdictBanner) oldVerdictBanner.remove();
+    if (!slug || !mainPage) {
+      if (slug && !mainPage) {
+        LQS_RECORDER.updateModule('widget', 'WARN', `URL товара (${slug}), но main[data-testid="good-page-desktop"] ещё не найден в DOM`);
+      }
+      return;
+    }
 
     const infoBlock = mainPage.querySelector('div[data-testid="product-info"]') ||
                       mainPage.querySelector('div[data-testid="product-card-header"]');
-    if (!infoBlock) return;
+    if (!infoBlock) {
+      LQS_RECORDER.updateModule('widget', 'WARN', `Не найден контейнер product-info / product-card-header для ${slug}`);
+      return;
+    }
 
     isRenderingProduct = true;
     try {
       const db = await getReviewsDB();
       const meta = extractProductPageMetadata();
-      const savedReview = findReviewInDB(db, {
+      const match = findReviewInDB(db, {
         slug,
         productId: meta.productId,
         imageKey: meta.imageKey,
         cleanTitle: meta.cleanTitle
       });
+      const savedReview = match ? match.item : null;
 
       const current = {
         rating: (savedReview && savedReview.rating) ? Number(savedReview.rating) : 0,
@@ -932,12 +1143,18 @@
       let existing = mainPage.querySelector('.lqs-product-panel');
       if (existing && existing.dataset.slug === slug) {
         syncExistingPanelUI(existing, current, meta);
+        LQS_RECORDER.updateModule(
+          'widget',
+          'OK',
+          `Виджет синхронизирован для ${slug} (${current.rating}★, match=${match ? match.matchedBy : 'new'})`
+        );
         return;
       }
       if (existing) existing.remove();
 
       const smart = analyzeProductQuality(meta);
       const isDrawerInitiallyOpen = Boolean(drawerOpenBySlug.get(slug));
+      const hasAnyReviewData = Boolean(current.rating > 0 || current.banned || current.tags.length > 0 || current.note.trim());
 
       const panel = document.createElement('div');
       panel.className = `lqs-product-panel ${current.banned || (current.rating > 0 && current.rating <= 2) ? 'is-banned' : (current.rating >= 4 ? 'is-god' : '')}`;
@@ -945,10 +1162,10 @@
 
       const initialMetricsHtml = `
         <span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/${smart.unitLabel}` : `Цена/${smart.unitLabel} —`}</span>
-        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
+        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
       `.trim();
 
-      const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('');
+      const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
 
       panel.innerHTML = `
         <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + кнопка «▾ Подробнее» -->
@@ -979,8 +1196,8 @@
               <button type="button" class="lqs-mini-btn ${current.banned ? 'ban-active' : ''}" id="lqs-ban-toggle" title="В чёрный список">
                 ${current.banned ? '💀 В бане' : '🚫 В бан'}
               </button>
-              <button type="button" class="lqs-mini-btn diag-btn" id="lqs-diag-toggle" title="Встроенная диагностика и отлов багов (Alt+Shift+D)">
-                🩺 Диаг.
+              <button type="button" class="lqs-mini-btn reset-btn ${hasAnyReviewData ? '' : 'is-hidden'}" id="lqs-reset-review" title="Очистить оценку и заметку для этого товара">
+                🗑️ Сброс
               </button>
             </div>
 
@@ -989,7 +1206,7 @@
 
           <div class="lqs-tags-row">
             ${PRESET_TAGS.map((tag) => `
-              <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${tag}">${tag}</span>
+              <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</span>
             `).join('')}
           </div>
 
@@ -1006,24 +1223,9 @@
             <div class="lqs-ai-content" id="lqs-ai-content"></div>
             <div class="lqs-ai-sources" id="lqs-ai-sources"></div>
           </div>
-
-          <!-- ВСТРОЕННАЯ ПАНЕЛЬ ДИАГНОСТИКИ (LQS DIAGNOSTICS v2.0.3) -->
-          <div class="lqs-diag-box" id="lqs-diag-box">
-            <div class="lqs-diag-header">
-              <span>🩺 LQS Диагностика v${VERSION} (Alt+Shift+D)</span>
-              <div class="lqs-diag-btn-group">
-                <button type="button" class="lqs-diag-action-btn" id="lqs-diag-ping">🔌 Проверить связь</button>
-                <button type="button" class="lqs-diag-action-btn primary" id="lqs-diag-copy">📋 Скопировать отчёт</button>
-              </div>
-            </div>
-            <div class="lqs-diag-conn-status" id="lqs-diag-conn-status">Нажми «🔌 Проверить связь» для теста FastAPI (:8765) и Gemini Argon (:8083).</div>
-            <div class="lqs-diag-metrics" id="lqs-diag-metrics"></div>
-            <pre class="lqs-diag-log" id="lqs-diag-log"></pre>
-          </div>
         </div>
       `;
 
-      // Записываем начальные хеши HTML, чтобы syncExistingPanelUI не перезаписывал DOM вхолостую
       const metricsEl = panel.querySelector('#lqs-metrics-inline');
       if (metricsEl) metricsEl.dataset.lqsHtmlCache = initialMetricsHtml;
       const flagsEl = panel.querySelector('#lqs-drawer-flags');
@@ -1032,17 +1234,24 @@
       updateDrawerToggleButton(panel, isDrawerInitiallyOpen, current, smart);
 
       const barContainer = infoBlock.querySelector('div[data-testid="bar-container"]');
+      const mountPlace = (barContainer && barContainer.parentNode) ? 'after:bar-container' : 'prepend:infoBlock';
       if (barContainer && barContainer.parentNode) {
         barContainer.parentNode.insertBefore(panel, barContainer.nextSibling);
       } else {
         infoBlock.prepend(panel);
       }
 
-      LQS_DIAG.counters.panelMounts += 1;
-      LQS_DIAG.log('PANEL_MOUNT', `Mounted widget for ${slug}`, {
-        price: meta.price,
-        amount: meta.amountText,
-        pricePerKg: smart.pricePerKg
+      LQS_RECORDER.counters.panelMounts += 1;
+      LQS_RECORDER.updateModule(
+        'widget',
+        'OK',
+        `Смонтирован (${mountPlace}) для ${slug}, match=${match ? match.matchedBy : 'none'}`
+      );
+      LQS_RECORDER.record('WIDGET', `Mounted panel for ${slug} at ${mountPlace}`, {
+        rating: current.rating,
+        banned: current.banned,
+        pricePerKg: smart.pricePerKg,
+        pricePer100gProtein: smart.pricePer100gProtein
       });
 
       const noteArea = panel.querySelector('#lqs-note-area');
@@ -1064,8 +1273,8 @@
           tags: current.tags,
           note: current.note
         });
-        syncExistingPanelUI(panel, updated, latestMeta);
-        guardAddToCartButton(updated);
+        syncExistingPanelUI(panel, updated || current, latestMeta);
+        guardAddToCartButton(updated || current);
         decorateCatalogCards();
       };
 
@@ -1080,7 +1289,7 @@
           } else if (current.rating >= 4) {
             current.banned = false;
           }
-          LQS_DIAG.log('STAR_CLICK', `Star set to ${current.rating}`);
+          LQS_RECORDER.record('USER_ACTION', `Star rating set to ${current.rating}★ on ${slug}`);
           persistState();
         });
       });
@@ -1090,7 +1299,19 @@
         e.stopPropagation();
         current.banned = !current.banned;
         if (current.banned && current.rating === 0) current.rating = 1;
-        LQS_DIAG.log('BAN_CLICK', `Ban toggled to ${current.banned}`);
+        LQS_RECORDER.record('USER_ACTION', `Ban toggled to ${current.banned} on ${slug}`);
+        persistState();
+      });
+
+      panel.querySelector('#lqs-reset-review').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        current.rating = 0;
+        current.banned = false;
+        current.tags = [];
+        current.note = '';
+        noteArea.value = '';
+        LQS_RECORDER.record('USER_ACTION', `Reset review for ${slug}`);
         persistState();
       });
 
@@ -1098,32 +1319,6 @@
         e.preventDefault();
         e.stopPropagation();
         toggleDrawerState(panel, 'button-click');
-      });
-
-      panel.querySelector('#lqs-diag-toggle').addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        toggleDiagnosticsPanel(panel);
-      });
-
-      panel.querySelector('#lqs-diag-ping').addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        runConnectionHealthCheck(panel);
-      });
-
-      panel.querySelector('#lqs-diag-copy').addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const btn = e.currentTarget;
-        const report = LQS_DIAG.buildTextReport();
-        try {
-          await navigator.clipboard.writeText(report);
-          btn.textContent = '✅ Скопировано!';
-        } catch {
-          btn.textContent = '⚠️ Ошибка буфера';
-        }
-        setTimeout(() => { btn.textContent = '📋 Скопировать отчёт'; }, 1500);
       });
 
       panel.querySelector('#lqs-ai-btn').addEventListener('click', (e) => {
@@ -1150,7 +1345,7 @@
           } else {
             current.tags.push(tag);
           }
-          LQS_DIAG.log('TAG_CLICK', `Toggled tag "${tag}"`);
+          LQS_RECORDER.record('USER_ACTION', `Toggled tag "${tag}" on ${slug}`);
           persistState();
         });
       });
@@ -1166,13 +1361,15 @@
         e.preventDefault();
         e.stopPropagation();
         clearTimeout(noteTimeout);
+        LQS_RECORDER.record('USER_ACTION', `Saved note on ${slug} (${noteArea.value.length} chars)`);
         persistState();
         const saveBtn = e.currentTarget;
         saveBtn.textContent = '✅ Ок';
         setTimeout(() => { saveBtn.textContent = '💾 Ок'; }, 1200);
       });
     } catch (err) {
-      LQS_DIAG.error('renderProductPageWidget', err);
+      LQS_RECORDER.updateModule('widget', 'ERROR', `Ошибка рендера: ${err.message || err}`);
+      LQS_RECORDER.error('renderProductPageWidget', err);
     } finally {
       isRenderingProduct = false;
       if (pendingProductRender) {
@@ -1182,14 +1379,26 @@
     }
   }
 
+  // ==========================================================================
+  // ЗАЩИТА КНОПКИ «В КОРЗИНУ» ОТ СЛУЧАЙНОЙ ПОКУПКИ ЗАБАНЕННОГО ТОВАРА
+  // ==========================================================================
   function guardAddToCartButton(review) {
     const addBtn = document.querySelector('main[data-testid="good-page-desktop"] button[data-testid="snippet-control"]');
-    if (!addBtn) return;
+    if (!addBtn) {
+      LQS_RECORDER.updateModule('cartGuard', 'IDLE', 'Кнопка snippet-control не отображена (товар уже в корзине или нет в наличии)');
+      return;
+    }
 
     const isBad = Boolean(review && (review.banned || (review.rating > 0 && review.rating <= 2)));
     const nextBadStr = isBad ? 'true' : 'false';
     const nextNoteStr = (review && review.note) ? review.note : '';
     const nextRatingStr = (review && review.rating) ? String(review.rating) : '1';
+
+    LQS_RECORDER.updateModule(
+      'cartGuard',
+      'OK',
+      isBad ? `Активна блокировка корзины (${nextRatingStr}★)` : 'Кнопка корзины проверена (товар не в бане)'
+    );
 
     if (
       addBtn.dataset.lqsBad === nextBadStr &&
@@ -1210,12 +1419,16 @@
         addBtn.dataset.lqsGuarded = 'true';
         addBtn.addEventListener('click', (e) => {
           if (addBtn.dataset.lqsBad === 'true') {
+            LQS_RECORDER.record('CART_GUARD', 'Intercepted Add-to-Cart click on banned item');
             const ok = window.confirm(
               `⚠️ Этот товар у тебя в чёрном списке (${addBtn.dataset.lqsRating}★).\nЗаметка: "${addBtn.dataset.lqsNote || 'Не брать'}"\n\nВсё равно добавить в корзину?`
             );
             if (!ok) {
               e.stopPropagation();
               e.preventDefault();
+              LQS_RECORDER.record('CART_GUARD', 'User cancelled adding banned item to cart');
+            } else {
+              LQS_RECORDER.record('CART_GUARD', 'User confirmed adding banned item despite warning');
             }
           }
         }, true);
@@ -1226,6 +1439,9 @@
     }
   }
 
+  // ==========================================================================
+  // РАЗМЕТКА КАРТОЧЕК В КАТАЛОГЕ, ПОИСКЕ И «ВЫ ПОКУПАЛИ»
+  // ==========================================================================
   function extractCardIdentifiers(card) {
     const linkEl = card.querySelector('a[href*="/good/"]') || card.closest('a[href*="/good/"]');
     const slug = linkEl ? extractSlugFromUrl(linkEl.getAttribute('href')) : null;
@@ -1246,18 +1462,18 @@
     return { slug, productId, imageKey, cleanTitle };
   }
 
-  /**
-   * Декорирование карточек каталога БЕЗ лишних удалений/вставок DOM,
-   * если рейтинг карточки не изменился.
-   */
   async function decorateCatalogCards() {
-    LQS_DIAG.counters.catalogPasses += 1;
+    LQS_RECORDER.counters.catalogPasses += 1;
     const db = await getReviewsDB();
     const cards = document.querySelectorAll('div[data-testid="product-card"]');
 
+    let badgedCount = 0;
+    let bannedCount = 0;
+
     cards.forEach((card) => {
       const ids = extractCardIdentifiers(card);
-      const review = findReviewInDB(db, ids);
+      const match = findReviewInDB(db, ids);
+      const review = match ? match.item : null;
 
       const oldNote = card.querySelector('.lqs-card-note-preview');
       if (oldNote) oldNote.remove();
@@ -1269,22 +1485,27 @@
           const oldBadge = card.querySelector('.lqs-card-badge');
           if (oldBadge) oldBadge.remove();
           card.classList.remove('lqs-card-dimmed');
-          LQS_DIAG.counters.catalogBadgesUpdated += 1;
+          LQS_RECORDER.counters.catalogBadgesUpdated += 1;
         } else {
-          LQS_DIAG.counters.catalogBadgesSkipped += 1;
+          LQS_RECORDER.counters.catalogBadgesSkipped += 1;
         }
         return;
       }
 
+      badgedCount += 1;
       const isBad = Boolean(review.banned || (review.rating > 0 && review.rating <= 2));
+      if (isBad) bannedCount += 1;
+
       const tier = isBad ? 'trash' : (review.rating >= 4 ? 'god' : 'ok');
       const text = isBad ? `💀 ${review.rating ? review.rating + '★' : 'БАН'}` : `★ ${review.rating}`;
-      const titleText = (review.note && review.note.trim()) ? review.note.trim() : '';
+      const titleText = (review.note && review.note.trim())
+        ? review.note.trim()
+        : ((review.tags && review.tags.length) ? review.tags.join(', ') : '');
       const badgeKey = `${tier}|${text}|${titleText}`;
 
       let badge = card.querySelector('.lqs-card-badge');
       if (card.dataset.lqsBadgeKey === badgeKey && badge) {
-        LQS_DIAG.counters.catalogBadgesSkipped += 1;
+        LQS_RECORDER.counters.catalogBadgesSkipped += 1;
         return;
       }
 
@@ -1303,22 +1524,49 @@
       badge.className = `lqs-card-badge ${tier}`;
       badge.textContent = text;
       badge.title = titleText;
-      LQS_DIAG.counters.catalogBadgesUpdated += 1;
+      LQS_RECORDER.counters.catalogBadgesUpdated += 1;
     });
+
+    LQS_RECORDER.updateModule(
+      'catalog',
+      'OK',
+      `Просканировано карточек: ${cards.length} (с оценкой: ${badgedCount}, затемнено в бане: ${bannedCount})`
+    );
   }
 
+  // ==========================================================================
+  // НАБЛЮДАТЕЛЬ DOM И ДЕТЕКТОР SPA-ПЕРЕХОДОВ
+  // ==========================================================================
   let debounceTimer = null;
   function scheduleUpdate() {
-    LQS_DIAG.counters.scheduleCalls += 1;
+    LQS_RECORDER.counters.scheduleCalls += 1;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
+      checkUrlTransition();
       renderProductPageWidget();
       decorateCatalogCards();
     }, 120);
   }
 
-  function runHydrationResyncWave() {
-    LQS_DIAG.log('HYDRATION_WAVE', `Triggered resync wave on ${window.location.pathname}`);
+  function checkUrlTransition() {
+    const currentUrl = window.location.href;
+    if (currentUrl !== lastObservedUrl) {
+      const prevUrl = lastObservedUrl;
+      lastObservedUrl = currentUrl;
+      LQS_RECORDER.counters.spaTransitions += 1;
+      LQS_RECORDER.record('ROUTER', `SPA transition: ${new URL(prevUrl).pathname} -> ${window.location.pathname}`);
+      runHydrationResyncWave('spa-url-change');
+    }
+  }
+
+  function runHydrationResyncWave(reason = 'init') {
+    const slug = extractSlugFromUrl(window.location.href);
+    LQS_RECORDER.updateModule(
+      'router',
+      'OK',
+      `Маршрут: ${window.location.pathname} (${slug ? 'Товар: ' + slug : 'Каталог'}), причина: ${reason}`
+    );
+    LQS_RECORDER.record('ROUTER', `Hydration resync wave (${reason}) on ${window.location.pathname}`);
     [0, 180, 500, 1200, 2500].forEach((delay) => {
       setTimeout(() => {
         renderProductPageWidget();
@@ -1327,10 +1575,6 @@
     });
   }
 
-  /**
-   * Проверка: относится ли узел или запись мутации исключительно к нашим собственным элементам .lqs-*
-   * Это на 100% разрывает порочный круг самовозбуждения MutationObserver.
-   */
   function isOwnLqsNode(node) {
     if (!node) return false;
     if (node.nodeType === Node.ELEMENT_NODE) {
@@ -1381,10 +1625,10 @@
 
   const observer = new MutationObserver((mutations) => {
     if (hasExternalMutation(mutations)) {
-      LQS_DIAG.counters.extMutations += 1;
+      LQS_RECORDER.counters.extMutations += 1;
       scheduleUpdate();
     } else {
-      LQS_DIAG.counters.selfMutationsIgnored += 1;
+      LQS_RECORDER.counters.selfMutationsIgnored += 1;
     }
   });
 
@@ -1395,14 +1639,24 @@
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local' && (changes[STORAGE_KEY] || changes[SETTINGS_KEY])) {
-        renderProductPageWidget();
-        decorateCatalogCards();
+      if (area === 'local') {
+        if (changes[STORAGE_KEY]) {
+          reviewsDbCache = changes[STORAGE_KEY].newValue || {};
+          LQS_RECORDER.updateModule(
+            'storage',
+            'OK',
+            `База синхронизирована из storage.onChanged (${Object.keys(reviewsDbCache).length} товаров)`
+          );
+          renderProductPageWidget();
+          decorateCatalogCards();
+        } else if (changes[SETTINGS_KEY]) {
+          renderProductPageWidget();
+        }
       }
     });
   }
 
-  window.addEventListener('popstate', runHydrationResyncWave);
-  window.addEventListener('load', runHydrationResyncWave);
-  runHydrationResyncWave();
+  window.addEventListener('popstate', () => runHydrationResyncWave('popstate'));
+  window.addEventListener('load', () => runHydrationResyncWave('window-load'));
+  runHydrationResyncWave('script-boot');
 })();

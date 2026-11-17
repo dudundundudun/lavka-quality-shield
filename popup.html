@@ -2,10 +2,10 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.0.3</title>
+  <title>Lavka Quality Shield v2.1.0</title>
   <style>
     body {
-      width: 380px;
+      width: 390px;
       margin: 0;
       padding: 14px;
       background: #f5f4f2;
@@ -35,9 +35,9 @@
       flex: 1;
       border: none;
       background: transparent;
-      padding: 6px 4px;
+      padding: 6px 8px;
       border-radius: 8px;
-      font-size: 11.5px;
+      font-size: 12px;
       font-weight: 600;
       cursor: pointer;
       color: #5c5a57;
@@ -50,7 +50,7 @@
     .stats {
       display: flex;
       gap: 6px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .stat-box {
       flex: 1;
@@ -64,6 +64,20 @@
     .stat-box strong {
       display: block;
       font-size: 15px;
+    }
+    .search-input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 10px;
+      border: 1px solid #e5e2dd;
+      border-radius: 9px;
+      background: #ffffff;
+      font-size: 12px;
+      margin-bottom: 8px;
+      outline: none;
+    }
+    .search-input:focus {
+      border-color: #21201f;
     }
     .filter-row {
       display: flex;
@@ -87,7 +101,7 @@
       color: #21201f;
     }
     .list {
-      max-height: 240px;
+      max-height: 230px;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
@@ -103,6 +117,7 @@
     .item-header {
       display: flex;
       justify-content: space-between;
+      align-items: flex-start;
       font-weight: 600;
       margin-bottom: 3px;
       gap: 6px;
@@ -110,13 +125,35 @@
     .item-header a {
       color: #21201f;
       text-decoration: none;
+      flex: 1;
     }
     .item-header a:hover {
       text-decoration: underline;
     }
+    .item-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+    .item-del-btn {
+      border: none;
+      background: transparent;
+      color: #a19f9c;
+      font-size: 13px;
+      line-height: 1;
+      padding: 0 2px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .item-del-btn:hover {
+      color: #dc2626;
+      background: #fee2e2;
+    }
     .item-note {
       color: #7a7875;
       font-size: 11px;
+      word-break: break-word;
     }
     .actions {
       display: flex;
@@ -134,7 +171,10 @@
       font-weight: 600;
       cursor: pointer;
     }
-    .settings-panel, .diag-panel {
+    .action-btn:hover {
+      background: #eceae6;
+    }
+    .settings-panel {
       display: none;
       background: #ffffff;
       border: 1px solid #e5e2dd;
@@ -175,6 +215,9 @@
       cursor: pointer;
       font-weight: 600;
     }
+    .preset-btn:hover {
+      background: #e5e2dd;
+    }
     .save-settings-btn {
       width: 100%;
       background: #fce000;
@@ -186,40 +229,109 @@
       cursor: pointer;
       font-size: 12px;
     }
+    .save-settings-btn:hover {
+      background: #f2d600;
+    }
+
+    /* Спрятанный в самом низу настроек спойлер бортового самописца для ИИ */
+    details.debug-spoiler {
+      margin-top: 12px;
+      border-top: 1px dashed #d6d3cd;
+      padding-top: 10px;
+    }
+    details.debug-spoiler summary {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #5c5a57;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 2px;
+    }
+    details.debug-spoiler summary::-webkit-details-marker {
+      display: none;
+    }
+    details.debug-spoiler summary:hover {
+      color: #21201f;
+    }
+    .debug-body {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .debug-hint {
+      font-size: 10.5px;
+      color: #75736f;
+      line-height: 1.35;
+    }
+    .module-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .mod-pill {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: #f5f4f2;
+      border: 1px solid #e5e2dd;
+      color: #5c5a57;
+    }
+    .mod-pill.ok {
+      background: #dcfce7;
+      border-color: #86efac;
+      color: #166534;
+    }
+    .mod-pill.warn {
+      background: #fef9c3;
+      border-color: #fde047;
+      color: #854d0e;
+    }
+    .mod-pill.err {
+      background: #fee2e2;
+      border-color: #fca5a5;
+      color: #991b1b;
+    }
     .diag-pre {
       background: #18181b;
       color: #d4d4d8;
       padding: 8px;
       border-radius: 8px;
       font-family: Consolas, Monaco, monospace;
-      font-size: 10.5px;
+      font-size: 10px;
       line-height: 1.35;
-      max-height: 190px;
+      max-height: 165px;
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      margin: 8px 0;
+      margin: 2px 0;
     }
   </style>
 </head>
 <body>
   <div class="top-bar">
     <h2>🛡️ Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;">v2.0.3</span>
+    <span style="font-size:11px;color:#7a7875;">v2.1.0</span>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" id="tab-reviews-btn">⭐ Отзывы</button>
-    <button class="tab-btn" id="tab-ai-btn">🤖 ИИ</button>
-    <button class="tab-btn" id="tab-diag-btn">🩺 Диагностика</button>
+    <button class="tab-btn active" id="tab-reviews-btn">⭐ Мои отзывы</button>
+    <button class="tab-btn" id="tab-settings-btn">⚙️ Настройки и ИИ</button>
   </div>
 
+  <!-- ВКЛАДКА 1: ОТЗЫВЫ И БАЗА -->
   <div id="panel-reviews">
     <div class="stats">
       <div class="stat-box"><strong id="count-all">0</strong>Всего</div>
       <div class="stat-box" style="color:#15803d"><strong id="count-god">0</strong>Годнота</div>
       <div class="stat-box" style="color:#dc2626"><strong id="count-trash">0</strong>В бане</div>
     </div>
+    <input type="text" class="search-input" id="search-input" placeholder="🔍 Быстрый поиск по названию или заметке...">
     <div class="filter-row">
       <button class="filter-btn active" data-filter="all">Все</button>
       <button class="filter-btn" data-filter="god">🔥 Топ</button>
@@ -233,7 +345,8 @@
     </div>
   </div>
 
-  <div class="settings-panel" id="panel-ai">
+  <!-- ВКЛАДКА 2: НАСТРОЙКИ ИИ + СПРЯТАННЫЙ ВНИЗУ БОРТОВОЙ ЛОГ ДЛЯ ДЕБАГГИНГА -->
+  <div class="settings-panel" id="panel-settings">
     <div style="font-size:11px;color:#5c5a57;margin-bottom:6px;">Быстрый выбор ИИ-провайдера:</div>
     <div class="preset-row">
       <button type="button" class="preset-btn" id="preset-argon">🚀 Gemini Argon (:8083)</button>
@@ -250,7 +363,7 @@
       <input type="text" id="inp-ai-url" placeholder="http://localhost:8083/v1">
     </div>
     <div class="field">
-      <label>API Key (из правого верхнего угла админки :8083/admin/):</label>
+      <label>API Key (из админки :8083/admin/ или DeepSeek):</label>
       <input type="password" id="inp-ai-key" placeholder="Вставь API Key...">
     </div>
     <div class="field">
@@ -258,22 +371,35 @@
       <input type="text" id="inp-ai-model" placeholder="gemini-4-argon">
     </div>
     <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки ИИ</button>
-    <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:6px;"></div>
-  </div>
+    <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:5px;"></div>
 
-  <div class="diag-panel" id="panel-diag">
-    <div style="font-size:11px;color:#5c5a57;margin-bottom:6px;">
-      Телеметрия DOM, проверка селекторов Лавки и тест локальных серверов (на странице Лавки также доступно по <b>Alt+Shift+D</b>).
-    </div>
-    <div class="actions" style="margin-top:0;margin-bottom:6px;">
-      <button type="button" class="action-btn" id="diag-refresh-btn">🔄 Обновить телеметрию</button>
-      <button type="button" class="action-btn" id="diag-ping-btn">🔌 Тест :8765 / :8083</button>
-    </div>
-    <div id="diag-ping-status" style="font-size:11px;color:#21201f;background:#f5f4f2;padding:6px 8px;border-radius:8px;margin-bottom:6px;">
-      Нажми «🔌 Тест :8765 / :8083» для проверки серверов.
-    </div>
-    <pre class="diag-pre" id="diag-report-box">Загрузка телеметрии...</pre>
-    <button type="button" class="save-settings-btn" id="diag-copy-btn">📋 Скопировать диагностический отчёт</button>
+    <!-- ГЛУБОКО В НАСТРОЙКАХ: БОРТОВОЙ ЖУРНАЛ ДЛЯ ИИ-ДЕБАГГИНГА -->
+    <details class="debug-spoiler" id="debug-spoiler">
+      <summary>
+        <span>🛠️ Бортовой журнал для ИИ (Дебаггинг)</span>
+        <span style="font-size:10px;color:#7a7875;">▾ развернуть</span>
+      </summary>
+      <div class="debug-body">
+        <div class="debug-hint">
+          Записывает как работают все 8 модулей расширения (парсер, КБЖУ, виджет, каталог, защита корзины, ИИ). Скопируй этот отчёт и отправь любому ИИ для мгновенного поиска багов.
+        </div>
+
+        <div class="module-pills" id="diag-module-pills"></div>
+
+        <button type="button" class="save-settings-btn" id="diag-copy-btn">
+          📋 Скопировать полный лог для ИИ (Markdown)
+        </button>
+
+        <div class="actions" style="margin-top:0;">
+          <button type="button" class="action-btn" id="diag-ping-btn">🔌 Тест :8765 / ИИ</button>
+          <button type="button" class="action-btn" id="diag-download-btn">💾 Скачать .log</button>
+          <button type="button" class="action-btn" id="diag-clear-btn">🗑️ Очистить</button>
+        </div>
+
+        <div id="diag-ping-status" style="display:none;font-size:10.5px;color:#21201f;background:#f5f4f2;padding:5px 8px;border-radius:7px;"></div>
+        <pre class="diag-pre" id="diag-report-box">Разверни спойлер на открытой вкладке Лавки для чтения бортового журнала...</pre>
+      </div>
+    </details>
   </div>
 
   <script src="popup.js"></script>
