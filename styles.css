@@ -1,4 +1,4 @@
-/* Lavka Quality Shield v1.0.0 — Стили виджета и меток каталога */
+/* Lavka Quality Shield v1.0.1 — Стили виджета, баннера вердикта и меток каталога */
 
 :root {
   --lqs-bg: #18181b;
@@ -9,11 +9,71 @@
   --lqs-gold: #fbbf24;
   --lqs-green: #22c55e;
   --lqs-red: #ef4444;
-  --lqs-orange: #f97316;
-  --lqs-accent: #fcd34d;
 }
 
-/* Виджет на странице товара main[data-testid="good-page-desktop"] */
+/* Баннер сохраненного вердикта прямо под заголовком товара h1[data-testid="product-title"] */
+.lqs-verdict-banner {
+  margin: 10px 0 6px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+
+.lqs-verdict-banner.god {
+  background: #14532d;
+  color: #f0fdf4;
+  border: 1.5px solid #22c55e;
+}
+
+.lqs-verdict-banner.ok {
+  background: #422006;
+  color: #fefce8;
+  border: 1.5px solid #eab308;
+}
+
+.lqs-verdict-banner.trash {
+  background: #7f1d1d;
+  color: #fef2f2;
+  border: 1.5px solid #ef4444;
+}
+
+.lqs-verdict-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.lqs-verdict-note {
+  font-size: 13px;
+  line-height: 1.4;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 7px 10px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lqs-verdict-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 11px;
+  opacity: 0.92;
+}
+
+.lqs-verdict-tag {
+  background: rgba(255, 255, 255, 0.14);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+/* Виджет редактирования на странице товара main[data-testid="good-page-desktop"] */
 .lqs-product-panel {
   background: var(--lqs-bg);
   color: var(--lqs-text);
@@ -23,6 +83,8 @@
   margin: 14px 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  position: relative;
+  z-index: 10;
 }
 
 .lqs-header {
@@ -82,6 +144,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  color: #fbbf24;
 }
 
 .lqs-star-btn:hover {
@@ -90,8 +153,9 @@
 }
 
 .lqs-star-btn.active {
-  background: rgba(251, 191, 36, 0.18);
+  background: rgba(251, 191, 36, 0.22);
   border-color: var(--lqs-gold);
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.35);
 }
 
 /* Быстрый бан-тумблер */
@@ -134,13 +198,20 @@
 }
 
 .lqs-tag-chip.selected {
-  background: #3b82f626;
+  background: rgba(59, 130, 246, 0.22);
   color: #93c5fd;
   border-color: #3b82f6;
   font-weight: 600;
 }
 
-/* Поле отзыва */
+/* Поле отзыва + кнопка сохранения */
+.lqs-note-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .lqs-note-input {
   width: 100%;
   box-sizing: border-box;
@@ -151,14 +222,48 @@
   padding: 9px 12px;
   font-size: 13px;
   resize: vertical;
-  min-height: 54px;
-  margin-bottom: 10px;
+  min-height: 58px;
   font-family: inherit;
 }
 
 .lqs-note-input:focus {
   outline: none;
   border-color: var(--lqs-gold);
+}
+
+.lqs-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lqs-save-btn {
+  background: #fbbf24;
+  color: #18181b;
+  border: none;
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.lqs-save-btn:hover {
+  opacity: 0.9;
+}
+
+.lqs-save-toast {
+  font-size: 12px;
+  color: #4ade80;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.lqs-save-toast.visible {
+  opacity: 1;
 }
 
 /* Смарт-аналитика: Цена за кг, БЖУ и радар состава */
@@ -260,7 +365,7 @@
   left: 6px;
   right: 6px;
   z-index: 29;
-  background: rgba(24, 24, 27, 0.92);
+  background: rgba(24, 24, 27, 0.94);
   color: #fca5a5;
   font-size: 10px;
   line-height: 1.25;
