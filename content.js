@@ -1,8 +1,8 @@
 /**
- * Lavka Quality Shield v2.0.1 — Content Script
- * - Исправлена верстка и защита от наследования нулевого line-height/height из CSS Яндекс Лавки
- * - Аккуратная двухстрочная панель + выпадающий спойлер + кнопка принудительного пересчета ИИ (🔄)
- * - Поддержка локального FastAPI (127.0.0.1:8765) и прямого подключения к Gemini 4 Argon (localhost:8083/v1)
+ * Lavka Quality Shield v2.0.2 — Content Script (Single-Bar Minimalism)
+ * - На виду строго ОДНА ровная строка: Звёзды рейтинга + Цена за 1 кг + Цена за 100 г белка + кнопка «▾ Подробнее»
+ * - Все детали (заметка, быстрые теги, флаги состава, кнопка бана и ИИ-обзор) спрятаны внутрь выпадающего меню
+ * - На странице «Вы покупали» и в каталоге отображается только аккуратный значок рейтинга (★ 5) без плашки с текстом отзыва
  */
 
 (function () {
@@ -203,12 +203,14 @@
     let weightGrams = null;
     let proteinPer100g = null;
     let pricePer100gProtein = null;
+    let unitLabel = 'кг';
 
     if (meta.amountText) {
       const m = meta.amountText.match(/([\d.,]+)\s*(г|кг|мл|л)/i);
       if (m) {
         const val = parseFloat(m[1].replace(',', '.'));
         const unit = m[2].toLowerCase();
+        unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
         if (val > 0) {
           weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
           if (meta.price) {
@@ -263,7 +265,19 @@
       }
     }
 
-    return { pricePerKg, pricePer100gProtein, flags: flags.slice(0, 4) };
+    return { pricePerKg, unitLabel, pricePer100gProtein, flags: flags.slice(0, 5) };
+  }
+
+  function renderDrawerToggleLabel(isOpen, review, smart) {
+    const hasBadFlags = smart && Array.isArray(smart.flags) && smart.flags.some((f) => f.type === 'bad');
+    const hasNoteOrTags = Boolean(review && ((review.note && review.note.trim()) || (Array.isArray(review.tags) && review.tags.length > 0)));
+    let dotHtml = '';
+    if (hasBadFlags) {
+      dotHtml = '<span class="lqs-dot-indicator has-warn" title="Есть замечания к составу"></span>';
+    } else if (hasNoteOrTags) {
+      dotHtml = '<span class="lqs-dot-indicator has-note" title="Есть сохраненная заметка"></span>';
+    }
+    return `${dotHtml}<span>${isOpen ? '▴ Скрыть' : '▾ Подробнее'}</span>`;
   }
 
   function syncExistingPanelUI(panel, review, meta) {
@@ -280,23 +294,32 @@
       b.classList.toggle('active', r >= s);
     });
 
+    const smart = meta ? analyzeProductQuality(meta) : null;
+
+    const metricsBox = panel.querySelector('#lqs-metrics-inline');
+    if (metricsBox && smart) {
+      metricsBox.innerHTML = `
+        <span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/${smart.unitLabel}` : `Цена/${smart.unitLabel} —`}</span>
+        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
+      `;
+    }
+
+    const flagsBox = panel.querySelector('#lqs-drawer-flags');
+    if (flagsBox && smart) {
+      flagsBox.innerHTML = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('');
+    }
+
     const banBtn = panel.querySelector('#lqs-ban-toggle');
     if (banBtn) {
       banBtn.classList.toggle('ban-active', banned);
-      banBtn.textContent = banned ? '💀 В бане' : '🚫';
+      banBtn.textContent = banned ? '💀 В бане' : '🚫 В бан';
     }
 
-    const notePill = panel.querySelector('#lqs-inline-note');
-    if (notePill) {
-      const summaryText = note.trim() || tags.join(' ');
-      if (summaryText) {
-        notePill.classList.remove('is-hidden');
-        notePill.textContent = `💬 ${summaryText}`;
-        notePill.title = summaryText;
-      } else {
-        notePill.classList.add('is-hidden');
-        notePill.textContent = '';
-      }
+    const drawer = panel.querySelector('#lqs-drawer');
+    const drawerToggle = panel.querySelector('#lqs-drawer-toggle');
+    if (drawerToggle && drawer) {
+      const isOpen = drawer.classList.contains('open');
+      drawerToggle.innerHTML = renderDrawerToggleLabel(isOpen, review, smart);
     }
 
     panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
@@ -306,16 +329,6 @@
     const noteArea = panel.querySelector('#lqs-note-area');
     if (noteArea && document.activeElement !== noteArea && noteArea.value !== note) {
       noteArea.value = note;
-    }
-
-    const row2 = panel.querySelector('#lqs-row-2');
-    if (row2 && meta) {
-      const smart = analyzeProductQuality(meta);
-      row2.innerHTML = `
-        <span class="lqs-metric-pill">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/кг` : 'Цена/кг —'}</span>
-        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
-        ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
-      `;
     }
   }
 
@@ -327,7 +340,10 @@
     const aiSources = panel.querySelector('#lqs-ai-sources');
 
     drawer.classList.add('open');
-    if (drawerToggle) drawerToggle.textContent = '▴ Скрыть';
+    if (drawerToggle) {
+      const smart = analyzeProductQuality(meta);
+      drawerToggle.innerHTML = renderDrawerToggleLabel(true, null, smart);
+    }
     aiBox.classList.add('visible');
     aiContent.innerHTML = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора...';
     aiSources.innerHTML = '';
@@ -449,55 +465,60 @@
       if (existing) existing.remove();
 
       const smart = analyzeProductQuality(meta);
-      const summaryText = current.note.trim() || current.tags.join(' ');
 
       const panel = document.createElement('div');
       panel.className = `lqs-product-panel ${current.banned || (current.rating > 0 && current.rating <= 2) ? 'is-banned' : (current.rating >= 4 ? 'is-god' : '')}`;
       panel.dataset.slug = slug;
 
       panel.innerHTML = `
-        <div class="lqs-compact-row-1">
-          <div class="lqs-left-group">
+        <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + кнопка «▾ Подробнее» -->
+        <div class="lqs-main-bar">
+          <div class="lqs-core-left">
             <div class="lqs-stars-inline" id="lqs-stars-box">
               ${[1, 2, 3, 4, 5].map((n) => `
                 <button type="button" class="lqs-star-btn ${current.rating >= n ? 'active' : ''}" data-star="${n}" title="Оценить на ${n}">★</button>
               `).join('')}
             </div>
 
-            <span class="lqs-inline-note-pill ${summaryText ? '' : 'is-hidden'}" id="lqs-inline-note" title="${summaryText.replace(/"/g, '&quot;')}">
-              💬 ${summaryText}
-            </span>
+            <div class="lqs-metrics-inline" id="lqs-metrics-inline">
+              <span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/${smart.unitLabel}` : `Цена/${smart.unitLabel} —`}</span>
+              ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
+            </div>
           </div>
 
-          <div class="lqs-actions-inline">
-            <button type="button" class="lqs-mini-btn ${current.banned ? 'ban-active' : ''}" id="lqs-ban-toggle" title="В чёрный список">
-              ${current.banned ? '💀 В бане' : '🚫'}
-            </button>
-            <button type="button" class="lqs-mini-btn ai-btn" id="lqs-ai-btn" title="Найти отзывы в сети и спросить ИИ">
-              🤖 ИИ-обзор
-            </button>
-            <button type="button" class="lqs-mini-btn" id="lqs-drawer-toggle" title="Открыть заметку и теги">
-              ▾ Отзыв
-            </button>
-          </div>
+          <button type="button" class="lqs-drawer-toggle-btn" id="lqs-drawer-toggle" title="Открыть заметку, состав и ИИ-обзор">
+            ${renderDrawerToggleLabel(false, current, smart)}
+          </button>
         </div>
 
-        <div class="lqs-compact-row-2" id="lqs-row-2">
-          <span class="lqs-metric-pill">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/кг` : 'Цена/кг —'}</span>
-          ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
-          ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
-        </div>
-
+        <!-- ВЫПАДАЮЩЕЕ МЕНЮ ПОД КАПОТОМ (открывается по клику на «▾ Подробнее») -->
         <div class="lqs-drawer" id="lqs-drawer">
+          <div class="lqs-drawer-toolbar">
+            <div class="lqs-drawer-actions">
+              <button type="button" class="lqs-mini-btn ai-btn" id="lqs-ai-btn" title="Найти отзывы в сети и спросить ИИ">
+                🤖 ИИ-обзор
+              </button>
+              <button type="button" class="lqs-mini-btn ${current.banned ? 'ban-active' : ''}" id="lqs-ban-toggle" title="В чёрный список">
+                ${current.banned ? '💀 В бане' : '🚫 В бан'}
+              </button>
+            </div>
+
+            <div class="lqs-drawer-flags" id="lqs-drawer-flags">
+              ${smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('')}
+            </div>
+          </div>
+
           <div class="lqs-tags-row">
             ${PRESET_TAGS.map((tag) => `
               <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${tag}">${tag}</span>
             `).join('')}
           </div>
+
           <div class="lqs-note-wrap">
             <textarea class="lqs-note-input" id="lqs-note-area" rows="2" placeholder="Короткая заметка о товаре..."></textarea>
             <button type="button" class="lqs-save-btn" id="lqs-save-btn">💾 Ок</button>
           </div>
+
           <div class="lqs-ai-box" id="lqs-ai-box">
             <div class="lqs-ai-header">
               <span>🤖 Сводка отзывов + разбор состава</span>
@@ -509,7 +530,6 @@
         </div>
       `;
 
-      // Вставляем строго как соседний блок после bar-container (снаружи его внутренности), чтобы не ловить чужой flex/grid
       const barContainer = infoBlock.querySelector('div[data-testid="bar-container"]');
       if (barContainer && barContainer.parentNode) {
         barContainer.parentNode.insertBefore(panel, barContainer.nextSibling);
@@ -568,7 +588,9 @@
         e.stopPropagation();
         const drawer = panel.querySelector('#lqs-drawer');
         const isOpen = drawer.classList.toggle('open');
-        e.currentTarget.textContent = isOpen ? '▴ Скрыть' : '▾ Отзыв';
+        const latestMeta = extractProductPageMetadata();
+        const latestSmart = analyzeProductQuality(latestMeta);
+        e.currentTarget.innerHTML = renderDrawerToggleLabel(isOpen, current, latestSmart);
       });
 
       panel.querySelector('#lqs-ai-btn').addEventListener('click', (e) => {
@@ -686,7 +708,7 @@
       if (oldNote) oldNote.remove();
       card.classList.remove('lqs-card-dimmed');
 
-      if (!review || (review.rating === 0 && !review.banned && (!review.note || !review.note.trim()))) return;
+      if (!review || (review.rating === 0 && !review.banned)) return;
 
       card.style.position = 'relative';
       const badge = document.createElement('div');
@@ -704,14 +726,11 @@
         badge.textContent = `★ ${review.rating}`;
       }
 
-      card.appendChild(badge);
-
       if (review.note && review.note.trim()) {
-        const notePreview = document.createElement('div');
-        notePreview.className = 'lqs-card-note-preview';
-        notePreview.textContent = `💬 ${review.note}`;
-        card.appendChild(notePreview);
+        badge.title = review.note.trim();
       }
+
+      card.appendChild(badge);
     });
   }
 
