@@ -2,10 +2,10 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.0</title>
+  <title>Lavka Quality Shield v2.0.3</title>
   <style>
     body {
-      width: 370px;
+      width: 380px;
       margin: 0;
       padding: 14px;
       background: #f5f4f2;
@@ -35,9 +35,9 @@
       flex: 1;
       border: none;
       background: transparent;
-      padding: 6px;
+      padding: 6px 4px;
       border-radius: 8px;
-      font-size: 12px;
+      font-size: 11.5px;
       font-weight: 600;
       cursor: pointer;
       color: #5c5a57;
@@ -134,7 +134,7 @@
       font-weight: 600;
       cursor: pointer;
     }
-    .settings-panel {
+    .settings-panel, .diag-panel {
       display: none;
       background: #ffffff;
       border: 1px solid #e5e2dd;
@@ -186,17 +186,32 @@
       cursor: pointer;
       font-size: 12px;
     }
+    .diag-pre {
+      background: #18181b;
+      color: #d4d4d8;
+      padding: 8px;
+      border-radius: 8px;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 10.5px;
+      line-height: 1.35;
+      max-height: 190px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 8px 0;
+    }
   </style>
 </head>
 <body>
   <div class="top-bar">
     <h2>🛡️ Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;">v2.0</span>
+    <span style="font-size:11px;color:#7a7875;">v2.0.3</span>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" id="tab-reviews-btn">⭐ Мои отзывы</button>
-    <button class="tab-btn" id="tab-ai-btn">🤖 Настройки ИИ</button>
+    <button class="tab-btn active" id="tab-reviews-btn">⭐ Отзывы</button>
+    <button class="tab-btn" id="tab-ai-btn">🤖 ИИ</button>
+    <button class="tab-btn" id="tab-diag-btn">🩺 Диагностика</button>
   </div>
 
   <div id="panel-reviews">
@@ -244,6 +259,21 @@
     </div>
     <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки ИИ</button>
     <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:6px;"></div>
+  </div>
+
+  <div class="diag-panel" id="panel-diag">
+    <div style="font-size:11px;color:#5c5a57;margin-bottom:6px;">
+      Телеметрия DOM, проверка селекторов Лавки и тест локальных серверов (на странице Лавки также доступно по <b>Alt+Shift+D</b>).
+    </div>
+    <div class="actions" style="margin-top:0;margin-bottom:6px;">
+      <button type="button" class="action-btn" id="diag-refresh-btn">🔄 Обновить телеметрию</button>
+      <button type="button" class="action-btn" id="diag-ping-btn">🔌 Тест :8765 / :8083</button>
+    </div>
+    <div id="diag-ping-status" style="font-size:11px;color:#21201f;background:#f5f4f2;padding:6px 8px;border-radius:8px;margin-bottom:6px;">
+      Нажми «🔌 Тест :8765 / :8083» для проверки серверов.
+    </div>
+    <pre class="diag-pre" id="diag-report-box">Загрузка телеметрии...</pre>
+    <button type="button" class="save-settings-btn" id="diag-copy-btn">📋 Скопировать диагностический отчёт</button>
   </div>
 
   <script src="popup.js"></script>

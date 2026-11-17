@@ -1,10 +1,11 @@
 """
-Lavka Quality Shield v2.0 — Локальный FastAPI сервер (127.0.0.1:8765)
+Lavka Quality Shield v2.0.3 — Локальный FastAPI сервер (127.0.0.1:8765)
 1. Принимает название, состав, БЖУ и цену товара из расширения Lavka Quality Shield.
 2. Ищет реальные отзывы о продукте в сети (Отзовик, IRecommend, Роскачество, ВкусВилл, Ozon).
 3. Кэширует результаты в локальной базе SQLite (lavka_ai_cache.db).
 4. Отправляет найденные отзывы + состав в твой локальный Cookie-мост Gemini 4 Argon (http://localhost:8083/v1)
    или любой другой OpenAI-совместимый облачный/локальный ИИ.
+5. Содержит эндпоинт GET /api/health для встроенной системы диагностики расширения.
 """
 
 import os
@@ -27,7 +28,7 @@ from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.0.0")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.0.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +70,23 @@ class AnalyzeRequest(BaseModel):
     aiApiKey: str = ""
     aiModel: str = "gemini-4-argon"
     forceRefresh: bool = False
+
+
+@app.get("/api/health")
+async def health_check():
+    cached_count = 0
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM product_ai_cache").fetchone()
+            cached_count = row[0] if row else 0
+    except Exception:
+        pass
+    return {
+        "status": "ok",
+        "version": "2.0.3",
+        "cachedItems": cached_count,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 
 async def search_web_reviews(product_title: str) -> List[dict]:

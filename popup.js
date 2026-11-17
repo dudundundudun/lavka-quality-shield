@@ -1,5 +1,6 @@
 const STORAGE_KEY = 'lqs_reviews_v1';
 const SETTINGS_KEY = 'lqs_settings_v2';
+const DIAG_STORAGE_KEY = 'lqs_diag_snapshot_v1';
 
 const DEFAULT_SETTINGS = {
   backendUrl: 'http://127.0.0.1:8765',
@@ -62,19 +63,24 @@ function loadSettings() {
   });
 }
 
-document.getElementById('tab-reviews-btn').addEventListener('click', () => {
-  document.getElementById('tab-reviews-btn').classList.add('active');
-  document.getElementById('tab-ai-btn').classList.remove('active');
-  document.getElementById('panel-reviews').style.display = 'block';
-  document.getElementById('panel-ai').style.display = 'none';
-});
+function switchTab(activeId) {
+  const map = {
+    'tab-reviews-btn': 'panel-reviews',
+    'tab-ai-btn': 'panel-ai',
+    'tab-diag-btn': 'panel-diag'
+  };
+  Object.keys(map).forEach((btnId) => {
+    document.getElementById(btnId).classList.toggle('active', btnId === activeId);
+    document.getElementById(map[btnId]).style.display = btnId === activeId ? 'block' : 'none';
+  });
+  if (activeId === 'tab-diag-btn') {
+    refreshDiagnosticsView();
+  }
+}
 
-document.getElementById('tab-ai-btn').addEventListener('click', () => {
-  document.getElementById('tab-ai-btn').classList.add('active');
-  document.getElementById('tab-reviews-btn').classList.remove('active');
-  document.getElementById('panel-reviews').style.display = 'none';
-  document.getElementById('panel-ai').style.display = 'block';
-});
+document.getElementById('tab-reviews-btn').addEventListener('click', () => switchTab('tab-reviews-btn'));
+document.getElementById('tab-ai-btn').addEventListener('click', () => switchTab('tab-ai-btn'));
+document.getElementById('tab-diag-btn').addEventListener('click', () => switchTab('tab-diag-btn'));
 
 document.getElementById('preset-argon').addEventListener('click', () => {
   document.getElementById('inp-ai-url').value = 'http://localhost:8083/v1';
@@ -142,6 +148,97 @@ document.getElementById('import-file').addEventListener('change', (e) => {
     }
   };
   reader.readAsText(file);
+});
+
+function refreshDiagnosticsView() {
+  const box = document.getElementById('diag-report-box');
+  box.textContent = 'Запрашиваю живую телеметрию с открытой вкладки Лавки...';
+
+  if (chrome.tabs && chrome.tabs.query) {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const activeTab = tabs && tabs[0];
+      if (activeTab && activeTab.id && activeTab.url && activeTab.url.includes('lavka.yandex.ru')) {
+        chrome.tabs.sendMessage(activeTab.id, { type: 'LQS_GET_DIAGNOSTICS' }, (resp) => {
+          if (!chrome.runtime.lastError && resp && resp.reportText) {
+            box.textContent = resp.reportText;
+            return;
+          }
+          loadFallbackDiagFromStorage(box);
+        });
+      } else {
+        loadFallbackDiagFromStorage(box);
+      }
+    });
+  } else {
+    loadFallbackDiagFromStorage(box);
+  }
+}
+
+function loadFallbackDiagFromStorage(box) {
+  chrome.storage.local.get([DIAG_STORAGE_KEY], (res) => {
+    const snap = res && res[DIAG_STORAGE_KEY];
+    if (snap && snap.reportText) {
+      box.textContent = snap.reportText;
+    } else {
+      box.textContent = 'Открой любую страницу https://lavka.yandex.ru/, чтобы собрать телеметрию DOM.';
+    }
+  });
+}
+
+document.getElementById('diag-refresh-btn').addEventListener('click', refreshDiagnosticsView);
+
+document.getElementById('diag-ping-btn').addEventListener('click', async () => {
+  const statusEl = document.getElementById('diag-ping-status');
+  statusEl.textContent = '⏳ Пингую локальный FastAPI (:8765) и ИИ-мост (:8083)...';
+
+  chrome.storage.local.get([SETTINGS_KEY], async (res) => {
+    const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
+    const backendUrl = cfg.backendUrl.replace(/\/$/, '');
+    const aiBaseUrl = cfg.aiBaseUrl.replace(/\/$/, '');
+    const lines = [];
+
+    try {
+      const t0 = performance.now();
+      const r1 = await fetch(`${backendUrl}/api/health`);
+      const dt1 = Math.round(performance.now() - t0);
+      if (r1.ok) {
+        const j = await r1.json().catch(() => ({}));
+        lines.push(`✅ FastAPI (:8765): ОК (${dt1} мс, в кэше: ${j.cachedItems ?? '?'} товаров)`);
+      } else {
+        lines.push(`⚠️ FastAPI (:8765): HTTP ${r1.status}`);
+      }
+    } catch {
+      lines.push(`❌ FastAPI (:8765): выключен (запусти start_server.bat)`);
+    }
+
+    try {
+      const t1 = performance.now();
+      const headers = cfg.aiApiKey ? { Authorization: `Bearer ${cfg.aiApiKey}` } : {};
+      const r2 = await fetch(`${aiBaseUrl}/models`, { headers });
+      const dt2 = Math.round(performance.now() - t1);
+      if (r2.ok) {
+        lines.push(`✅ ИИ-мост (${cfg.aiModel}): ОК (${dt2} мс)`);
+      } else {
+        lines.push(`⚠️ ИИ-мост: HTTP ${r2.status} (проверь API Key)`);
+      }
+    } catch {
+      lines.push(`❌ ИИ-мост (${aiBaseUrl}): недоступен`);
+    }
+
+    statusEl.innerHTML = lines.join('<br>');
+  });
+});
+
+document.getElementById('diag-copy-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('diag-copy-btn');
+  const text = document.getElementById('diag-report-box').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✅ Отчёт скопирован в буфер!';
+  } catch {
+    btn.textContent = '⚠️ Не удалось скопировать';
+  }
+  setTimeout(() => { btn.textContent = '📋 Скопировать диагностический отчёт'; }, 1500);
 });
 
 loadReviews();
