@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Анти-Шулер Цен, Менеджер Аккаунтов (Куки/Пароли), Корзина и Zero-Click ИИ",
-  "version": "2.5.0",
-  "description": "Zero-Click ИИ-ревизор, менеджер аккаунтов Лавки (сохранение куки-сессий, логинов и паролей с переключением в 1 клик), аудит корзины с ценами и ссылками на конкурентов, разоблачение персональных наценок и точный авто-сборщик корзины.",
+  "version": "2.5.1",
+  "description": "Zero-Click ИИ-ревизор (с защитой от зависаний MV3), точный поиск идентичных товаров (с учётом «без сахара», вкуса и объёма), менеджер аккаунтов Лавки (куки + пароли в 1 клик), аудит корзины и авто-сборщик.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -36,7 +36,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.5.0 — Account Switcher, Cart Audit & Zero-Click AI",
+    "default_title": "Lavka Quality Shield v2.5.1 — Exact Product Match, Account Switcher, Cart Audit & Zero-Click AI",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

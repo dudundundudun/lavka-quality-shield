@@ -1,24 +1,22 @@
 /**
- * Lavka Quality Shield v2.5.0 — Content Script
- * Что нового в v2.5.0:
- * 1. Исправлена вёрстка на карточке товара:
- *    - Устранено наложение строк в шапке ИИ-блока (.lqs-ai-header) и в кнопке сохранения заметки («💾 Ок»).
- *    - Полная изоляция line-height и flex-параметров кнопок от агрессивных стилей Яндекс Лавки.
- * 2. Прокачанный Баннер Аудита Корзины (.lqs-cart-audit-banner):
- *    - Автоматически сверяет все позиции корзины с ценами конкурентов и гостевыми ценами (без куки).
- *    - Сразу на баннере показывает, сколько позиций дешевле у конкурентов и общую сумму переплаты в рублях.
- *    - Выпадающий список по кнопке «🏪 Цены и ссылки в других магазинах ▾» с найденными ценами и прямыми ссылками
- *      на Перекрёсток, ВкусВилл, Ozon, Яндекс Маркет, Ленту и Купер по каждому товару корзины.
- *    - Быстрый переключатель аккаунтов Лавки («👤 Сменить аккаунт ▾») прямо из корзины в 1 клик.
- * 3. Исправленный захват и авто-сборка корзины (8 из 8 позиций и точный подсчёт штук):
- *    - Точное отделение строк корзины от каруселей рекомендаций, корректное чтение количества из степпера «- N +».
- * 4. Помощник авто-входа на passport.yandex.ru / id.yandex.ru для сохранённых логинов и паролей.
+ * Lavka Quality Shield v2.5.1 — Content Script
+ * Что исправлено и улучшено в v2.5.1:
+ * 1. Точный поиск продуктов без потери модификаторов («без сахара», вкусов, жирности и объёма «1,5 л»):
+ *    - При генерации поисковых ссылок в корзине и на карточке товара всегда передаётся ПОЛНОЕ название с брендом и фасовкой/литражом.
+ *    - Прямые кнопки проверки товара в Ozon, Перекрёстке, ВкусВилле, Я.Маркете, Ленте и Купере добавлены также прямо на карточку товара в блок Радара цен.
+ * 2. Полное устранение зависания окна ИИ («НЕ ОБНОВЛЯЕТСЯ ОКНО») и ошибки «message channel closed before a response was received»:
+ *    - Подписка карточки товара на пуш-событие `LQS_AI_VERDICT_READY` и на `chrome.storage.onChanged` (`AI_CACHE_KEY`).
+ *    - Автоматический перехват обрыва канала MV3 с фоновым дожимом результата из кэша и авто-повтором без вывода сырой английской ошибки.
+ *    - Визуальная индикация клика по кнопке «🔄 Обновить».
+ * 3. Связка двух типов URL одного товара в Лавке (SEO-slug `/good/napitok-cola-...` <-> HEX-ID `/good/4cbf6c0b...`):
+ *    - Кэш ИИ, база цен и фиксатор цен витрины (`Cart Price Lock`) находят товар как по `slug`, так и по `cleanTitle`.
+ * 4. Исправлен расчёт цены за 1 шт. vs суммы строки в корзине при `qty > 1` (`extractCartItemsFromDOM`).
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.5.0';
+  const VERSION = '2.5.1';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
@@ -67,7 +65,6 @@
   let lastObservedUrl = window.location.href;
   let lastCatalogHarvestTs = 0;
 
-  // Состояние аудита корзины и открытых выпадающих списков в корзине
   let lastCartAuditSignature = '';
   let lastCartCompetitorAudit = null;
   let isCartAuditLoading = false;
@@ -83,6 +80,111 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  /**
+   * Нормализует название товара (без потери «без сахара» и вкуса) для связки SEO-slug и HEX-ID
+   */
+  function normalizeTitle(raw) {
+    if (!raw) return '';
+    return String(raw)
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&laquo;|&raquo;|&quot;|&nbsp;/gi, ' ')
+      .replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ')
+      .replace(/(?:,\s*|\s+)(?:\d+\s*[×xх*]\s*)?\d+(?:[.,]\d+)?\s*(?:г|гр|грамм|кг|мл|л|шт|уп|пак|рул|капс)\.?$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .replace(/ё/g, 'е');
+  }
+
+  /**
+   * Собирает ПОЛНОЕ название продукта вместе с весом/объёмом (например «Напиток Cola Добрый газированный без сахара 1,5 л»)
+   */
+  function buildFullProductSearchQuery(title, brand = '', amount = '') {
+    let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
+    q = q.replace(/(^|\s)(?:бзмж|стм)(?=\s|$)/gi, ' ');
+    q = q.replace(/\s+/g, ' ').trim();
+
+    if (brand) {
+      const cleanBrand = String(brand).replace(/[\u00ad\u200b\u00a0«»"']/g, ' ').trim();
+      if (cleanBrand && !q.toLowerCase().includes(cleanBrand.toLowerCase())) {
+        q = cleanBrand.toLowerCase() === 'из лавки' ? `${q} Из Лавки` : `${q} ${cleanBrand}`;
+      }
+    }
+
+    if (amount) {
+      const cleanAmt = String(amount).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
+      if (cleanAmt && !q.toLowerCase().includes(cleanAmt.toLowerCase())) {
+        q = `${q} ${cleanAmt}`;
+      }
+    }
+
+    return q.replace(/\s+/g, ' ').trim();
+  }
+
+  function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
+    const fullQuery = buildFullProductSearchQuery(rawTitle, brand, amount);
+    const enc = encodeURIComponent(fullQuery || rawTitle || '');
+    return [
+      { store: 'Ozon', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
+      { store: 'Перекрёсток', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
+      { store: 'ВкусВилл', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
+      { store: 'Я.Маркет', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery },
+      { store: 'Лента', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
+      { store: 'Купер', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery }
+    ];
+  }
+
+  function findAiCacheInMemory(slug, title = '') {
+    if (slug && lastAiResultBySlug.has(slug)) {
+      return lastAiResultBySlug.get(slug);
+    }
+    if (slug && aiCacheMemory && aiCacheMemory[slug] && aiCacheMemory[slug].verdict) {
+      return aiCacheMemory[slug];
+    }
+    const norm = normalizeTitle(title);
+    if (norm && norm.length >= 4 && aiCacheMemory) {
+      for (const entry of Object.values(aiCacheMemory)) {
+        if (entry && entry.verdict && !String(entry.verdict).startsWith('⚠️') && normalizeTitle(entry.title) === norm) {
+          return entry;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findPriceIntelInMemory(slug, title = '') {
+    if (slug && priceSummaryBySlug.has(slug)) {
+      return priceSummaryBySlug.get(slug);
+    }
+    if (slug && priceDbMemory && priceDbMemory[slug]) {
+      return priceDbMemory[slug];
+    }
+    const norm = normalizeTitle(title);
+    if (norm && norm.length >= 4 && priceDbMemory) {
+      for (const entry of Object.values(priceDbMemory)) {
+        if (entry && normalizeTitle(entry.title) === norm) {
+          return entry;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findCartLockInMemory(slug, title = '') {
+    if (slug && cartLocksMemory && cartLocksMemory[slug]) {
+      return cartLocksMemory[slug];
+    }
+    const norm = normalizeTitle(title);
+    if (norm && norm.length >= 4 && cartLocksMemory) {
+      for (const lock of Object.values(cartLocksMemory)) {
+        if (lock && normalizeTitle(lock.title) === norm) {
+          return lock;
+        }
+      }
+    }
+    return null;
   }
 
   function extractVerdictBadgeFromText(verdictText) {
@@ -488,7 +590,6 @@
     if (ev && ev.reason) LQS_RECORDER.error('unhandledrejection', ev.reason);
   });
 
-  // Перехват добавления товара в корзину для фиксации обещанной цены (Cart Price Lock)
   document.addEventListener('click', (e) => {
     const target = e.target;
     if (!target || !target.closest) return;
@@ -549,6 +650,25 @@
         });
         return true;
       }
+      // Прямой пуш готового ИИ-вердикта от Service Worker'а (гарантирует мгновенное обновление окна!)
+      if (msg.type === 'LQS_AI_VERDICT_READY' && msg.result && msg.result.verdict) {
+        const currentSlug = extractSlugFromUrl(window.location.href);
+        const panel = document.querySelector('.lqs-product-panel');
+        if (panel && currentSlug) {
+          const meta = extractProductPageMetadata();
+          const currentCleanTitle = normalizeTitle(meta.title);
+          if (msg.slug === currentSlug || (msg.cleanTitle && currentCleanTitle && msg.cleanTitle === currentCleanTitle)) {
+            LQS_RECORDER.updateModule(
+              'aiReviewer',
+              'OK',
+              `Ответ получен через Push [${msg.result.mode || 'ИИ'}]`
+            );
+            renderAiVerdictIntoPanel(panel, currentSlug, meta, msg.result, cachedSettings.autoOpenDrawerOnAi !== false);
+          }
+        }
+        sendResponse({ ok: true });
+        return true;
+      }
       return false;
     });
   }
@@ -569,18 +689,6 @@
       LQS_RECORDER.record('WIDGET', `DOM write executed for ${tagKey}`);
     }
     return true;
-  }
-
-  function normalizeTitle(raw) {
-    if (!raw) return '';
-    return raw
-      .replace(/<[^>]*>/g, '')
-      .replace(/&laquo;|&raquo;|&quot;|&nbsp;/gi, ' ')
-      .replace(/[\u00ad\u200b\u00a0]/g, '')
-      .replace(/[«»"„“”]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
   }
 
   function extractImageKey(src) {
@@ -662,7 +770,7 @@
       if (slug && item.slug && item.slug.toLowerCase() === slug) return { item, matchedBy: 'slug_case' };
       if (productId && item.productId && item.productId === productId) return { item, matchedBy: 'productId' };
       if (imageKey && item.imageKey && item.imageKey === imageKey) return { item, matchedBy: 'imageKey' };
-      if (cleanTitle && item.cleanTitle && item.cleanTitle === cleanTitle) return { item, matchedBy: 'cleanTitle' };
+      if (cleanTitle && item.cleanTitle && normalizeTitle(item.cleanTitle) === cleanTitle) return { item, matchedBy: 'cleanTitle' };
     }
     return null;
   }
@@ -733,6 +841,7 @@
         cartLocksMemory[slug] = {
           slug,
           title,
+          cleanTitle: normalizeTitle(title),
           lockedPrice: price,
           amount,
           accountId: detectCurrentAccountLabel(),
@@ -746,9 +855,6 @@
     }
   }
 
-  /**
-   * Находит точный DOM-контейнер одной строки товара в корзине (не поднимаясь до общего списка!)
-   */
   function findCartRowContainerForLink(linkEl) {
     let curr = linkEl;
     let bestRow = linkEl.parentElement;
@@ -758,7 +864,6 @@
       if (parent.tagName === 'MAIN' || parent.tagName === 'BODY') break;
       if (parent.classList && parent.classList.contains('lqs-cart-audit-banner')) return null;
 
-      // Проверяем, сколько РАЗНЫХ товаров (/good/<slug>) лежит внутри parent
       const linksInside = parent.querySelectorAll('a[href*="/good/"]');
       const slugsInside = new Set();
       linksInside.forEach((a) => {
@@ -767,7 +872,6 @@
       });
 
       if (slugsInside.size > 1) {
-        // Родитель уже объединяет несколько разных товаров корзины — останавливаемся на curr!
         return curr;
       }
 
@@ -779,7 +883,9 @@
   }
 
   /**
-   * Точно извлекает все позиции и количество штук (qty) из корзины Яндекс Лавки
+   * Извлекает все позиции и количество штук (qty) из корзины Яндекс Лавки:
+   * - Склеивает полное название товара с его граммовкой/литражом (чтобы не терялось «1,5 л» при поиске!)
+   * - Корректно отличает цену за 1 шт. от суммы строки при `qty > 1`
    */
   function extractCartItemsFromDOM() {
     const items = [];
@@ -788,9 +894,7 @@
     const allGoodLinks = document.querySelectorAll('a[href*="/good/"]');
 
     allGoodLinks.forEach((linkEl) => {
-      // Исключаем ссылки внутри нашего собственного баннера и панели
       if (linkEl.closest('.lqs-cart-audit-banner, .lqs-product-panel')) return;
-      // Исключаем карточки из каруселей рекомендаций ("С этим покупают", "Добавьте к заказу")
       if (linkEl.closest('div[data-testid="product-card"]')) return;
 
       const inCartRegion =
@@ -804,7 +908,6 @@
       const container = findCartRowContainerForLink(linkEl);
       if (!container) return;
 
-      // Если внутри контейнера нет ни цены, ни кнопок степпера (- / +), это не строка корзины
       const textAll = (container.innerText || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
       const priceMatches = Array.from(textAll.matchAll(/(\d[\d\s]*)\s*₽/g)).map((m) =>
         parseFloat(m[1].replace(/\s/g, ''))
@@ -813,11 +916,10 @@
 
       seen.add(slug);
 
-      // Название товара: берём из ссылки с текстом или alt картинки
       let title = '';
       const rowLinks = container.querySelectorAll('a[href*="/good/"]');
       rowLinks.forEach((a) => {
-        const t = (a.textContent || '').trim();
+        const t = (a.textContent || '').replace(/[\u00ad\u200b]/g, '').trim();
         if (t && t.length > title.length) title = t;
       });
       if (!title) {
@@ -825,16 +927,13 @@
         title = (imgEl && imgEl.getAttribute('alt')) || '';
       }
       if (!title) {
-        // Первая строка текста контейнера до цены
         const lines = (container.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
         title = lines[0] || slug;
       }
 
-      // Точное чтение количества (qty) из степпера "- N +"
       let qty = 1;
       let foundStepperQty = false;
 
-      // Ищем блок с двумя кнопками (- и +), между которыми написано число
       const buttonsInRow = Array.from(container.querySelectorAll('button'));
       if (buttonsInRow.length >= 2) {
         for (let i = 0; i < buttonsInRow.length - 1; i++) {
@@ -877,20 +976,42 @@
         }
       }
 
-      // Первая цена в строке Лавки — актуальная цена (вторая, если есть — зачёркнутая старая цена)
-      const firstPrice = priceMatches[0];
-      const oldPrice = priceMatches.length > 1 && priceMatches[1] > firstPrice ? priceMatches[1] : null;
-
-      // Вес/фасовка (например "· 175 г")
+      // Вес/фасовка (например "1,5 л" или "175 г")
       const weightMatch = textAll.match(/(\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт)(?![а-яa-z]))/i);
       const amount = weightMatch ? weightMatch[1].trim() : '';
 
+      // Дополняем название весом/объёмом, если в заголовке ссылки его не было
+      const fullTitle = buildFullProductSearchQuery(title, '', amount);
+
+      const rawFirstPrice = priceMatches[0];
+      const rawOldPrice = priceMatches.length > 1 && priceMatches[1] > rawFirstPrice ? priceMatches[1] : null;
+
+      // Проверяем, является ли rawFirstPrice суммой за qty штук или ценой за 1 шт.
+      let unitPrice = rawFirstPrice;
+      let unitOldPrice = rawOldPrice;
+
+      if (qty > 1) {
+        const knownLock = findCartLockInMemory(slug, fullTitle);
+        const knownDb = findPriceIntelInMemory(slug, fullTitle);
+        const refUnitPrice = (knownLock && knownLock.lockedPrice) || (knownDb && knownDb.lastPrice) || null;
+
+        if (refUnitPrice && Math.abs(rawFirstPrice - refUnitPrice * qty) <= Math.max(6, qty * 3)) {
+          // В строке корзины отображена сумма за все qty штук -> делим на qty
+          unitPrice = Math.round(rawFirstPrice / qty);
+          if (rawOldPrice) unitOldPrice = Math.round(rawOldPrice / qty);
+        } else if (!refUnitPrice && !/за\s*1\s*шт|₽\s*\/\s*шт/i.test(textAll) && rawFirstPrice % qty === 0) {
+          // В Яндекс Лавке строка корзины всегда выводит итоговую стоимость позиции (unitPrice * qty)
+          unitPrice = Math.round(rawFirstPrice / qty);
+          if (rawOldPrice) unitOldPrice = Math.round(rawOldPrice / qty);
+        }
+      }
+
       items.push({
         slug,
-        title: title.slice(0, 95),
+        title: fullTitle.slice(0, 120),
         qty,
-        price: firstPrice,
-        oldPrice,
+        price: unitPrice,
+        oldPrice: unitOldPrice,
         amount
       });
     });
@@ -963,7 +1084,7 @@
 
     const tampered = [];
     snap.items.forEach((it) => {
-      const lock = cartLocksMemory[it.slug];
+      const lock = findCartLockInMemory(it.slug, it.title);
       if (lock && lock.lockedPrice && it.price > lock.lockedPrice) {
         tampered.push({
           title: it.title,
@@ -987,14 +1108,13 @@
     const overpayAlt = audit ? audit.totalOverpayVsAltAccount : 0;
     const cheaperCompCount = audit ? audit.cheaperAtCompetitorsCount : 0;
 
-    // Формируем сводные бейджи переплаты прямо на главном баннере корзины
     let compPillHtml = '';
     if (isCartAuditLoading && !audit) {
-      compPillHtml = `<span class="lqs-cart-pill">⏳ Сверяю цены корзины с другими магазинами и без куки...</span>`;
+      compPillHtml = `<span class="lqs-cart-pill">⏳ Сверяю точные названия и объёмы товаров с другими магазинами...</span>`;
     } else if (overpayComp > 0) {
       compPillHtml = `<span class="lqs-cart-pill overpay-bad">🏪 У конкурентов дешевле (${cheaperCompCount} поз.): переплата +${overpayComp} ₽!</span>`;
     } else if (audit) {
-      compPillHtml = `<span class="lqs-cart-pill overpay-good">🏪 Цены конкурентов проверены (${snap.items.length} поз.)</span>`;
+      compPillHtml = `<span class="lqs-cart-pill overpay-good">🏪 Цены конкурентов проверены по полному названию (${snap.items.length} поз.)</span>`;
     }
 
     let altAccPillHtml = '';
@@ -1002,20 +1122,13 @@
       altAccPillHtml = `<span class="lqs-cart-pill overpay-warn">🕵️ Без куки / на др. акке дешевле на -${overpayAlt} ₽!</span>`;
     }
 
-    // Выпадающий список 1: Цены конкурентов, переплата и прямые ссылки на другие магазины по каждому товару корзины
     const auditItems = (audit && Array.isArray(audit.items) && audit.items.length > 0)
       ? audit.items
       : snap.items.map((i) => ({
           ...i,
           rowTotal: Math.round(i.price * i.qty),
           competitorOffers: [],
-          storeSearchLinks: [
-            { store: 'Перекрёсток', url: `https://www.perekrestok.ru/cat/search?search=${encodeURIComponent(i.title)}` },
-            { store: 'ВкусВилл', url: `https://vkusvill.ru/search/?q=${encodeURIComponent(i.title)}` },
-            { store: 'Ozon', url: `https://www.ozon.ru/search/?text=${encodeURIComponent(i.title)}` },
-            { store: 'Я.Маркет', url: `https://market.yandex.ru/search?text=${encodeURIComponent(i.title)}` },
-            { store: 'Лента', url: `https://lenta.com/search/?searchText=${encodeURIComponent(i.title)}` }
-          ]
+          storeSearchLinks: buildDirectStoreSearchLinks(i.title, i.amount)
         }));
 
     const compDropdownRowsHtml = auditItems
@@ -1025,7 +1138,7 @@
             ? `<span class="lqs-cart-pill overpay-bad">Переплата +${it.overpayVsCompetitorTotal} ₽ (в сетях от ~${it.competitorMinPrice} ₽/шт)</span>`
             : it.competitorMinPrice
             ? `<span class="lqs-cart-pill overpay-good">В сетях от ~${it.competitorMinPrice} ₽/шт (в Лавке ок)</span>`
-            : `<span class="lqs-cart-pill">Ссылки на магазины ниже 👇</span>`;
+            : `<span class="lqs-cart-pill">Точный поиск по полному названию 👇</span>`;
 
         const altBadge =
           it.overpayVsAltTotal > 0
@@ -1043,14 +1156,16 @@
               .join('')
           : '';
 
-        const searchLinksHtml = Array.isArray(it.storeSearchLinks)
+        const linksList = Array.isArray(it.storeSearchLinks) && it.storeSearchLinks.length > 0
           ? it.storeSearchLinks
-              .map(
-                (s) =>
-                  `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" title="Найти «${escapeHtml(it.title)}» в магазине ${escapeHtml(s.store)}">🔍 ${escapeHtml(s.store)} ↗</a>`
-              )
-              .join('')
-          : '';
+          : buildDirectStoreSearchLinks(it.title, it.amount);
+
+        const searchLinksHtml = linksList
+          .map(
+            (s) =>
+              `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" title="Найти «${escapeHtml(s.query || it.title)}» в магазине ${escapeHtml(s.store)}">🔍 ${escapeHtml(s.store)} ↗</a>`
+          )
+          .join('');
 
         return `
           <div class="lqs-cart-comp-item">
@@ -1077,7 +1192,6 @@
       })
       .join('');
 
-    // Выпадающий список 2: Быстрое переключение аккаунтов Лавки (куки-сессии + клонирование корзины)
     const accountsList = cachedAccountsVault && Array.isArray(cachedAccountsVault.accounts)
       ? cachedAccountsVault.accounts
       : [];
@@ -1146,7 +1260,7 @@
       <div class="lqs-cart-dropdown ${isCartCompDropdownOpen ? 'open' : ''}" id="lqs-cart-comp-dropdown">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
           <span style="font-weight:700;font-size:12px;color:#334155;">
-            🏪 Сравнение товаров корзины с ценами в других магазинах и без куки (кликни по магазину для перехода):
+            🏪 Поиск идентичных товаров (с учётом «без сахара», вкуса и объёма) в других магазинах:
           </span>
           <button type="button" class="lqs-mini-btn" id="lqs-cart-rescan-comp-btn">
             🔄 Обновить цены конкурентов
@@ -1165,7 +1279,7 @@
             💾 Запомнить куки текущего входа (${escapeHtml(activeAccLabel)})
           </button>
         </div>
-        ${accDropdownRowsHtml || '<div style="font-size:12px;color:#64748b;">Открой вкладку «💰 Цены и Корзина» в окне расширения, чтобы настроить профили.</div>'}
+        ${accDropdownRowsHtml || '<div style="font-size:12px;color:#64748b;">Открой вкладку «🔐 Акки и Корзина» в окне расширения, чтобы настроить профили.</div>'}
       </div>
     `;
 
@@ -1195,7 +1309,7 @@
     const rescanBtn = banner.querySelector('#lqs-cart-rescan-comp-btn');
     if (rescanBtn) {
       rescanBtn.onclick = () => {
-        rescanBtn.textContent = '⏳ Ищу цены в сетях...';
+        rescanBtn.textContent = '⏳ Ищу точные совпадения в сетях...';
         triggerCartCompetitorAudit(snap, true);
       };
     }
@@ -1276,7 +1390,7 @@
           ``,
           `## Список позиций (${snap.items.length} наименований, всего ${totalUnits} шт.) и пересчёт по калькулятору:`,
           ...auditItems.map((it, idx) => {
-            const lock = cartLocksMemory[it.slug];
+            const lock = findCartLockInMemory(it.slug, it.title);
             const lockNote = lock ? ` | Обещанная цена на витрине: ${lock.lockedPrice} ₽` : '';
             const compNote = it.competitorMinPrice ? ` | В других сетях от ~${it.competitorMinPrice} ₽ (переплата +${it.overpayVsCompetitorTotal || 0} ₽)` : '';
             const guestNote = it.guestPrice ? ` | Цена без куки (Гость): ${it.guestPrice} ₽` : '';
@@ -1595,9 +1709,9 @@
     return result;
   }
 
-  function buildPriceShieldAlertPill(slug, currentPrice) {
+  function buildPriceShieldAlertPill(slug, currentPrice, title = '') {
     if (!slug || !currentPrice) return '';
-    const pIntel = priceSummaryBySlug.get(slug) || (priceDbMemory && priceDbMemory[slug]);
+    const pIntel = findPriceIntelInMemory(slug, title);
     if (!pIntel) return '';
 
     const curAcc = detectCurrentAccountLabel();
@@ -1646,11 +1760,35 @@
     return '';
   }
 
-  function buildPriceRadarDrawerBarHtml(slug, currentPrice) {
-    const pIntel = (slug && priceSummaryBySlug.get(slug)) || (slug && priceDbMemory && priceDbMemory[slug]);
+  /**
+   * Строит информационную панель Радара Цен + прямые кнопки перехода к этому же товару в Ozon, Перекрёстке, ВкусВилле и др.
+   */
+  function buildPriceRadarDrawerBarHtml(slug, currentPrice, meta = null) {
+    const title = meta ? meta.title : '';
+    const amount = meta ? meta.amountText : '';
+    const brand = meta ? meta.brand : '';
+    const pIntel = findPriceIntelInMemory(slug, title);
+
+    const storeLinks = buildDirectStoreSearchLinks(title, amount, brand);
+    const storeButtonsHtml = title
+      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed #bae6fd;align-items:center;">
+          <span style="font-size:11px;color:#475569;font-weight:600;margin-right:2px;">🔍 Найти точно этот товар:</span>
+          ${storeLinks
+            .map(
+              (s) =>
+                `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" style="font-size:11px !important;padding:2px 7px !important;border-radius:6px !important;background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;color:#1e293b !important;text-decoration:none !important;font-weight:600 !important;" title="Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)} ↗</a>`
+            )
+            .join('')}
+        </div>`
+      : '';
+
     if (!pIntel) {
-      return `<span>💰 <b>Радар цен:</b> собираю данные по гостевой цене (без куки), истории и другим магазинам...</span>`;
+      return `<div>
+        <span>💰 <b>Радар цен:</b> собираю данные по гостевой цене (без куки), истории и другим магазинам...</span>
+        ${storeButtonsHtml}
+      </div>`;
     }
+
     const parts = [];
     if (currentPrice) parts.push(`Сейчас (${escapeHtml(detectCurrentAccountLabel())}): <b>${Math.round(currentPrice)} ₽</b>`);
     if (pIntel.guestPrice) {
@@ -1670,7 +1808,11 @@
     if (pIntel.competitorSummary) {
       parts.push(`Конкуренты: <b>${escapeHtml(pIntel.competitorSummary)}</b>`);
     }
-    return `<span>💰 ${parts.join(' • ')}</span>`;
+
+    return `<div>
+      <span>💰 ${parts.join(' • ')}</span>
+      ${storeButtonsHtml}
+    </div>`;
   }
 
   function buildMetricsInlineHtml(smart, meta, slug) {
@@ -1693,10 +1835,10 @@
       ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>`
       : '';
 
-    const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null);
+    const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null, meta ? meta.title : '');
 
     let aiVerdictPill = '';
-    const cachedAi = (slug && lastAiResultBySlug.get(slug)) || (slug && aiCacheMemory && aiCacheMemory[slug]);
+    const cachedAi = findAiCacheInMemory(slug, meta ? meta.title : '');
     if (cachedAi && cachedAi.loading) {
       aiVerdictPill = `<span class="lqs-metric-pill ai-pill-loading" title="Zero-Click Автопилот анализирует товар...">🤖 ⏳ ИИ...</span>`;
     } else if (cachedAi && cachedAi.verdict) {
@@ -1778,7 +1920,13 @@
     const aiBox = panel.querySelector('#lqs-ai-box');
     const aiContent = panel.querySelector('#lqs-ai-content');
     const aiSources = panel.querySelector('#lqs-ai-sources');
+    const refreshBtn = panel.querySelector('#lqs-ai-refresh');
     if (!aiBox || !aiContent || !aiSources) return;
+
+    if (refreshBtn) {
+      refreshBtn.textContent = '🔄 Обновить';
+      refreshBtn.disabled = false;
+    }
 
     if (resultObj.priceSummary && slug) {
       priceSummaryBySlug.set(slug, resultObj.priceSummary);
@@ -1806,7 +1954,7 @@
 
     const radarBar = panel.querySelector('#lqs-price-radar-bar');
     if (radarBar) {
-      setHtmlIfChanged(radarBar, buildPriceRadarDrawerBarHtml(slug, meta ? meta.price : null), 'price-radar-bar');
+      setHtmlIfChanged(radarBar, buildPriceRadarDrawerBarHtml(slug, meta ? meta.price : null, meta), 'price-radar-bar');
     }
 
     aiBox.classList.add('visible');
@@ -1861,7 +2009,7 @@
 
     const radarBar = panel.querySelector('#lqs-price-radar-bar');
     if (radarBar) {
-      setHtmlIfChanged(radarBar, buildPriceRadarDrawerBarHtml(slug, meta ? meta.price : null), 'price-radar-bar');
+      setHtmlIfChanged(radarBar, buildPriceRadarDrawerBarHtml(slug, meta ? meta.price : null, meta), 'price-radar-bar');
     }
 
     const flagsBox = panel.querySelector('#lqs-drawer-flags');
@@ -1935,11 +2083,12 @@
     }
   }
 
-  async function requestAiProductReview(meta, panel, forceRefresh = false, isZeroClickAuto = false) {
+  async function requestAiProductReview(meta, panel, forceRefresh = false, isZeroClickAuto = false, retryCount = 0) {
     const drawer = panel.querySelector('#lqs-drawer');
     const aiBox = panel.querySelector('#lqs-ai-box');
     const aiContent = panel.querySelector('#lqs-ai-content');
     const aiSources = panel.querySelector('#lqs-ai-sources');
+    const refreshBtn = panel.querySelector('#lqs-ai-refresh');
 
     const slug = panel.dataset.slug || extractSlugFromUrl(window.location.href);
     const settings = await getSettings();
@@ -1947,6 +2096,10 @@
     if (!isZeroClickAuto || settings.autoOpenDrawerOnAi !== false) {
       drawer.classList.add('open');
       if (slug) drawerOpenBySlug.set(slug, true);
+    }
+
+    if (refreshBtn && forceRefresh) {
+      refreshBtn.textContent = '⏳ Обновляю...';
     }
 
     lastAiResultBySlug.set(slug, { loading: true });
@@ -1960,16 +2113,33 @@
 
     aiBox.classList.add('visible');
     aiContent.innerHTML = isZeroClickAuto
-      ? '⏳ <b>Zero-Click Автопилот:</b> сверяю цену без куки, цены в других сетях, отзывы по 14 площадкам и состав...'
-      : '⏳ Ищу отзывы, цены конкурентов и спрашиваю ИИ-ревизора...';
+      ? '⏳ <b>Zero-Click Автопилот:</b> сверяю цену без куки, цены точно этого товара в других сетях, отзывы и состав...'
+      : '⏳ Ищу отзывы, цены конкурентов именно на этот товар и спрашиваю ИИ-ревизора...';
     aiSources.innerHTML = '';
 
     const t0 = performance.now();
-    if (isZeroClickAuto) {
+    if (isZeroClickAuto && retryCount === 0) {
       LQS_RECORDER.counters.autoAiRuns += 1;
     }
-    LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh}, auto=${isZeroClickAuto})`);
+    LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh}, auto=${isZeroClickAuto}, retry=${retryCount})`);
     LQS_RECORDER.updateModule('aiReviewer', 'RUNNING', `Запрос ИИ-ревизора для "${meta.title.slice(0, 30)}"...`);
+
+    // Параллельный поллинг кэша в storage.local на случай, если ответ придёт при закрытом канале sendMessage
+    let resolvedViaCachePoll = false;
+    const pollTimer = !forceRefresh
+      ? setInterval(() => {
+          chrome.storage.local.get([AI_CACHE_KEY], (res) => {
+            const map = res && res[AI_CACHE_KEY] ? res[AI_CACHE_KEY] : {};
+            aiCacheMemory = map;
+            const found = findAiCacheInMemory(slug, meta.title);
+            if (found && found.verdict && !found.loading) {
+              resolvedViaCachePoll = true;
+              clearInterval(pollTimer);
+              renderAiVerdictIntoPanel(panel, slug, meta, found, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
+            }
+          });
+        }, 1200)
+      : null;
 
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       try {
@@ -1999,13 +2169,20 @@
             },
             (resp) => {
               if (chrome.runtime.lastError) {
-                resolve({ ok: false, error: chrome.runtime.lastError.message });
+                resolve({ ok: false, channelClosed: true, error: chrome.runtime.lastError.message });
               } else {
-                resolve(resp || { ok: false, error: 'Empty response from background service worker' });
+                resolve(resp || { ok: false, channelClosed: true, error: 'Empty response from background service worker' });
               }
             }
           );
         });
+
+        if (pollTimer) clearInterval(pollTimer);
+        if (resolvedViaCachePoll) return;
+
+        if (refreshBtn) {
+          refreshBtn.textContent = '🔄 Обновить';
+        }
 
         if (bgResult && bgResult.ok && bgResult.verdict) {
           const dt = Math.round(performance.now() - t0);
@@ -2017,7 +2194,35 @@
           );
           renderAiVerdictIntoPanel(panel, slug, meta, bgResult, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
           return;
-        } else if (bgResult && bgResult.error) {
+        }
+
+        // Если канал MV3 закрылся до завершения (`message channel closed before a response was received`) —
+        // НЕ выводим страшную английскую ошибку! Проверяем кэш и делаем тихий авто-повтор!
+        const isChannelClosedErr =
+          bgResult &&
+          (bgResult.channelClosed ||
+            /message channel closed|receiving end does not exist/i.test(String(bgResult.error || '')));
+
+        if (isChannelClosedErr) {
+          const cachedNow = await new Promise((r) => {
+            chrome.runtime.sendMessage({ type: 'LQS_GET_CACHED_AI_VERDICT', slug, title: meta.title }, (cResp) => {
+              if (chrome.runtime.lastError || !cResp || !cResp.entry) r(null);
+              else r(cResp.entry);
+            });
+          });
+          if (cachedNow && cachedNow.verdict) {
+            renderAiVerdictIntoPanel(panel, slug, meta, cachedNow, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
+            return;
+          }
+          if (retryCount < 1) {
+            aiContent.innerHTML = '⏳ <b>Дожимаю ответ от ИИ-ревизора</b> (вкладка Gemini заканчивает разбор)...';
+            await new Promise((r) => setTimeout(r, 900));
+            return await requestAiProductReview(meta, panel, false, isZeroClickAuto, retryCount + 1);
+          }
+          bgResult.error = 'Вкладка Gemini ещё формирует ответ. Нажми «🔄 Обновить» через пару секунд (или проверь открытую вкладку gemini.google.com).';
+        }
+
+        if (bgResult && bgResult.error && !bgResult.skippedStale) {
           lastAiResultBySlug.delete(slug);
           if (metricsBox) {
             setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-err');
@@ -2034,9 +2239,13 @@
           return;
         }
       } catch (bgErr) {
+        if (pollTimer) clearInterval(pollTimer);
         LQS_RECORDER.record('AI', `Background orchestrator exception: ${bgErr.message || bgErr}`);
       }
     }
+
+    if (pollTimer) clearInterval(pollTimer);
+    if (refreshBtn) refreshBtn.textContent = '🔄 Обновить';
 
     lastAiResultBySlug.delete(slug);
     if (metricsBox) {
@@ -2050,9 +2259,9 @@
   function scheduleZeroClickAiForProduct(slug, panel) {
     if (!slug || !panel) return;
 
-    const cachedEntry = lastAiResultBySlug.get(slug) || (aiCacheMemory && aiCacheMemory[slug]);
+    const latestMeta = extractProductPageMetadata();
+    const cachedEntry = findAiCacheInMemory(slug, latestMeta.title);
     if (cachedEntry && cachedEntry.verdict) {
-      const latestMeta = extractProductPageMetadata();
       getSettings().then((settings) => {
         renderAiVerdictIntoPanel(panel, slug, latestMeta, cachedEntry, settings.autoOpenDrawerOnAi !== false);
       });
@@ -2070,11 +2279,17 @@
       if (settings.autoRunAiOnProductPage === false) return;
 
       const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(slug)}"]`) || panel;
-      const latestMeta = extractProductPageMetadata();
-      if (!latestMeta || !latestMeta.title) return;
+      const metaNow = extractProductPageMetadata();
+      if (!metaNow || !metaNow.title) return;
+
+      const cachedNow = findAiCacheInMemory(slug, metaNow.title);
+      if (cachedNow && cachedNow.verdict) {
+        renderAiVerdictIntoPanel(activePanel, slug, metaNow, cachedNow, settings.autoOpenDrawerOnAi !== false);
+        return;
+      }
 
       autoAiTriggeredSlugs.add(slug);
-      requestAiProductReview(latestMeta, activePanel, false, true);
+      requestAiProductReview(metaNow, activePanel, false, true, 0);
     }, 550);
   }
 
@@ -2137,10 +2352,9 @@
 
       const initialMetricsHtml = buildMetricsInlineHtml(smart, meta, slug);
       const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
-      const initialRadarHtml = buildPriceRadarDrawerBarHtml(slug, meta.price);
+      const initialRadarHtml = buildPriceRadarDrawerBarHtml(slug, meta.price, meta);
 
       panel.innerHTML = `
-        <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + Анти-Шулер Бейдж + ИИ + кнопка «▾ Подробнее» -->
         <div class="lqs-main-bar">
           <div class="lqs-core-left">
             <div class="lqs-stars-inline" id="lqs-stars-box">
@@ -2158,7 +2372,6 @@
           </button>
         </div>
 
-        <!-- ВЫПАДАЮЩЕЕ МЕНЮ ПОД КАПОТОМ -->
         <div class="lqs-drawer ${isDrawerInitiallyOpen ? 'open' : ''}" id="lqs-drawer">
           <div class="lqs-price-radar-bar" id="lqs-price-radar-bar">${initialRadarHtml}</div>
 
@@ -2285,14 +2498,14 @@
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel, false, false);
+        requestAiProductReview(latestMeta, panel, false, false, 0);
       });
 
       panel.querySelector('#lqs-ai-refresh').addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel, true, false);
+        requestAiProductReview(latestMeta, panel, true, false, 0);
       });
 
       panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
@@ -2370,7 +2583,6 @@
       if (!addBtn.dataset.lqsGuarded) {
         addBtn.dataset.lqsGuarded = 'true';
         addBtn.addEventListener('click', (e) => {
-          // Не блокируем автоматическую сборку корзины
           if (window.__lqsAutoBuilding) return;
           if (addBtn.dataset.lqsBad === 'true') {
             const ok = window.confirm(
@@ -2446,7 +2658,7 @@
           card.dataset.lqsHarvestedPrice = String(pInfo.price);
           harvestedPrices.push({
             slug: ids.slug,
-            title: ids.rawTitle || ids.slug,
+            title: buildFullProductSearchQuery(ids.rawTitle || ids.slug, '', pInfo.amount),
             price: pInfo.price,
             oldPrice: pInfo.oldPrice,
             amount: pInfo.amount
@@ -2456,8 +2668,8 @@
 
       const match = findReviewInDB(db, ids);
       const review = match ? match.item : null;
-      const aiCached = ids.slug && aiCacheMemory ? aiCacheMemory[ids.slug] : null;
-      const priceEntry = ids.slug && priceDbMemory ? priceDbMemory[ids.slug] : null;
+      const aiCached = findAiCacheInMemory(ids.slug, ids.rawTitle);
+      const priceEntry = findPriceIntelInMemory(ids.slug, ids.rawTitle);
 
       let priceDiffTag = '';
       if (priceEntry && pInfo.price) {
@@ -2667,6 +2879,16 @@
         }
         if (changes[AI_CACHE_KEY]) {
           aiCacheMemory = changes[AI_CACHE_KEY].newValue || {};
+          // Мгновенно обновляем открытую карточку товара, если для неё появился готовый ИИ-разбор!
+          const slug = extractSlugFromUrl(window.location.href);
+          const panel = document.querySelector('.lqs-product-panel');
+          if (slug && panel) {
+            const meta = extractProductPageMetadata();
+            const foundAi = findAiCacheInMemory(slug, meta.title);
+            if (foundAi && foundAi.verdict && !foundAi.loading) {
+              renderAiVerdictIntoPanel(panel, slug, meta, foundAi, cachedSettings.autoOpenDrawerOnAi !== false);
+            }
+          }
           decorateCatalogCards();
         }
         if (changes[PRICE_DB_KEY]) {

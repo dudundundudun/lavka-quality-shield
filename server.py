@@ -1,12 +1,13 @@
 """
-Lavka Quality Shield v2.5.0 — Локальный FastAPI сервер (127.0.0.1:8765)
-1. Принимает название, состав, БЖУ, фасовку и расчёт цены товара из расширения Lavka Quality Shield.
-2. Ищет реальные отзывы И ЦЕНЫ КОНКУРЕНТОВ со ссылками в сети по списку проверенных площадок (Отзовик, IRecommend,
-   Роскачество, Росконтроль, ВкусВилл, Перекрёсток, Азбука Вкуса, Ozon, Яндекс Маркет, Лента, Wildberries, Купер).
-3. Ведёт единую мульти-аккаунт базу истории цен в SQLite (product_price_summary + price_observations):
-   позволяет сравнивать цены между разными аккаунтами и профилями Chrome, а также с ценой Гостя (без куки).
-4. Хранит слепки корзин (saved_carts) и сейф аккаунтов Лавки (saved_accounts: куки-сессии, логины, пароли, заметки).
-5. Выполняет пакетный аудит корзины по конкурентам (/api/cart/audit-competitors) с прямыми ссылками на магазины.
+Lavka Quality Shield v2.5.1 — Локальный FastAPI сервер (127.0.0.1:8765)
+Что исправлено и улучшено в v2.5.1:
+1. Точный поиск идентичных продуктов (Exact Product & Modifier Matcher):
+   - Полное сохранение названия товара, включая модификаторы «без сахара» / «Zero», вкус, жирность и объём/вес (например, «1,5 л»).
+   - Жёсткая фильтрация результатов DuckDuckGo: обычная Кола с сахаром больше никогда не попадёт в цены/ссылки для «Колы без сахара» (и наоборот), а цены за баночку 0,33 л не смешаются с бутылкой 1,5 л.
+2. Защита сейфа аккаунтов и куки (CORS + X-LQS-Client Guard):
+   - Запрет доступа сторонних сайтов к /api/accounts/* (защита от кражи Session_id и паролей).
+3. Связка SEO-slug и HEX-ID товаров Лавки:
+   - Если товар открыт из корзины по внутреннему HEX-ID (/good/4cbf6c0b...), сервер автоматически находит его кэш ИИ и историю цен по нормализованному названию.
 """
 
 import os
@@ -33,21 +34,40 @@ os.environ["no_proxy"] = "127.0.0.1,localhost"
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.5.0")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.5.1")
 
+# Разрешаем CORS только для расширения Chrome, страниц Яндекса и локального хоста (защита от чтения куки/паролей сторонними сайтами)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^(chrome-extension://.*|https://([a-z0-9-]+\.)?yandex\.ru|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def verify_trusted_extension_request(request: Request) -> None:
+    """Блокирует запросы к сейфу паролей/куки со сторонних веб-страниц."""
+    origin = (request.headers.get("origin") or "").strip().lower()
+    lqs_header = (request.headers.get("x-lqs-client") or "").strip().lower()
+    if lqs_header == "lavka-quality-shield":
+        if not origin or origin.startswith("chrome-extension://") or "yandex.ru" in origin or "127.0.0.1" in origin or "localhost" in origin:
+            return
+    if origin.startswith("chrome-extension://"):
+        return
+    if not origin and lqs_header == "lavka-quality-shield":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Forbidden: access to Account Vault is restricted to Lavka Quality Shield extension.",
+    )
+
 
 REVIEW_SEARCH_SITES: List[Dict[str, str]] = [
     {"domain": "otzovik.com", "name": "Отзовик"},
@@ -73,6 +93,14 @@ SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
 def log_event(level: str, msg: str) -> None:
     now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     SERVER_LOGS.appendleft({"ts": now_str, "level": level, "msg": msg})
+
+
+def normalize_title_for_match(raw: Optional[str]) -> str:
+    if not raw:
+        return ""
+    s = re.sub(r"[\u00ad\u200b\u00a0«»\"'„“”]", " ", str(raw))
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
 
 
 def init_db() -> None:
@@ -125,7 +153,6 @@ def init_db() -> None:
             )
             """
         )
-        # Безопасная миграция для существующих БД v2.4.0
         try:
             conn.execute("ALTER TABLE product_price_summary ADD COLUMN competitor_offers_json TEXT")
         except Exception:
@@ -160,7 +187,7 @@ def init_db() -> None:
         )
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
         conn.commit()
-    log_event("INIT", "SQLite v2.5.0 initialized (AI cache + Price Matrix + Cart Audit + Account Vault)")
+    log_event("INIT", "SQLite v2.5.1 initialized (Exact Product Match + Secure Account Vault)")
 
 
 init_db()
@@ -244,6 +271,36 @@ class AccountVaultItemModel(BaseModel):
     updatedAt: Optional[str] = None
 
 
+def find_existing_summary_row_by_slug_or_title(
+    conn: sqlite3.Connection, clean_slug: str, title: Optional[str] = None
+) -> Optional[Tuple[Any, ...]]:
+    row = conn.execute(
+        """
+        SELECT slug, title, amount, min_price, max_price, avg_price, last_price, guest_price,
+               competitor_min_price, competitor_summary, competitor_offers_json, accounts_json, history_json, updated_at
+        FROM product_price_summary WHERE slug = ?
+        """,
+        (clean_slug,),
+    ).fetchone()
+    if row:
+        return row
+    norm_title = normalize_title_for_match(title)
+    if norm_title and len(norm_title) >= 5:
+        rows = conn.execute(
+            """
+            SELECT slug, title, amount, min_price, max_price, avg_price, last_price, guest_price,
+                   competitor_min_price, competitor_summary, competitor_offers_json, accounts_json, history_json, updated_at
+            FROM product_price_summary
+            WHERE LOWER(title) = ?
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (norm_title,),
+        ).fetchone()
+        if rows:
+            return rows
+    return None
+
+
 def upsert_price_observation_sync(
     conn: sqlite3.Connection,
     slug: str,
@@ -270,32 +327,25 @@ def upsert_price_observation_sync(
             (clean_slug, title or clean_slug, acc, float(price), old_price, amount or "", now_iso),
         )
 
-    row = conn.execute(
-        """
-        SELECT title, amount, min_price, max_price, avg_price, last_price, guest_price,
-               competitor_min_price, competitor_summary, competitor_offers_json, accounts_json, history_json
-        FROM product_price_summary WHERE slug = ?
-        """,
-        (clean_slug,),
-    ).fetchone()
+    row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
 
     if row:
-        cur_title = title or row[0] or clean_slug
-        cur_amount = amount or row[1] or ""
-        cur_guest = guest_price if (guest_price and guest_price > 0) else row[6]
-        cur_comp_min = competitor_min if (competitor_min and competitor_min > 0) else row[7]
-        cur_comp_sum = competitor_summary if competitor_summary else row[8]
+        cur_title = title or row[1] or clean_slug
+        cur_amount = amount or row[2] or ""
+        cur_guest = guest_price if (guest_price and guest_price > 0) else row[7]
+        cur_comp_min = competitor_min if (competitor_min and competitor_min > 0) else row[8]
+        cur_comp_sum = competitor_summary if competitor_summary else row[9]
         try:
-            existing_offers = json.loads(row[9] or "[]")
+            existing_offers = json.loads(row[10] or "[]")
         except Exception:
             existing_offers = []
         cur_comp_offers = competitor_offers if (competitor_offers and len(competitor_offers) > 0) else existing_offers
         try:
-            accounts_map = json.loads(row[10] or "{}")
+            accounts_map = json.loads(row[11] or "{}")
         except Exception:
             accounts_map = {}
         try:
-            history_list = json.loads(row[11] or "[]")
+            history_list = json.loads(row[12] or "[]")
         except Exception:
             history_list = []
     else:
@@ -412,7 +462,7 @@ async def health_check():
         log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.5.0",
+        "version": "2.5.1",
         "cachedItems": cached_count,
         "trackedPrices": tracked_prices,
         "savedCarts": saved_carts_count,
@@ -426,13 +476,14 @@ async def health_check():
 async def get_server_logs():
     return {
         "status": "ok",
-        "version": "2.5.0",
+        "version": "2.5.1",
         "logs": list(SERVER_LOGS),
     }
 
 
 @app.post("/api/accounts/save")
-async def save_account_vault_endpoint(req: AccountVaultItemModel):
+async def save_account_vault_endpoint(req: AccountVaultItemModel, request: Request):
+    verify_trusted_extension_request(request)
     now_iso = req.updatedAt or datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -461,7 +512,8 @@ async def save_account_vault_endpoint(req: AccountVaultItemModel):
 
 
 @app.get("/api/accounts/list")
-async def list_saved_accounts_endpoint():
+async def list_saved_accounts_endpoint(request: Request):
+    verify_trusted_extension_request(request)
     accounts = []
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
@@ -491,7 +543,8 @@ async def list_saved_accounts_endpoint():
 
 
 @app.delete("/api/accounts/{account_id}")
-async def delete_saved_account_endpoint(account_id: str):
+async def delete_saved_account_endpoint(account_id: str, request: Request):
+    verify_trusted_extension_request(request)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM saved_accounts WHERE account_id = ?", (account_id,))
         conn.commit()
@@ -528,18 +581,10 @@ async def record_prices_endpoint(req: RecordPricesRequest):
 
 
 @app.get("/api/price/product/{slug}")
-async def get_product_price_summary(slug: str):
+async def get_product_price_summary(slug: str, title: Optional[str] = None):
     clean_slug = slug.strip().lower()
     with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            """
-            SELECT slug, title, amount, min_price, max_price, avg_price, last_price,
-                   guest_price, competitor_min_price, competitor_summary, competitor_offers_json,
-                   accounts_json, history_json, updated_at
-            FROM product_price_summary WHERE slug = ?
-            """,
-            (clean_slug,),
-        ).fetchone()
+        row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
         if not row:
             return {"status": "not_found", "slug": clean_slug}
         return {
@@ -648,18 +693,17 @@ async def get_latest_cart_snapshot():
 
         items = json.loads(row[2] or "[]")
         for it in items:
-            s_row = conn.execute(
-                "SELECT min_price, avg_price, guest_price, competitor_min_price, competitor_summary, competitor_offers_json, accounts_json FROM product_price_summary WHERE slug = ?",
-                (str(it.get("slug", "")).lower(),),
-            ).fetchone()
+            s_row = find_existing_summary_row_by_slug_or_title(
+                conn, str(it.get("slug", "")).lower(), it.get("title")
+            )
             if s_row:
-                it["minPrice"] = s_row[0]
-                it["avgPrice"] = s_row[1]
-                it["guestPrice"] = s_row[2]
-                it["competitorMinPrice"] = s_row[3]
-                it["competitorSummary"] = s_row[4]
-                it["competitorOffers"] = json.loads(s_row[5] or "[]")
-                it["accounts"] = json.loads(s_row[6] or "{}")
+                it["minPrice"] = s_row[3]
+                it["avgPrice"] = s_row[5]
+                it["guestPrice"] = s_row[7]
+                it["competitorMinPrice"] = s_row[8]
+                it["competitorSummary"] = s_row[9]
+                it["competitorOffers"] = json.loads(s_row[10] or "[]")
+                it["accounts"] = json.loads(s_row[11] or "{}")
 
         carts_by_account = [
             {
@@ -708,16 +752,150 @@ async def save_cache_endpoint(req: SaveCacheRequest):
     return {"status": "ok"}
 
 
-def clean_product_query_for_search(title: str, brand: Optional[str] = None) -> str:
-    q = re.sub(r"[\u00ad\u200b\u00a0«»\"'„“”]", " ", title or "")
-    q = re.sub(
-        r"(?:,\s*|\s+)(?:\d+\s*[×xх*]\s*)?\d+(?:[.,]\d+)?\s*(?:г|гр|грамм|кг|мл|л|шт|уп|пак|рул|капс)\.?$",
-        "",
-        q,
-        flags=re.IGNORECASE,
+# ==============================================================================
+# ТОЧНЫЙ ПОИСК ИДЕНТИЧНЫХ ПРОДУКТОВ И ФИЛЬТР МОДИФИКАТОРОВ (БЕЗ САХАРА / ОБЪЁМ)
+# ==============================================================================
+SUGAR_FREE_REGEX = re.compile(
+    r"(без\s+сахара|без\s+добавленного\s+сахара|\bzero\b|\bзеро\b|\blight\b|\bлайт\b|\bdiet\b|0\s*%\s*сахара|0\s+сахара|на\s+стевии|подсластител)",
+    re.IGNORECASE,
+)
+
+FLAVOR_AND_TYPE_MODIFIERS = [
+    "ваниль",
+    "вишн",
+    "черешн",
+    "лимон",
+    "лайм",
+    "манго",
+    "маракуй",
+    "апельсин",
+    "персик",
+    "малин",
+    "клубник",
+    "земляник",
+    "смородин",
+    "черник",
+    "яблок",
+    "груш",
+    "ананас",
+    "грейпфрут",
+    "тархун",
+    "дюшес",
+    "байкал",
+    "буратино",
+    "крем-сода",
+    "карамел",
+    "кокос",
+    "миндал",
+    "фундук",
+    "фисташк",
+    "банан",
+    "шоколад",
+    "какао",
+    "кофе",
+    "матча",
+    "имбир",
+    "мята",
+    "мятн",
+    "солен",
+    "копчен",
+    "остр",
+    "сырн",
+    "гриб",
+    "сметан",
+    "зелен",
+    "краб",
+    "бекон",
+    "паприк",
+    "безлактоз",
+    "топлен",
+    "обезжир",
+    "классич",
+    "original",
+    "classic",
+]
+
+GENERIC_STOP_WORDS = {
+    "напиток",
+    "газированный",
+    "сильногазированный",
+    "среднегазированный",
+    "слабогазированный",
+    "негазированный",
+    "безалкогольный",
+    "пастеризованный",
+    "ультрапастеризованный",
+    "стерилизованный",
+    "охлажденный",
+    "замороженный",
+    "фасованный",
+    "нарезка",
+    "упаковка",
+    "бутылка",
+    "банка",
+    "пакет",
+    "коробка",
+    "продукт",
+    "товар",
+    "купить",
+    "цена",
+    "отзывы",
+    "отзыв",
+    "доставка",
+    "москва",
+    "лавка",
+    "яндекс",
+    "бзмж",
+    "стм",
+    "для",
+    "или",
+    "под",
+    "над",
+    "при",
+}
+
+
+def parse_volume_or_weight_grams(text: Optional[str]) -> Optional[float]:
+    """Извлекает объём/вес в граммах или миллилитрах (например '1,5 л' -> 1500, '330 мл' -> 330)."""
+    if not text:
+        return None
+    s = re.sub(r"[\u00ad\u200b\u00a0]", " ", str(text))
+    m_multi = re.search(
+        r"(\d+)\s*[×xх*]\s*(\d+(?:[.,]\d+)?)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])",
+        s,
+        re.IGNORECASE,
     )
-    q = re.sub(r"\b(?:бзмж|стм)\b", "", q, flags=re.IGNORECASE)
+    if m_multi:
+        cnt = int(m_multi.group(1))
+        val = float(m_multi.group(2).replace(",", "."))
+        u = m_multi.group(3).lower()
+        mult = 1000.0 if u.startswith(("кг", "л")) else 1.0
+        return cnt * val * mult
+
+    m_single = re.search(
+        r"(?:^|[^\d.,])(\d+(?:[.,]\d+)?)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])",
+        s,
+        re.IGNORECASE,
+    )
+    if m_single:
+        val = float(m_single.group(1).replace(",", "."))
+        u = m_single.group(2).lower()
+        mult = 1000.0 if u.startswith(("кг", "л")) else 1.0
+        return val * mult
+    return None
+
+
+def build_full_product_search_query(
+    title: str, brand: Optional[str] = None, amount: Optional[str] = None
+) -> str:
+    """
+    Формирует ПОЛНЫЙ поисковый запрос товара без потери «без сахара», вкуса и объёма/веса!
+    Если вес/объём (amount, например '1,5 л') не входит в title, добавляет его в конец.
+    """
+    q = re.sub(r"[\u00ad\u200b\u00a0«»\"'„“”]", " ", title or "")
+    q = re.sub(r"\b(?:бзмж|стм)\b", " ", q, flags=re.IGNORECASE)
     q = re.sub(r"\s+", " ", q).strip()
+
     if brand:
         clean_brand = re.sub(r"[\u00ad\u200b\u00a0«»\"']", " ", brand).strip()
         if clean_brand and clean_brand.lower() not in q.lower():
@@ -725,7 +903,109 @@ def clean_product_query_for_search(title: str, brand: Optional[str] = None) -> s
                 q = f"{q} Из Лавки"
             else:
                 q = f"{q} {clean_brand}"
-    return q.strip()
+
+    if amount:
+        clean_amt = re.sub(r"[\u00ad\u200b\u00a0]", " ", amount).strip()
+        if clean_amt:
+            # Проверяем, есть ли уже этот вес/объём в строке запроса
+            target_grams = parse_volume_or_weight_grams(clean_amt)
+            query_grams = parse_volume_or_weight_grams(q)
+            if not query_grams and clean_amt.lower() not in q.lower():
+                q = f"{q} {clean_amt}"
+            elif target_grams and query_grams and abs(target_grams - query_grams) > 5:
+                q = f"{q} {clean_amt}"
+
+    return re.sub(r"\s+", " ", q).strip()
+
+
+def normalize_synonym_tokens(text: str) -> str:
+    """Приводит частые англо-русские продуктовые синонимы к единому виду для точного сопоставления."""
+    s = text.lower().replace("ё", "е")
+    s = re.sub(r"\bcola\b", "кола", s)
+    s = re.sub(r"\bcoca[\s-]*кола\b", "coca-cola кока-кола", s)
+    s = re.sub(r"\boriginal\b", "оригинал original", s)
+    s = re.sub(r"\bclassic\b", "классик classic", s)
+    s = re.sub(r"\bzero\b", "без сахара zero зеро", s)
+    return s
+
+
+def is_search_result_matching_product(
+    res_title: str,
+    res_snippet: str,
+    product_title: str,
+    product_amount: Optional[str] = None,
+) -> Tuple[bool, bool]:
+    """
+    Проверяет, относится ли найденный результат поиска ИМЕННО К ЭТОМУ ПРОДУКТУ.
+    Возвращает кортеж: (is_same_product, is_same_volume).
+    """
+    full_target = f"{product_title or ''} {product_amount or ''}".strip()
+    target_lower = full_target.lower().replace("ё", "е")
+    res_title_lower = (res_title or "").lower().replace("ё", "е")
+    res_combined_lower = f"{res_title_lower} {(res_snippet or '').lower().replace('ё', 'е')}"
+
+    # 1. ЖЁСТКАЯ ПРОВЕРКА МОДИФИКАТОРА «БЕЗ САХАРА / ZERO»
+    target_is_sugar_free = bool(SUGAR_FREE_REGEX.search(target_lower))
+    res_is_sugar_free = bool(SUGAR_FREE_REGEX.search(res_combined_lower))
+    res_title_is_sugar_free = bool(SUGAR_FREE_REGEX.search(res_title_lower))
+
+    if target_is_sugar_free and not res_is_sugar_free:
+        # Ищем товар БЕЗ САХАРА, а в результате — обычный товар с сахаром -> ОТБРАСЫВАЕМ!
+        return False, False
+
+    if not target_is_sugar_free and res_title_is_sugar_free:
+        # Ищем обычный товар С САХАРОМ, а в заголовке результата — версия БЕЗ САХАРА -> ОТБРАСЫВАЕМ!
+        return False, False
+
+    # 2. ПРОВЕРКА ВКУСОВЫХ И ВИДОВЫХ МОДИФИКАТОРОВ (ваниль, вишня, лайм, безлактозное и т.д.)
+    for mod in FLAVOR_AND_TYPE_MODIFIERS:
+        if mod in ("original", "classic", "классич"):
+            continue
+        target_has_mod = mod in target_lower
+        res_title_has_mod = mod in res_title_lower
+        res_any_has_mod = mod in res_combined_lower
+        if target_has_mod and not res_any_has_mod:
+            return False, False
+        if not target_has_mod and res_title_has_mod:
+            return False, False
+
+    # 3. ПРОВЕРКА КЛЮЧЕВЫХ СЛОВ НАЗВАНИЯ И БРЕНДА
+    norm_target = normalize_synonym_tokens(target_lower)
+    norm_res = normalize_synonym_tokens(res_combined_lower)
+
+    raw_words = re.findall(r"[а-яa-z0-9]{3,}", norm_target)
+    core_tokens = []
+    for w in raw_words:
+        if w in GENERIC_STOP_WORDS:
+            continue
+        if w in ("без", "сахара", "сахар", "zero", "зеро", "литр", "литра", "литров", "грамм", "грамма"):
+            continue
+        if re.match(r"^\d+(?:г|гр|кг|мл|л|шт|percent)?$", w):
+            continue
+        if w not in core_tokens:
+            core_tokens.append(w)
+
+    if core_tokens:
+        matched_tokens = 0
+        for tok in core_tokens:
+            stem = tok[:5] if len(tok) >= 6 else (tok[:4] if len(tok) >= 5 else tok)
+            if stem in norm_res:
+                matched_tokens += 1
+        required = 1 if len(core_tokens) == 1 else max(2, int(len(core_tokens) * 0.6))
+        if matched_tokens < min(required, len(core_tokens)):
+            return False, False
+
+    # 4. ПРОВЕРКА СОВПАДЕНИЯ ОБЪЁМА / ВЕСА (чтобы не сравнивать цену 1.5 л с баночкой 0.33 л)
+    target_grams = parse_volume_or_weight_grams(product_amount) or parse_volume_or_weight_grams(product_title)
+    res_grams = parse_volume_or_weight_grams(res_title) or parse_volume_or_weight_grams(res_snippet)
+
+    is_same_volume = True
+    if target_grams and res_grams:
+        ratio = res_grams / target_grams if target_grams > 0 else 1.0
+        if ratio < 0.78 or ratio > 1.25:
+            is_same_volume = False
+
+    return True, is_same_volume
 
 
 def detect_source_label(url: str) -> Tuple[str, bool]:
@@ -741,15 +1021,31 @@ def detect_source_label(url: str) -> Tuple[str, bool]:
 
 
 def extract_competitor_prices_from_sources(
-    sources: List[Dict[str, Any]], lavka_price: Optional[float] = None
+    sources: List[Dict[str, Any]],
+    lavka_price: Optional[float] = None,
+    product_title: str = "",
+    product_amount: Optional[str] = None,
 ) -> Tuple[Optional[float], str, List[Dict[str, Any]]]:
-    """Извлекает упоминания цен в рублях и ссылки из сниппетов и заголовков магазинов-конкурентов."""
+    """
+    Извлекает цены в рублях и ссылки ТОЛЬКО из тех сниппетов конкурентов,
+    которые прошли проверку полного совпадения продукта (включая «без сахара» и объём/вес).
+    """
+    if not sources:
+        return None, "", []
     found: List[Dict[str, Any]] = []
     for s in sources:
-        text = f"{s.get('title', '')} {s.get('snippet', '')}"
+        raw_title = s.get("title") or ""
+        snippet = s.get("snippet") or ""
+        if product_title:
+            same_prod, same_vol = is_search_result_matching_product(
+                raw_title, snippet, product_title, product_amount
+            )
+            if not same_prod or not same_vol:
+                continue
+
+        text = f"{raw_title} {snippet}"
         source_name = s.get("source") or "Магазин"
         url = s.get("url") or ""
-        raw_title = s.get("title") or source_name
         for m in re.finditer(
             r"(?:от\s+|цена\s+|за\s+)?(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])",
             text,
@@ -758,14 +1054,14 @@ def extract_competitor_prices_from_sources(
             try:
                 val = float(m.group(1).replace(",", "."))
                 if 20 <= val <= 9500:
-                    if lavka_price and (val < lavka_price * 0.22 or val > lavka_price * 3.5):
+                    if lavka_price and (val < lavka_price * 0.35 or val > lavka_price * 3.0):
                         continue
                     found.append(
                         {
                             "store": source_name,
                             "price": int(round(val)),
                             "url": url,
-                            "title": raw_title[:80],
+                            "title": (raw_title or source_name)[:90],
                         }
                     )
             except Exception:
@@ -795,7 +1091,7 @@ async def run_ddg_query(client: httpx.AsyncClient, query: str, headers: Dict[str
     if resp.status_code != 200:
         return items
     soup = BeautifulSoup(resp.text, "html.parser")
-    for block in soup.select(".result")[:8]:
+    for block in soup.select(".result")[:10]:
         a_el = block.select_one(".result__a")
         snip_el = block.select_one(".result__snippet")
         if not a_el:
@@ -809,7 +1105,7 @@ async def run_ddg_query(client: httpx.AsyncClient, query: str, headers: Dict[str
         if not real_url.startswith("http"):
             continue
         source_name, is_trusted = detect_source_label(real_url)
-        raw_title = a_el.get_text(" ", strip=True)[:85]
+        raw_title = a_el.get_text(" ", strip=True)[:95]
         snippet = snip_el.get_text(" ", strip=True) if snip_el else ""
         items.append(
             {
@@ -823,9 +1119,11 @@ async def run_ddg_query(client: httpx.AsyncClient, query: str, headers: Dict[str
     return items
 
 
-async def search_web_reviews(product_title: str, brand: Optional[str] = None) -> List[dict]:
-    clean_q = clean_product_query_for_search(product_title, brand)
-    if not clean_q:
+async def search_web_reviews(
+    product_title: str, brand: Optional[str] = None, amount: Optional[str] = None
+) -> List[dict]:
+    full_q = build_full_product_search_query(product_title, brand, amount)
+    if not full_q:
         return []
 
     headers = {
@@ -836,41 +1134,60 @@ async def search_web_reviews(product_title: str, brand: Optional[str] = None) ->
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.7,en;q=0.6",
     }
 
+    # Если товар «без сахара», фиксируем кавычками обязательное вхождение "без сахара"
+    strict_q = full_q
+    if re.search(r"без\s+сахара", strict_q, re.IGNORECASE):
+        strict_q = re.sub(r"без\s+сахара", '"без сахара"', strict_q, flags=re.IGNORECASE)
+
     q_sites_primary = (
-        f"{clean_q} отзывы цена "
-        f"(site:otzovik.com OR site:irecommend.ru OR site:vkusvill.ru OR site:perekrestok.ru OR site:ozon.ru OR site:rskrf.ru)"
+        f"{strict_q} цена отзывы "
+        f"(site:otzovik.com OR site:irecommend.ru OR site:vkusvill.ru OR site:perekrestok.ru OR site:ozon.ru OR site:lenta.com OR site:rskrf.ru)"
     )
-    q_fallback = f"{clean_q} купить цена отзывы"
+    q_fallback = f"{strict_q} купить цена отзывы"
 
     collected: List[Dict[str, Any]] = []
     seen_urls = set()
     t0 = time.perf_counter()
 
     try:
-        async with httpx.AsyncClient(timeout=8.5, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=7.5, follow_redirects=True) as client:
             primary_hits = await run_ddg_query(client, q_sites_primary, headers)
             for item in primary_hits:
-                if item["url"] not in seen_urls:
-                    seen_urls.add(item["url"])
-                    collected.append(item)
+                if item["url"] in seen_urls:
+                    continue
+                same_prod, same_vol = is_search_result_matching_product(
+                    item.get("title", ""), item.get("snippet", ""), product_title, amount
+                )
+                if not same_prod:
+                    continue
+                item["sameVolume"] = same_vol
+                seen_urls.add(item["url"])
+                collected.append(item)
 
             if len(collected) < 3:
                 fallback_hits = await run_ddg_query(client, q_fallback, headers)
                 fallback_hits.sort(key=lambda x: (0 if x.get("trusted") else 1))
                 for item in fallback_hits:
-                    if item["url"] not in seen_urls:
-                        seen_urls.add(item["url"])
-                        collected.append(item)
-                        if len(collected) >= 6:
-                            break
+                    if item["url"] in seen_urls:
+                        continue
+                    same_prod, same_vol = is_search_result_matching_product(
+                        item.get("title", ""), item.get("snippet", ""), product_title, amount
+                    )
+                    if not same_prod:
+                        continue
+                    item["sameVolume"] = same_vol
+                    seen_urls.add(item["url"])
+                    collected.append(item)
+                    if len(collected) >= 6:
+                        break
 
             dt_ms = int((time.perf_counter() - t0) * 1000)
             log_event(
                 "SEARCH",
-                f"Review+Price search for '{clean_q[:38]}' -> {len(collected)} sources in {dt_ms}ms",
+                f"Exact match search for '{full_q[:42]}' -> {len(collected)} verified sources in {dt_ms}ms",
             )
     except Exception as exc:
-        log_event("ERROR", f"Review search error for '{clean_q[:38]}': {exc}")
+        log_event("ERROR", f"Review search error for '{full_q[:42]}': {exc}")
 
     return collected[:6]
 
@@ -976,7 +1293,7 @@ def build_ai_prompt(req: AnalyzeRequest, web_snippets: List[dict], price_summary
         )
     else:
         snippets_text = (
-            "Прямых отзывов именно на этот товар в поисковой выдаче не найдено — "
+            "Прямых отзывов именно на эту модификацию товара в поисковой выдаче не найдено — "
             "честно сообщи об этом в 1-м пункте и оценивай товар строго по составу, КБЖУ и цене."
         )
 
@@ -987,19 +1304,20 @@ def build_ai_prompt(req: AnalyzeRequest, web_snippets: List[dict], price_summary
         f"Ты — опытный, внимательный и объективный продуктовый эксперт. "
         f"Сделай короткий и понятный разбор товара из Яндекс Лавки (ровно 3 пункта, без воды, без молодёжного сленга и без выдумок — нормальным разговорным русским языком).\n\n"
         f"Данные карточки товара:\n"
-        f"• Название: {req.title}{brand_suffix}\n"
+        f"• Точное название: {req.title}{brand_suffix}\n"
         f"• Фасовка и цена: {req.amount or 'не указана'}, Цена: {req.price or '?'} ₽ ({calc_line})\n"
         f"• Состав: {req.ingredients or 'не указан на странице'}\n"
         f"• КБЖУ на 100 г: {req.traits or 'не указано на странице'}\n\n"
         f"Площадки для поиска отзывов и цен: {sites_list_str}.\n"
-        f"Найденные отзывы и цены в интернете:\n{snippets_text}\n\n"
+        f"Найденные отзывы и цены в интернете (проверены на совпадение модификации):\n{snippets_text}\n\n"
         f"СТРОГИЕ ПРАВИЛА ЧЕСТНОСТИ (ТОЛЬКО ФАКТЫ, БЕЗ ПРИДУМОК):\n"
+        f"- Оценивай СТРОГО ИМЕННО ЭТОТ ТОВАР и его точную модификацию («{req.title} {req.amount or ''}»). Не путай версии «без сахара» / «Zero» с обычными сахарными версиями!\n"
         f"- Опирайся ТОЛЬКО на реальные факты из найденных отзывов, состава, КБЖУ и цены.\n"
         f"- Если в блоке «Найденные отзывы и цены в интернете» нет отзывов именно об этом продукте — ЧЕСТНО напиши в 1-м пункте: «Отзывов именно на этот товар в сети не нашлось, поэтому оцениваю по составу и характеристикам». Категорически запрещено выдумывать вкус, консистенцию или якобы существующие мнения покупателей.\n"
         f"- {pricing_rule}\n\n"
         f"Ответь ровно в 3 коротких пунктах (по 1–2 предложения в каждом), обычным живым русским языком без сленга:\n"
-        f"1. **Отзывы и репутация**: что реально пишут покупатели на отзовиках и в магазинах (укажи площадки, если отзывы найдены), либо честно отметь, что отзывов в сети не найдено, и скажи, что сразу видно по характеристикам продукта.\n"
-        f"2. **Состав, КБЖУ и честность цены**: фактический разбор состава (есть ли скрытый сахар, крахмал, ММО, заменители молочного жира, дешёвые наполнители или состав чистый) и насколько адекватна цена ({eval_hint}).\n"
+        f"1. **Отзывы и репутация**: что реально пишут покупатели на отзовиках и в магазинах именно про эту версию товара (укажи площадки, если отзывы найдены), либо честно отметь, что отзывов в сети не найдено, и скажи, что сразу видно по характеристикам продукта.\n"
+        f"2. **Состав, КБЖУ и честность цены**: фактический разбор состава (подсластители/сахар, крахмал, ММО, ЗМЖ, добавки или чистый состав) и насколько адекватна цена ({eval_hint}).\n"
         f"3. **Вердикт**: выбери ОДНУ оценку на нормальном русском языке и кратко поясни вывод:\n"
         f"   • ✅ **Отличный выбор — стоит брать**\n"
         f"   • 👍 **Хороший вариант на каждый день (есть мелкие нюансы)**\n"
@@ -1025,7 +1343,7 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_sum
     }
 
     t0 = time.perf_counter()
-    timeout_cfg = httpx.Timeout(20.0, connect=2.5)
+    timeout_cfg = httpx.Timeout(18.0, connect=1.5)
     async with httpx.AsyncClient(timeout=timeout_cfg, trust_env=not is_local) as client:
         resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
         dt_ms = int((time.perf_counter() - t0) * 1000)
@@ -1039,10 +1357,54 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_sum
 @app.post("/api/analyze-product")
 async def analyze_product(req: AnalyzeRequest):
     cache_key = (req.slug or req.title).strip().lower()
-    log_event("REQ", f"Analyze request for slug='{cache_key}' (force={req.forceRefresh})")
+    norm_title = normalize_title_for_match(req.title)
+    log_event("REQ", f"Analyze request for slug='{cache_key}' title='{req.title[:35]}' (force={req.forceRefresh})")
 
-    sources = await search_web_reviews(req.title, req.brand)
-    comp_min, comp_sum, comp_offers = extract_competitor_prices_from_sources(sources, req.price)
+    # Сначала проверяем кэш ИИ (включая поиск по нормализованному названию для связки SEO-slug <-> HEX-ID)
+    if not req.forceRefresh:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT verdict, sources_json FROM product_ai_cache WHERE slug = ?",
+                (cache_key,),
+            ).fetchone()
+            if not row and norm_title:
+                row = conn.execute(
+                    "SELECT verdict, sources_json FROM product_ai_cache WHERE LOWER(title) = ? ORDER BY updated_at DESC LIMIT 1",
+                    (norm_title,),
+                ).fetchone()
+            if row and row[0] and not str(row[0]).startswith("⚠️"):
+                s_row = find_existing_summary_row_by_slug_or_title(conn, cache_key, req.title)
+                cached_summary = None
+                if s_row:
+                    cached_summary = {
+                        "slug": s_row[0],
+                        "title": s_row[1],
+                        "amount": s_row[2],
+                        "minPrice": s_row[3],
+                        "maxPrice": s_row[4],
+                        "avgPrice": s_row[5],
+                        "lastPrice": s_row[6],
+                        "guestPrice": s_row[7],
+                        "competitorMinPrice": s_row[8],
+                        "competitorSummary": s_row[9],
+                        "competitorOffers": json.loads(s_row[10] or "[]"),
+                        "accounts": json.loads(s_row[11] or "{}"),
+                        "history": json.loads(s_row[12] or "[]"),
+                        "updatedAt": s_row[13],
+                    }
+                log_event("CACHE_HIT", f"Returned SQLite cached verdict for '{cache_key}'")
+                return {
+                    "cached": True,
+                    "aiOk": True,
+                    "verdict": row[0],
+                    "sources": json.loads(row[1] or "[]"),
+                    "priceSummary": cached_summary,
+                }
+
+    sources = await search_web_reviews(req.title, req.brand, req.amount)
+    comp_min, comp_sum, comp_offers = extract_competitor_prices_from_sources(
+        sources, req.price, req.title, req.amount
+    )
 
     price_summary = None
     with sqlite3.connect(DB_PATH) as conn:
@@ -1061,21 +1423,6 @@ async def analyze_product(req: AnalyzeRequest):
                 competitor_offers=comp_offers,
             )
             conn.commit()
-
-        if not req.forceRefresh:
-            row = conn.execute(
-                "SELECT verdict, sources_json FROM product_ai_cache WHERE slug = ?",
-                (cache_key,),
-            ).fetchone()
-            if row and row[0] and not str(row[0]).startswith("⚠️"):
-                log_event("CACHE_HIT", f"Returned SQLite cached verdict for '{cache_key}'")
-                return {
-                    "cached": True,
-                    "aiOk": True,
-                    "verdict": row[0],
-                    "sources": json.loads(row[1] or "[]"),
-                    "priceSummary": price_summary,
-                }
 
     ai_ok = True
     try:

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Lavka Quality Shield v2.5.0 — UI Fixes, Cart Competitor Dropdown & Account Switcher
+   Lavka Quality Shield v2.5.1 — UI Fixes, Exact Product Store Links & Account Switcher
    ========================================================================== */
 
 :root {
@@ -434,7 +434,6 @@ div.lqs-product-panel textarea.lqs-note-input {
   resize: vertical !important;
 }
 
-/* Исправление кнопки "💾 Ок" на карточке товара (защита от стилей кнопок Лавки) */
 div.lqs-product-panel button.lqs-save-btn {
   appearance: none !important;
   -webkit-appearance: none !important;
@@ -483,7 +482,6 @@ div.lqs-product-panel .lqs-ai-box.visible {
   display: flex !important;
 }
 
-/* Исправление шапки ИИ-блока и кнопки "🔄 Обновить" (защита от наложения текста) */
 div.lqs-product-panel .lqs-ai-header {
   display: flex !important;
   flex-direction: row !important;
@@ -554,6 +552,7 @@ div.lqs-product-panel .lqs-ai-sources {
 }
 
 div.lqs-product-panel .lqs-ai-sources a,
+div.lqs-product-panel .lqs-store-link,
 .lqs-cart-audit-banner .lqs-store-link {
   display: inline-flex !important;
   align-items: center !important;
@@ -571,6 +570,7 @@ div.lqs-product-panel .lqs-ai-sources a,
 }
 
 div.lqs-product-panel .lqs-ai-sources a:hover,
+div.lqs-product-panel .lqs-store-link:hover,
 .lqs-cart-audit-banner .lqs-store-link:hover {
   background: #dbeafe !important;
 }

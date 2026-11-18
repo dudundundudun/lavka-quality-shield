@@ -442,7 +442,7 @@ function loadPricesAndCartTab() {
     const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
 
     try {
-      const r = await fetchWithTimeout(`${cfg.backendUrl.replace(/\/$/, '')}/api/price/list?limit=300`, { method: 'GET' }, 1200);
+      const r = await fetchWithTimeout(`${cfg.backendUrl.replace(/\/$/, '')}/api/price/list?limit=300`, { method: 'GET', headers: { 'X-LQS-Client': 'lavka-quality-shield' } }, 1200);
       if (r.ok) {
         const j = await r.json();
         if (j && Array.isArray(j.items)) {
@@ -991,7 +991,7 @@ async function fetchBackendLogsTail() {
       const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
       const backendUrl = cfg.backendUrl.replace(/\/$/, '');
       try {
-        const r = await fetchWithTimeout(`${backendUrl}/api/logs`, { method: 'GET' }, 1500);
+        const r = await fetchWithTimeout(`${backendUrl}/api/logs`, { method: 'GET', headers: { 'X-LQS-Client': 'lavka-quality-shield' } }, 1500);
         if (r.ok) {
           const data = await r.json();
           if (data && Array.isArray(data.logs) && data.logs.length > 0) {
@@ -1079,7 +1079,7 @@ document.getElementById('diag-download-btn').addEventListener('click', async () 
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `lavka-quality-shield-v2.5.0-debug.log`;
+  a.download = `lavka-quality-shield-v2.5.1-debug.log`;
   a.click();
 });
 
