@@ -1079,7 +1079,7 @@ document.getElementById('diag-download-btn').addEventListener('click', async () 
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `lavka-quality-shield-v2.5.1-debug.log`;
+  a.download = `lavka-quality-shield-v2.5.2-debug.log`;
   a.click();
 });
 

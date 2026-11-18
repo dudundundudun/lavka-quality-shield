@@ -1,10 +1,10 @@
-# 🛡️ Lavka Quality Shield v2.5.1 — Exact Product Match, Zero-Freeze AI, Account Switcher & Cart Audit
+# 🛡️ Lavka Quality Shield v2.5.2 — Exact Product Match, Zero-Freeze AI, Account Switcher & Cart Audit
 
 Гибридное расширение **Google Chrome (Manifest V3)** и локальный сервер **FastAPI + SQLite (`127.0.0.1:8765`)** для защиты покупателя на сайте **Яндекс Лавки (`https://lavka.yandex.ru/*`)**.
 
 ---
 
-## 🔥 Что исправлено и улучшено в релизе v2.5.1
+## 🔥 Что исправлено и улучшено в релизе v2.5.2
 
 1. **🎯 100% Точный поиск идентичных товаров у конкурентов (Exact Product & Modifier Matcher)**:
    - **Никакой путаницы «Колы без сахара» с обычной «Колой»**: внедрён строгий фильтр модификаторов (`SUGAR_FREE_REGEX` и `FLAVOR_AND_TYPE_MODIFIERS`). Если товар содержит маркер **«без сахара» / «Zero» / «Light»**, поисковик запрашивает точную фразу `"без сахара"`, а парсер жёстко отсекает любые результаты с обычной сахарной версией (и наоборот).
@@ -30,6 +30,6 @@
 
 ## 🚀 Быстрый старт (Windows 11 + Google Chrome)
 
-1. Распакуй архив `lavka-quality-shield-v2.5.1.zip` в постоянную папку.
+1. Распакуй архив `lavka-quality-shield-v2.5.2.zip` в постоянную папку.
 2. Открой в Chrome `chrome://extensions`, включи **Режим разработчика (Developer mode)** и нажми **Загрузить распакованное расширение (Load unpacked)** -> выбери папку.
 3. При необходимости запусти локальный сервер базы цен и кэша через `start_server.bat` (или включи автозапуск через `enable_windows_autostart.bat`).

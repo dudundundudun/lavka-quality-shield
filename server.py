@@ -1,6 +1,6 @@
 """
-Lavka Quality Shield v2.5.1 — Локальный FastAPI сервер (127.0.0.1:8765)
-Что исправлено и улучшено в v2.5.1:
+Lavka Quality Shield v2.5.2 — Локальный FastAPI сервер (127.0.0.1:8765)
+Что исправлено и улучшено в v2.5.2:
 1. Точный поиск идентичных продуктов (Exact Product & Modifier Matcher):
    - Полное сохранение названия товара, включая модификаторы «без сахара» / «Zero», вкус, жирность и объём/вес (например, «1,5 л»).
    - Жёсткая фильтрация результатов DuckDuckGo: обычная Кола с сахаром больше никогда не попадёт в цены/ссылки для «Колы без сахара» (и наоборот), а цены за баночку 0,33 л не смешаются с бутылкой 1,5 л.
@@ -40,7 +40,7 @@ from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.5.1")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.5.2")
 
 # Разрешаем CORS только для расширения Chrome, страниц Яндекса и локального хоста (защита от чтения куки/паролей сторонними сайтами)
 app.add_middleware(
@@ -187,7 +187,7 @@ def init_db() -> None:
         )
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
         conn.commit()
-    log_event("INIT", "SQLite v2.5.1 initialized (Exact Product Match + Secure Account Vault)")
+    log_event("INIT", "SQLite v2.5.2 initialized (Exact Product Match + Secure Account Vault)")
 
 
 init_db()
@@ -462,7 +462,7 @@ async def health_check():
         log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.5.1",
+        "version": "2.5.2",
         "cachedItems": cached_count,
         "trackedPrices": tracked_prices,
         "savedCarts": saved_carts_count,
@@ -476,7 +476,7 @@ async def health_check():
 async def get_server_logs():
     return {
         "status": "ok",
-        "version": "2.5.1",
+        "version": "2.5.2",
         "logs": list(SERVER_LOGS),
     }
 

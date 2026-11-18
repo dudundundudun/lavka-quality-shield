@@ -1,22 +1,22 @@
 /**
- * Lavka Quality Shield v2.5.1 — Content Script
- * Что исправлено и улучшено в v2.5.1:
- * 1. Точный поиск продуктов без потери модификаторов («без сахара», вкусов, жирности и объёма «1,5 л»):
- *    - При генерации поисковых ссылок в корзине и на карточке товара всегда передаётся ПОЛНОЕ название с брендом и фасовкой/литражом.
- *    - Прямые кнопки проверки товара в Ozon, Перекрёстке, ВкусВилле, Я.Маркете, Ленте и Купере добавлены также прямо на карточку товара в блок Радара цен.
- * 2. Полное устранение зависания окна ИИ («НЕ ОБНОВЛЯЕТСЯ ОКНО») и ошибки «message channel closed before a response was received»:
- *    - Подписка карточки товара на пуш-событие `LQS_AI_VERDICT_READY` и на `chrome.storage.onChanged` (`AI_CACHE_KEY`).
- *    - Автоматический перехват обрыва канала MV3 с фоновым дожимом результата из кэша и авто-повтором без вывода сырой английской ошибки.
- *    - Визуальная индикация клика по кнопке «🔄 Обновить».
- * 3. Связка двух типов URL одного товара в Лавке (SEO-slug `/good/napitok-cola-...` <-> HEX-ID `/good/4cbf6c0b...`):
- *    - Кэш ИИ, база цен и фиксатор цен витрины (`Cart Price Lock`) находят товар как по `slug`, так и по `cleanTitle`.
- * 4. Исправлен расчёт цены за 1 шт. vs суммы строки в корзине при `qty > 1` (`extractCartItemsFromDOM`).
+ * Lavka Quality Shield v2.5.2 — Content Script
+ * Что нового и исправлено в v2.5.2:
+ * 1. CANONICAL PRODUCT CARD AUTHORITY (Название и характеристики ТОЛЬКО из оригинальной карточки товара `/good/<slug>`):
+ *    - В корзине (`/cart`) Яндекс Лавка показывает сокращённые названия товаров (например, «Напиток Cola Добрый» вместо
+ *      «Напиток Cola «Добрый» газированный без сахара»).
+ *    - Теперь расширение извлекает `imageKey` картинки из строки корзины, мгновенно подтягивает полное название из памяти
+ *      (по `slug` или `imageKey`), а фоновый аудитор `LQS_AUDIT_CART_COMPETITORS` параллельно запрашивает оригинальную
+ *      карточку товара `https://lavka.yandex.ru/good/<slug>` и парсит эталонный `<h1 data-testid="product-title">`,
+ *      `<span data-testid="product-amount">` и бренд из JSON-LD!
+ *    - Все ссылки на магазины (Ozon, Перекрёсток, ВкусВилл, Я.Маркет, Лента, Купер) и поиск конкурентов строятся
+ *      СТРОГО по полному названию и характеристикам из оригинальной карточки товара!
+ * 2. Полная защита от `message channel closed before a response was received` и зависаний окна ИИ.
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.5.1';
+  const VERSION = '2.5.2';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
@@ -82,9 +82,6 @@
       .replace(/'/g, '&#39;');
   }
 
-  /**
-   * Нормализует название товара (без потери «без сахара» и вкуса) для связки SEO-slug и HEX-ID
-   */
   function normalizeTitle(raw) {
     if (!raw) return '';
     return String(raw)
@@ -98,9 +95,6 @@
       .replace(/ё/g, 'е');
   }
 
-  /**
-   * Собирает ПОЛНОЕ название продукта вместе с весом/объёмом (например «Напиток Cola Добрый газированный без сахара 1,5 л»)
-   */
   function buildFullProductSearchQuery(title, brand = '', amount = '') {
     let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
     q = q.replace(/(^|\s)(?:бзмж|стм)(?=\s|$)/gi, ' ');
@@ -136,12 +130,19 @@
     ];
   }
 
-  function findAiCacheInMemory(slug, title = '') {
+  function findAiCacheInMemory(slug, title = '', imageKey = null) {
     if (slug && lastAiResultBySlug.has(slug)) {
       return lastAiResultBySlug.get(slug);
     }
     if (slug && aiCacheMemory && aiCacheMemory[slug] && aiCacheMemory[slug].verdict) {
       return aiCacheMemory[slug];
+    }
+    if (imageKey && aiCacheMemory) {
+      for (const entry of Object.values(aiCacheMemory)) {
+        if (entry && entry.verdict && !String(entry.verdict).startsWith('⚠️') && entry.imageKey === imageKey) {
+          return entry;
+        }
+      }
     }
     const norm = normalizeTitle(title);
     if (norm && norm.length >= 4 && aiCacheMemory) {
@@ -154,12 +155,19 @@
     return null;
   }
 
-  function findPriceIntelInMemory(slug, title = '') {
+  function findPriceIntelInMemory(slug, title = '', imageKey = null) {
     if (slug && priceSummaryBySlug.has(slug)) {
       return priceSummaryBySlug.get(slug);
     }
     if (slug && priceDbMemory && priceDbMemory[slug]) {
       return priceDbMemory[slug];
+    }
+    if (imageKey && priceDbMemory) {
+      for (const entry of Object.values(priceDbMemory)) {
+        if (entry && entry.imageKey && entry.imageKey === imageKey) {
+          return entry;
+        }
+      }
     }
     const norm = normalizeTitle(title);
     if (norm && norm.length >= 4 && priceDbMemory) {
@@ -172,9 +180,16 @@
     return null;
   }
 
-  function findCartLockInMemory(slug, title = '') {
+  function findCartLockInMemory(slug, title = '', imageKey = null) {
     if (slug && cartLocksMemory && cartLocksMemory[slug]) {
       return cartLocksMemory[slug];
+    }
+    if (imageKey && cartLocksMemory) {
+      for (const lock of Object.values(cartLocksMemory)) {
+        if (lock && lock.imageKey && lock.imageKey === imageKey) {
+          return lock;
+        }
+      }
     }
     const norm = normalizeTitle(title);
     if (norm && norm.length >= 4 && cartLocksMemory) {
@@ -185,6 +200,51 @@
       }
     }
     return null;
+  }
+
+  /**
+   * Находит эталонное полное название товара из оригинальной карточки товара, если оно уже встречалось
+   * в базе цен (`priceDbMemory`), базе оценок (`reviewsDbCache`), кэше ИИ (`aiCacheMemory`) или `cartLocksMemory`.
+   */
+  function resolveBestKnownCanonicalTitle(slug, rawCartTitle, amount = '', imageKey = null) {
+    const candidates = [];
+
+    const pEntry = findPriceIntelInMemory(slug, rawCartTitle, imageKey);
+    if (pEntry && pEntry.title) {
+      if (pEntry.isCanonicalCardTitle) {
+        return buildFullProductSearchQuery(pEntry.title, pEntry.brand || '', pEntry.amount || amount);
+      }
+      candidates.push(pEntry.title);
+    }
+
+    if (reviewsDbCache) {
+      const revMatch = findReviewInDB(reviewsDbCache, {
+        slug,
+        imageKey,
+        cleanTitle: normalizeTitle(rawCartTitle)
+      });
+      if (revMatch && revMatch.item && revMatch.item.title) {
+        candidates.push(revMatch.item.title);
+      }
+    }
+
+    const lockEntry = findCartLockInMemory(slug, rawCartTitle, imageKey);
+    if (lockEntry && lockEntry.title) {
+      candidates.push(lockEntry.title);
+    }
+
+    const aiEntry = findAiCacheInMemory(slug, rawCartTitle, imageKey);
+    if (aiEntry && aiEntry.title) {
+      candidates.push(aiEntry.title);
+    }
+
+    let bestTitle = rawCartTitle || '';
+    for (const c of candidates) {
+      if (c && c.length > bestTitle.length) {
+        bestTitle = c;
+      }
+    }
+    return buildFullProductSearchQuery(bestTitle, '', amount);
   }
 
   function extractVerdictBadgeFromText(verdictText) {
@@ -650,7 +710,6 @@
         });
         return true;
       }
-      // Прямой пуш готового ИИ-вердикта от Service Worker'а (гарантирует мгновенное обновление окна!)
       if (msg.type === 'LQS_AI_VERDICT_READY' && msg.result && msg.result.verdict) {
         const currentSlug = extractSlugFromUrl(window.location.href);
         const panel = document.querySelector('.lqs-product-panel');
@@ -810,7 +869,7 @@
   }
 
   // ==========================================================================
-  // ФИКСАТОР ЦЕН КОРЗИНЫ (CART PRICE LOCK) И ТОЧНЫЙ ЗАХВАТ ВСЕХ ЕДИНИЦ КОРЗИНЫ
+  // ФИКСАТОР ЦЕН КОРЗИНЫ (CART PRICE LOCK) И ЗАХВАТ КОРЗИНЫ С ПРИВЯЗКОЙ К КАРТОЧКЕ
   // ==========================================================================
   function lockProductPriceOnCartAdd(btnEl) {
     try {
@@ -820,21 +879,25 @@
       let title = '';
       let price = null;
       let amount = '';
+      let imageKey = null;
 
       if (mainPage) {
         slug = extractSlugFromUrl(window.location.href);
         const meta = extractProductPageMetadata();
-        title = meta.title;
+        title = buildFullProductSearchQuery(meta.title, meta.brand, meta.amountText);
         price = meta.price;
         amount = meta.amountText;
+        imageKey = meta.imageKey;
       } else if (card) {
         const link = card.querySelector('a[href*="/good/"]') || card.closest('a[href*="/good/"]');
         slug = link ? extractSlugFromUrl(link.getAttribute('href')) : null;
         const img = card.querySelector('img');
-        title = (img && img.getAttribute('alt')) || (card.innerText || '').split('\n')[0] || slug;
+        imageKey = img ? extractImageKey(img.getAttribute('src')) : null;
+        const rawT = (img && img.getAttribute('alt')) || (card.innerText || '').split('\n')[0] || slug;
         const pInfo = extractPriceFromCardDOM(card);
         price = pInfo.price;
         amount = pInfo.amount;
+        title = buildFullProductSearchQuery(rawT, '', amount);
       }
 
       if (slug && price && price > 0) {
@@ -842,6 +905,7 @@
           slug,
           title,
           cleanTitle: normalizeTitle(title),
+          imageKey,
           lockedPrice: price,
           amount,
           accountId: detectCurrentAccountLabel(),
@@ -883,9 +947,8 @@
   }
 
   /**
-   * Извлекает все позиции и количество штук (qty) из корзины Яндекс Лавки:
-   * - Склеивает полное название товара с его граммовкой/литражом (чтобы не терялось «1,5 л» при поиске!)
-   * - Корректно отличает цену за 1 шт. от суммы строки при `qty > 1`
+   * Извлекает позиции корзины и сразу подменяет сокращённое название из корзины
+   * на ПОЛНОЕ название из оригинальной карточки товара (по `slug` или `imageKey`)!
    */
   function extractCartItemsFromDOM() {
     const items = [];
@@ -916,19 +979,21 @@
 
       seen.add(slug);
 
-      let title = '';
+      const imgEl = container.querySelector('img');
+      const imageKey = imgEl ? extractImageKey(imgEl.getAttribute('src')) : null;
+
+      let rawCartTitle = '';
       const rowLinks = container.querySelectorAll('a[href*="/good/"]');
       rowLinks.forEach((a) => {
         const t = (a.textContent || '').replace(/[\u00ad\u200b]/g, '').trim();
-        if (t && t.length > title.length) title = t;
+        if (t && t.length > rawCartTitle.length) rawCartTitle = t;
       });
-      if (!title) {
-        const imgEl = container.querySelector('img[alt]');
-        title = (imgEl && imgEl.getAttribute('alt')) || '';
+      if (!rawCartTitle && imgEl) {
+        rawCartTitle = (imgEl.getAttribute('alt') || '').trim();
       }
-      if (!title) {
+      if (!rawCartTitle) {
         const lines = (container.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
-        title = lines[0] || slug;
+        rawCartTitle = lines[0] || slug;
       }
 
       let qty = 1;
@@ -976,31 +1041,27 @@
         }
       }
 
-      // Вес/фасовка (например "1,5 л" или "175 г")
       const weightMatch = textAll.match(/(\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт)(?![а-яa-z]))/i);
       const amount = weightMatch ? weightMatch[1].trim() : '';
 
-      // Дополняем название весом/объёмом, если в заголовке ссылки его не было
-      const fullTitle = buildFullProductSearchQuery(title, '', amount);
+      // Заменяем сокращённое название из корзины («Напиток Cola Добрый») на полное название из карточки товара!
+      const authoritativeTitle = resolveBestKnownCanonicalTitle(slug, rawCartTitle, amount, imageKey);
 
       const rawFirstPrice = priceMatches[0];
       const rawOldPrice = priceMatches.length > 1 && priceMatches[1] > rawFirstPrice ? priceMatches[1] : null;
 
-      // Проверяем, является ли rawFirstPrice суммой за qty штук или ценой за 1 шт.
       let unitPrice = rawFirstPrice;
       let unitOldPrice = rawOldPrice;
 
       if (qty > 1) {
-        const knownLock = findCartLockInMemory(slug, fullTitle);
-        const knownDb = findPriceIntelInMemory(slug, fullTitle);
+        const knownLock = findCartLockInMemory(slug, authoritativeTitle, imageKey);
+        const knownDb = findPriceIntelInMemory(slug, authoritativeTitle, imageKey);
         const refUnitPrice = (knownLock && knownLock.lockedPrice) || (knownDb && knownDb.lastPrice) || null;
 
         if (refUnitPrice && Math.abs(rawFirstPrice - refUnitPrice * qty) <= Math.max(6, qty * 3)) {
-          // В строке корзины отображена сумма за все qty штук -> делим на qty
           unitPrice = Math.round(rawFirstPrice / qty);
           if (rawOldPrice) unitOldPrice = Math.round(rawOldPrice / qty);
         } else if (!refUnitPrice && !/за\s*1\s*шт|₽\s*\/\s*шт/i.test(textAll) && rawFirstPrice % qty === 0) {
-          // В Яндекс Лавке строка корзины всегда выводит итоговую стоимость позиции (unitPrice * qty)
           unitPrice = Math.round(rawFirstPrice / qty);
           if (rawOldPrice) unitOldPrice = Math.round(rawOldPrice / qty);
         }
@@ -1008,7 +1069,8 @@
 
       items.push({
         slug,
-        title: fullTitle.slice(0, 120),
+        title: authoritativeTitle.slice(0, 140),
+        imageKey,
         qty,
         price: unitPrice,
         oldPrice: unitOldPrice,
@@ -1084,10 +1146,10 @@
 
     const tampered = [];
     snap.items.forEach((it) => {
-      const lock = findCartLockInMemory(it.slug, it.title);
+      const lock = findCartLockInMemory(it.slug, it.title, it.imageKey);
       if (lock && lock.lockedPrice && it.price > lock.lockedPrice) {
         tampered.push({
-          title: it.title,
+          title: lock.title || it.title,
           lockedPrice: lock.lockedPrice,
           cartPrice: it.price,
           diff: it.price - lock.lockedPrice
@@ -1110,11 +1172,11 @@
 
     let compPillHtml = '';
     if (isCartAuditLoading && !audit) {
-      compPillHtml = `<span class="lqs-cart-pill">⏳ Сверяю точные названия и объёмы товаров с другими магазинами...</span>`;
+      compPillHtml = `<span class="lqs-cart-pill">⏳ Загружаю полные названия из карточек товаров и сверяю с магазинами...</span>`;
     } else if (overpayComp > 0) {
       compPillHtml = `<span class="lqs-cart-pill overpay-bad">🏪 У конкурентов дешевле (${cheaperCompCount} поз.): переплата +${overpayComp} ₽!</span>`;
     } else if (audit) {
-      compPillHtml = `<span class="lqs-cart-pill overpay-good">🏪 Цены конкурентов проверены по полному названию (${snap.items.length} поз.)</span>`;
+      compPillHtml = `<span class="lqs-cart-pill overpay-good">🏪 Полные названия из карточек товаров проверены (${snap.items.length} поз.)</span>`;
     }
 
     let altAccPillHtml = '';
@@ -1138,7 +1200,7 @@
             ? `<span class="lqs-cart-pill overpay-bad">Переплата +${it.overpayVsCompetitorTotal} ₽ (в сетях от ~${it.competitorMinPrice} ₽/шт)</span>`
             : it.competitorMinPrice
             ? `<span class="lqs-cart-pill overpay-good">В сетях от ~${it.competitorMinPrice} ₽/шт (в Лавке ок)</span>`
-            : `<span class="lqs-cart-pill">Точный поиск по полному названию 👇</span>`;
+            : `<span class="lqs-cart-pill">Поиск по полному названию из карточки 👇</span>`;
 
         const altBadge =
           it.overpayVsAltTotal > 0
@@ -1158,7 +1220,7 @@
 
         const linksList = Array.isArray(it.storeSearchLinks) && it.storeSearchLinks.length > 0
           ? it.storeSearchLinks
-          : buildDirectStoreSearchLinks(it.title, it.amount);
+          : buildDirectStoreSearchLinks(it.title, it.amount, it.brand || '');
 
         const searchLinksHtml = linksList
           .map(
@@ -1171,7 +1233,7 @@
           <div class="lqs-cart-comp-item">
             <div class="lqs-cart-comp-top">
               <div>
-                <a href="https://lavka.yandex.ru/good/${encodeURIComponent(it.slug)}" target="_blank" rel="noopener noreferrer" class="lqs-cart-comp-title">
+                <a href="https://lavka.yandex.ru/good/${encodeURIComponent(it.slug)}" target="_blank" rel="noopener noreferrer" class="lqs-cart-comp-title" title="Полное название из оригинальной карточки товара">
                   ${escapeHtml(it.title)}
                 </a>
                 <span style="color:#475569;font-size:12px;margin-left:6px;">
@@ -1256,11 +1318,10 @@
           : ''
       }
 
-      <!-- ВЫПАДАЮЩИЙ СПИСОК 1: ЦЕНЫ И ССЫЛКИ НА ДРУГИЕ МАГАЗИНЫ ПО КАЖДОМУ ТОВАРУ -->
       <div class="lqs-cart-dropdown ${isCartCompDropdownOpen ? 'open' : ''}" id="lqs-cart-comp-dropdown">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
           <span style="font-weight:700;font-size:12px;color:#334155;">
-            🏪 Поиск идентичных товаров (с учётом «без сахара», вкуса и объёма) в других магазинах:
+            🏪 Полные названия взяты напрямую из карточек товаров (с учётом «без сахара», вкуса и объёма):
           </span>
           <button type="button" class="lqs-mini-btn" id="lqs-cart-rescan-comp-btn">
             🔄 Обновить цены конкурентов
@@ -1269,7 +1330,6 @@
         ${compDropdownRowsHtml}
       </div>
 
-      <!-- ВЫПАДАЮЩИЙ СПИСОК 2: БЫСТРОЕ ПЕРЕКЛЮЧЕНИЕ АККАУНТОВ И ПЕРЕНОС КОРЗИНЫ -->
       <div class="lqs-cart-dropdown ${isCartAccDropdownOpen ? 'open' : ''}" id="lqs-cart-acc-dropdown">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
           <span style="font-weight:700;font-size:12px;color:#334155;">
@@ -1309,7 +1369,7 @@
     const rescanBtn = banner.querySelector('#lqs-cart-rescan-comp-btn');
     if (rescanBtn) {
       rescanBtn.onclick = () => {
-        rescanBtn.textContent = '⏳ Ищу точные совпадения в сетях...';
+        rescanBtn.textContent = '⏳ Проверяю карточки и сети...';
         triggerCartCompetitorAudit(snap, true);
       };
     }
@@ -1390,7 +1450,7 @@
           ``,
           `## Список позиций (${snap.items.length} наименований, всего ${totalUnits} шт.) и пересчёт по калькулятору:`,
           ...auditItems.map((it, idx) => {
-            const lock = findCartLockInMemory(it.slug, it.title);
+            const lock = findCartLockInMemory(it.slug, it.title, it.imageKey);
             const lockNote = lock ? ` | Обещанная цена на витрине: ${lock.lockedPrice} ₽` : '';
             const compNote = it.competitorMinPrice ? ` | В других сетях от ~${it.competitorMinPrice} ₽ (переплата +${it.overpayVsCompetitorTotal || 0} ₽)` : '';
             const guestNote = it.guestPrice ? ` | Цена без куки (Гость): ${it.guestPrice} ₽` : '';
@@ -1709,9 +1769,9 @@
     return result;
   }
 
-  function buildPriceShieldAlertPill(slug, currentPrice, title = '') {
+  function buildPriceShieldAlertPill(slug, currentPrice, title = '', imageKey = null) {
     if (!slug || !currentPrice) return '';
-    const pIntel = findPriceIntelInMemory(slug, title);
+    const pIntel = findPriceIntelInMemory(slug, title, imageKey);
     if (!pIntel) return '';
 
     const curAcc = detectCurrentAccountLabel();
@@ -1760,14 +1820,12 @@
     return '';
   }
 
-  /**
-   * Строит информационную панель Радара Цен + прямые кнопки перехода к этому же товару в Ozon, Перекрёстке, ВкусВилле и др.
-   */
   function buildPriceRadarDrawerBarHtml(slug, currentPrice, meta = null) {
     const title = meta ? meta.title : '';
     const amount = meta ? meta.amountText : '';
     const brand = meta ? meta.brand : '';
-    const pIntel = findPriceIntelInMemory(slug, title);
+    const imageKey = meta ? meta.imageKey : null;
+    const pIntel = findPriceIntelInMemory(slug, title, imageKey);
 
     const storeLinks = buildDirectStoreSearchLinks(title, amount, brand);
     const storeButtonsHtml = title
@@ -1835,10 +1893,10 @@
       ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>`
       : '';
 
-    const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null, meta ? meta.title : '');
+    const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null, meta ? meta.title : '', meta ? meta.imageKey : null);
 
     let aiVerdictPill = '';
-    const cachedAi = findAiCacheInMemory(slug, meta ? meta.title : '');
+    const cachedAi = findAiCacheInMemory(slug, meta ? meta.title : '', meta ? meta.imageKey : null);
     if (cachedAi && cachedAi.loading) {
       aiVerdictPill = `<span class="lqs-metric-pill ai-pill-loading" title="Zero-Click Автопилот анализирует товар...">🤖 ⏳ ИИ...</span>`;
     } else if (cachedAi && cachedAi.verdict) {
@@ -2067,7 +2125,10 @@
           price: meta.price,
           oldPrice: meta.oldPrice,
           amount: meta.amountText,
-          accountId: detectCurrentAccountLabel()
+          accountId: detectCurrentAccountLabel(),
+          isFromProductCard: true,
+          imageKey: meta.imageKey || null,
+          brand: meta.brand || ''
         },
         (resp) => {
           if (chrome.runtime.lastError || !resp || !resp.summary) return;
@@ -2124,14 +2185,13 @@
     LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh}, auto=${isZeroClickAuto}, retry=${retryCount})`);
     LQS_RECORDER.updateModule('aiReviewer', 'RUNNING', `Запрос ИИ-ревизора для "${meta.title.slice(0, 30)}"...`);
 
-    // Параллельный поллинг кэша в storage.local на случай, если ответ придёт при закрытом канале sendMessage
     let resolvedViaCachePoll = false;
     const pollTimer = !forceRefresh
       ? setInterval(() => {
           chrome.storage.local.get([AI_CACHE_KEY], (res) => {
             const map = res && res[AI_CACHE_KEY] ? res[AI_CACHE_KEY] : {};
             aiCacheMemory = map;
-            const found = findAiCacheInMemory(slug, meta.title);
+            const found = findAiCacheInMemory(slug, meta.title, meta.imageKey);
             if (found && found.verdict && !found.loading) {
               resolvedViaCachePoll = true;
               clearInterval(pollTimer);
@@ -2151,6 +2211,7 @@
                 slug,
                 title: meta.title,
                 brand: meta.brand,
+                imageKey: meta.imageKey || null,
                 amount: meta.amountText,
                 price: meta.price,
                 oldPrice: meta.oldPrice,
@@ -2196,8 +2257,6 @@
           return;
         }
 
-        // Если канал MV3 закрылся до завершения (`message channel closed before a response was received`) —
-        // НЕ выводим страшную английскую ошибку! Проверяем кэш и делаем тихий авто-повтор!
         const isChannelClosedErr =
           bgResult &&
           (bgResult.channelClosed ||
@@ -2205,10 +2264,13 @@
 
         if (isChannelClosedErr) {
           const cachedNow = await new Promise((r) => {
-            chrome.runtime.sendMessage({ type: 'LQS_GET_CACHED_AI_VERDICT', slug, title: meta.title }, (cResp) => {
-              if (chrome.runtime.lastError || !cResp || !cResp.entry) r(null);
-              else r(cResp.entry);
-            });
+            chrome.runtime.sendMessage(
+              { type: 'LQS_GET_CACHED_AI_VERDICT', slug, title: meta.title, imageKey: meta.imageKey || null },
+              (cResp) => {
+                if (chrome.runtime.lastError || !cResp || !cResp.entry) r(null);
+                else r(cResp.entry);
+              }
+            );
           });
           if (cachedNow && cachedNow.verdict) {
             renderAiVerdictIntoPanel(panel, slug, meta, cachedNow, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
@@ -2260,7 +2322,7 @@
     if (!slug || !panel) return;
 
     const latestMeta = extractProductPageMetadata();
-    const cachedEntry = findAiCacheInMemory(slug, latestMeta.title);
+    const cachedEntry = findAiCacheInMemory(slug, latestMeta.title, latestMeta.imageKey);
     if (cachedEntry && cachedEntry.verdict) {
       getSettings().then((settings) => {
         renderAiVerdictIntoPanel(panel, slug, latestMeta, cachedEntry, settings.autoOpenDrawerOnAi !== false);
@@ -2282,7 +2344,7 @@
       const metaNow = extractProductPageMetadata();
       if (!metaNow || !metaNow.title) return;
 
-      const cachedNow = findAiCacheInMemory(slug, metaNow.title);
+      const cachedNow = findAiCacheInMemory(slug, metaNow.title, metaNow.imageKey);
       if (cachedNow && cachedNow.verdict) {
         renderAiVerdictIntoPanel(activePanel, slug, metaNow, cachedNow, settings.autoOpenDrawerOnAi !== false);
         return;
@@ -2437,8 +2499,13 @@
         const latestMeta = extractProductPageMetadata();
         current.note = noteArea.value;
         currentReviewCache = current;
+        const fullCardTitle = buildFullProductSearchQuery(
+          latestMeta.title || meta.title,
+          latestMeta.brand || meta.brand,
+          latestMeta.amountText || meta.amountText
+        );
         const updated = await saveProductReview(slug, {
-          title: latestMeta.title || meta.title,
+          title: fullCardTitle,
           cleanTitle: latestMeta.cleanTitle || meta.cleanTitle,
           brand: latestMeta.brand || meta.brand,
           productId: latestMeta.productId || meta.productId,
@@ -2659,6 +2726,8 @@
           harvestedPrices.push({
             slug: ids.slug,
             title: buildFullProductSearchQuery(ids.rawTitle || ids.slug, '', pInfo.amount),
+            isCanonicalCardTitle: false,
+            imageKey: ids.imageKey || null,
             price: pInfo.price,
             oldPrice: pInfo.oldPrice,
             amount: pInfo.amount
@@ -2668,8 +2737,8 @@
 
       const match = findReviewInDB(db, ids);
       const review = match ? match.item : null;
-      const aiCached = findAiCacheInMemory(ids.slug, ids.rawTitle);
-      const priceEntry = findPriceIntelInMemory(ids.slug, ids.rawTitle);
+      const aiCached = findAiCacheInMemory(ids.slug, ids.rawTitle, ids.imageKey);
+      const priceEntry = findPriceIntelInMemory(ids.slug, ids.rawTitle, ids.imageKey);
 
       let priceDiffTag = '';
       if (priceEntry && pInfo.price) {
@@ -2879,12 +2948,11 @@
         }
         if (changes[AI_CACHE_KEY]) {
           aiCacheMemory = changes[AI_CACHE_KEY].newValue || {};
-          // Мгновенно обновляем открытую карточку товара, если для неё появился готовый ИИ-разбор!
           const slug = extractSlugFromUrl(window.location.href);
           const panel = document.querySelector('.lqs-product-panel');
           if (slug && panel) {
             const meta = extractProductPageMetadata();
-            const foundAi = findAiCacheInMemory(slug, meta.title);
+            const foundAi = findAiCacheInMemory(slug, meta.title, meta.imageKey);
             if (foundAi && foundAi.verdict && !foundAi.loading) {
               renderAiVerdictIntoPanel(panel, slug, meta, foundAi, cachedSettings.autoOpenDrawerOnAi !== false);
             }
@@ -2895,6 +2963,10 @@
           priceDbMemory = changes[PRICE_DB_KEY].newValue || {};
           renderProductPageWidget();
           decorateCatalogCards();
+          if (window.location.pathname.includes('/cart')) {
+            const snap = extractCartItemsFromDOM();
+            if (snap.items.length > 0) renderCartAuditBanner(snap);
+          }
         }
         if (changes[SETTINGS_KEY]) {
           cachedSettings = { ...DEFAULT_SETTINGS, ...(changes[SETTINGS_KEY].newValue || {}) };

@@ -1,18 +1,16 @@
 /**
- * Lavka Quality Shield v2.5.1 — Background Service Worker
- * Что исправлено и улучшено в v2.5.1:
- * 1. Точный поиск идентичных товаров (Exact Product & Modifier Matcher):
- *    - Полное сохранение названия товара вместе с «без сахара» / «Zero», вкусом, брендом и объёмом/весом («1,5 л»).
- *    - Строгий фильтр релевантности: обычная Кола с сахаром никогда не попадёт в цены/ссылки для «Колы без сахара» (и наоборот),
- *      а цены за 0,33 л / 0,5 л не смешиваются с ценой за 1,5 л.
- *    - Автоматическая очистка старых нерелевантных офферов конкурентов из кэша.
- * 2. Устранение ошибки «message channel closed before a response was received» и зависания окна ИИ:
- *    - Keep-Alive пинг Service Worker'а во время генерации ответа ИИ.
- *    - Авто-отмена устаревших фоновых запросов в очереди Gemini при переходе на другой товар.
- *    - Push-рассылка готового вердикта (`LQS_AI_VERDICT_READY`) во все вкладки Лавки + синхронизация по `slug` и `cleanTitle`.
- * 3. Связка двух типов URL одного товара в Лавке (SEO-slug `/good/napitok-cola-...` <-> HEX-ID `/good/4cbf6c0b...`):
- *    - Кэш ИИ, база цен и аудит корзины автоматически связывают товар по нормализованному названию.
- * 4. Безопасность сейфа аккаунтов (`X-LQS-Client`), чистая смена `localStorage` при переключении куки и честный учёт лимита остатков в авто-сборщике.
+ * Lavka Quality Shield v2.5.2 — Background Service Worker
+ * Что нового и исправлено в v2.5.2:
+ * 1. CANONICAL PRODUCT CARD AUTHORITY (Название и характеристики ТОЛЬКО из оригинальной карточки товара `/good/<slug>`):
+ *    - В корзине (`/cart`) Яндекс Лавка показывает урезанные названия (например, пишет «Напиток Cola Добрый» вместо
+ *      «Напиток Cola «Добрый» газированный без сахара»).
+ *    - Теперь при любом аудите корзины и зондировании цены расширение парсит HTML оригинальной карточки товара
+ *      `https://lavka.yandex.ru/good/<slug>` (`h1[data-testid="product-title"]`, `span[data-testid="product-amount"]`,
+ *      JSON-LD `Product` и `imageKey`) и берёт ПОЛНОЕ название и характеристики СТРОГО из карточки товара!
+ *    - Запрещена перезапись полного названия из карточки товара сокращённым названием из корзины.
+ *    - Добавлена сквозная связка по `imageKey` (`get-grocery-goods/...`), которая на 100% совпадает в каталоге, корзине и карточке.
+ * 2. Точный фильтр модификаторов («без сахара» / «Zero», вкус, объём «1,5 л») для всех ссылок и цен конкурентов.
+ * 3. Защита от `message channel closed before a response was received` (Keep-Alive + Push `LQS_AI_VERDICT_READY`).
  */
 
 'use strict';
@@ -108,13 +106,9 @@ let latestRequestedProductKey = '';
 let lastWarmupCheckTs = 0;
 let isWarmingUp = false;
 
-// Кэш доступности локальных серверов (:8765 и :8083), чтобы не ждать 12с при выключенном сервере
 let backendOfflineUntilTs = 0;
 let bridgeOfflineUntilTs = 0;
 
-/**
- * Удерживает Service Worker в активном состоянии во время долгих операций (защита от закрытия message channel в MV3)
- */
 function startSwKeepAlive() {
   const timer = setInterval(() => {
     try {
@@ -165,9 +159,6 @@ function normalizeCacheKey(slug, title) {
     .toLowerCase();
 }
 
-/**
- * Нормализует название товара для связки SEO-slug (`/good/napitok-cola-...`) и HEX-ID (`/good/4cbf6c0b...`)
- */
 function normalizeTitleKey(rawTitle) {
   if (!rawTitle) return '';
   return String(rawTitle)
@@ -178,6 +169,12 @@ function normalizeTitleKey(rawTitle) {
     .trim()
     .toLowerCase()
     .replace(/ё/g, 'е');
+}
+
+function extractImageKeyFromUrl(src) {
+  if (!src) return null;
+  const m = String(src).match(/get-grocery-goods\/(\d+\/[a-f0-9-]+)/i);
+  return m ? m[1].toLowerCase() : null;
 }
 
 // ============================================================================
@@ -277,9 +274,6 @@ const GENERIC_STOP_WORDS = new Set([
   'при'
 ]);
 
-/**
- * Извлекает вес или объём в граммах/миллилитрах (например "1,5 л" -> 1500, "330 мл" -> 330)
- */
 function parseVolumeOrWeightGrams(rawStr) {
   if (!rawStr) return null;
   const s = String(rawStr).replace(/[\u00ad\u200b\u00a0]/g, ' ');
@@ -305,10 +299,6 @@ function parseVolumeOrWeightGrams(rawStr) {
   return null;
 }
 
-/**
- * Формирует ПОЛНОЕ название товара для поиска в магазинах и поисковиках
- * (СОХРАНЯЯ «без сахара», вкус, бренд и объём/вес вроде «1,5 л»!).
- */
 function buildFullProductSearchQuery(title, brand = '', amount = '') {
   let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
   q = q.replace(/(^|\s)(?:бзмж|стм)(?=\s|$)/gi, ' ');
@@ -348,13 +338,6 @@ function normalizeSynonymTokens(text) {
     .replace(/\bzero\b/g, 'без сахара zero зеро');
 }
 
-/**
- * Проверяет, соответствует ли найденный результат в поисковике ИМЕННО ЭТОМУ ТОВАРУ:
- * 1) Строго проверяет модификатор «без сахара» / «Zero» (никогда не путает обычную колу и колу без сахара).
- * 2) Строго проверяет вкусовые и видовые модификаторы (ваниль, вишня, лайм, безлактозное и т.д.).
- * 3) Проверяет ключевые слова названия и бренда.
- * 4) Проверяет совпадение объёма/веса (чтобы цена баночки 0,33 л не выдавалась за цену бутылки 1,5 л).
- */
 function isSearchResultMatchingProduct(resTitle, resSnippet, productTitle, productAmount = '') {
   const fullTarget = `${productTitle || ''} ${productAmount || ''}`.trim();
   const targetLower = fullTarget.toLowerCase().replace(/ё/g, 'е');
@@ -430,7 +413,7 @@ function isSearchResultMatchingProduct(resTitle, resSnippet, productTitle, produ
 }
 
 // ============================================================================
-// 1. ВСТРОЕННЫЙ КЭШ ИИ-ОБЗОРОВ (lqs_ai_cache_v1) СО СВЯЗКОЙ SEO-SLUG И HEX-ID
+// 1. ВСТРОЕННЫЙ КЭШ ИИ-ОБЗОРОВ (lqs_ai_cache_v1)
 // ============================================================================
 async function getLocalAiCacheMap() {
   return new Promise((resolve) => {
@@ -440,12 +423,17 @@ async function getLocalAiCacheMap() {
   });
 }
 
-async function getLocalAiCacheEntry(slug, title) {
+async function getLocalAiCacheEntry(slug, title, imageKey = null) {
   const key = normalizeCacheKey(slug, title);
   const normTitle = normalizeTitleKey(title);
   const map = await getLocalAiCacheMap();
 
   let entry = key ? map[key] : null;
+  if (!entry && imageKey) {
+    entry = Object.values(map).find(
+      (e) => e && e.verdict && !String(e.verdict).startsWith('⚠️') && e.imageKey === imageKey
+    );
+  }
   if (!entry && normTitle && normTitle.length >= 4) {
     entry = Object.values(map).find(
       (e) => e && e.verdict && !String(e.verdict).startsWith('⚠️') && normalizeTitleKey(e.title) === normTitle
@@ -453,8 +441,9 @@ async function getLocalAiCacheEntry(slug, title) {
   }
 
   if (entry && entry.verdict && !String(entry.verdict).startsWith('⚠️')) {
-    const filteredSources = Array.isArray(entry.sources) && title
-      ? entry.sources.filter((s) => isSearchResultMatchingProduct(s.title, s.snippet, title, '').isSameProduct)
+    const refTitle = entry.title || title || '';
+    const filteredSources = Array.isArray(entry.sources) && refTitle
+      ? entry.sources.filter((s) => isSearchResultMatchingProduct(s.title, s.snippet, refTitle, '').isSameProduct)
       : (entry.sources || []);
     return {
       ...entry,
@@ -464,7 +453,7 @@ async function getLocalAiCacheEntry(slug, title) {
   return null;
 }
 
-async function saveLocalAiCacheEntry(slug, title, verdict, sources, mode) {
+async function saveLocalAiCacheEntry(slug, title, verdict, sources, mode, imageKey = null) {
   const key = normalizeCacheKey(slug, title);
   if (!key || !verdict || String(verdict).startsWith('⚠️')) return null;
   const normTitle = normalizeTitleKey(title);
@@ -475,6 +464,7 @@ async function saveLocalAiCacheEntry(slug, title, verdict, sources, mode) {
     slug: key,
     title: title || key,
     cleanTitle: normTitle,
+    imageKey: imageKey || null,
     verdict: String(verdict).trim(),
     sources: Array.isArray(sources) ? sources : [],
     mode: mode || 'Автопилот ИИ',
@@ -483,10 +473,9 @@ async function saveLocalAiCacheEntry(slug, title, verdict, sources, mode) {
 
   map[key] = record;
 
-  // Если в кэше уже была запись для этого же товара под другим slug (например SEO-slug vs HEX-ID из корзины), синхронизируем оба ключа!
   if (normTitle && normTitle.length >= 4) {
     for (const [k, v] of Object.entries(map)) {
-      if (k !== key && v && normalizeTitleKey(v.title) === normTitle) {
+      if (k !== key && v && (normalizeTitleKey(v.title) === normTitle || (imageKey && v.imageKey === imageKey))) {
         map[k] = { ...record, slug: k };
       }
     }
@@ -511,9 +500,6 @@ async function clearLocalAiCache() {
   });
 }
 
-/**
- * Активно пушит готовый вердикт ИИ во все открытые вкладки Лавки (даже если исходный sendMessage закрылся)
- */
 async function broadcastAiVerdictToLavkaTabs(slug, title, resultObj) {
   try {
     const tabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
@@ -615,7 +601,7 @@ async function captureCurrentYandexCookies() {
         });
       }
     } catch {
-      // ignore domain permission error if any
+      // ignore
     }
   }
 
@@ -669,9 +655,6 @@ async function captureCurrentYandexCookies() {
   };
 }
 
-/**
- * Очищает ключи сессии/корзины/адреса в localStorage на открытой вкладке Лавки
- */
 async function clearLavkaTabLocalStorage(newLocalStorageData = null) {
   try {
     const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
@@ -767,11 +750,10 @@ async function restoreAccountCookies(cookiesList, localStorageData = {}) {
       await chrome.cookies.set(details);
       restoredCount += 1;
     } catch {
-      // ignore individual cookie restriction
+      // ignore
     }
   }
 
-  // Сначала очищаем старый localStorage и записываем данные целевого аккаунта
   await clearLavkaTabLocalStorage(localStorageData);
 
   return { restoredCount };
@@ -1149,7 +1131,7 @@ async function logoutToCleanLavkaSession() {
 }
 
 // ============================================================================
-// 3. МУЛЬТИ-АККАУНТ БАЗА ИСТОРИИ ЦЕН И АНОНИМНЫЙ ЗОНД БЕЗ КУКИ
+// 3. МУЛЬТИ-АККАУНТ БАЗА ИСТОРИИ ЦЕН И ПАРСЕР ОРИГИНАЛЬНОЙ КАРТОЧКИ ТОВАРА
 // ============================================================================
 async function getLocalPriceDb() {
   return new Promise((resolve) => {
@@ -1159,10 +1141,14 @@ async function getLocalPriceDb() {
   });
 }
 
-function findPriceEntryInDb(db, slug, title) {
+function findPriceEntryInDb(db, slug, title, imageKey = null) {
   if (!db) return null;
   const cleanSlug = String(slug || '').trim().toLowerCase();
   if (cleanSlug && db[cleanSlug]) return db[cleanSlug];
+  if (imageKey) {
+    const byImg = Object.values(db).find((e) => e && e.imageKey && e.imageKey === imageKey);
+    if (byImg) return byImg;
+  }
   const normTitle = normalizeTitleKey(title);
   if (normTitle && normTitle.length >= 4) {
     return Object.values(db).find((e) => e && normalizeTitleKey(e.title) === normTitle) || null;
@@ -1170,9 +1156,6 @@ function findPriceEntryInDb(db, slug, title) {
   return null;
 }
 
-/**
- * Очищает офферы конкурентов от несовпадающих модификаций (например, обычной колы для колы без сахара)
- */
 function sanitizeCompetitorOffersForProduct(offers, productTitle, productAmount = '') {
   if (!Array.isArray(offers) || offers.length === 0) return [];
   if (!productTitle) return offers;
@@ -1189,8 +1172,28 @@ function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
   const price = Number(item.price) || 0;
   const oldPrice = item.oldPrice ? Number(item.oldPrice) : null;
   const guestPrice = item.guestPrice ? Number(item.guestPrice) : (existing?.guestPrice || null);
-  const effectiveTitle = item.title || existing?.title || slug;
-  const effectiveAmount = item.amount || existing?.amount || '';
+  const imageKey = item.imageKey || existing?.imageKey || null;
+
+  // ЗАЩИТА ОТ УРЕЗАННЫХ НАЗВАНИЙ ИЗ КОРЗИНЫ:
+  // Если в базе уже сохранено эталонное полное название из оригинальной карточки товара (`isCanonicalCardTitle: true`),
+  // то короткое название из корзины (`isCanonicalCardTitle !== true`) НИКОГДА не перезаписывает его!
+  let effectiveTitle = existing?.title || item.title || slug;
+  let isCanonicalCardTitle = Boolean(existing?.isCanonicalCardTitle || item.isCanonicalCardTitle);
+
+  if (item.title) {
+    if (item.isCanonicalCardTitle) {
+      effectiveTitle = item.title;
+      isCanonicalCardTitle = true;
+    } else if (!existing?.title) {
+      effectiveTitle = item.title;
+    } else if (!existing?.isCanonicalCardTitle && String(item.title).length > String(existing.title).length) {
+      effectiveTitle = item.title;
+    }
+  }
+
+  const effectiveAmount =
+    (item.isCanonicalCardTitle && item.amount) ? item.amount : (existing?.amount || item.amount || '');
+  const effectiveBrand = item.brand || existing?.brand || '';
 
   const rawOffers =
     Array.isArray(item.competitorOffers) && item.competitorOffers.length > 0
@@ -1212,6 +1215,9 @@ function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
     slug,
     title: effectiveTitle,
     cleanTitle: normalizeTitleKey(effectiveTitle),
+    isCanonicalCardTitle,
+    brand: effectiveBrand,
+    imageKey,
     amount: effectiveAmount,
     minPrice: price,
     maxPrice: price,
@@ -1226,11 +1232,13 @@ function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
     updatedAt: nowIso
   };
 
-  if (item.title) {
-    entry.title = item.title;
-    entry.cleanTitle = normalizeTitleKey(item.title);
-  }
-  if (item.amount) entry.amount = item.amount;
+  entry.title = effectiveTitle;
+  entry.cleanTitle = normalizeTitleKey(effectiveTitle);
+  entry.isCanonicalCardTitle = isCanonicalCardTitle;
+  if (effectiveBrand) entry.brand = effectiveBrand;
+  if (imageKey) entry.imageKey = imageKey;
+  if (effectiveAmount) entry.amount = effectiveAmount;
+
   if (guestPrice && guestPrice > 0) {
     entry.guestPrice = Math.round(guestPrice);
     entry.accounts['Гость (без куки)'] = {
@@ -1291,19 +1299,20 @@ async function recordPricesBatch(accountId, items) {
   for (const rawItem of items) {
     if (!rawItem || !rawItem.slug) continue;
     const slug = String(rawItem.slug).trim().toLowerCase();
-    const existing = findPriceEntryInDb(db, slug, rawItem.title);
+    const existing = findPriceEntryInDb(db, slug, rawItem.title, rawItem.imageKey);
     const merged = mergePriceRecordIntoEntry(existing, rawItem, acc, nowIso);
     merged.slug = slug;
     db[slug] = merged;
     updatedSummaries[slug] = merged;
 
-    // Синхронизируем парные записи (SEO-slug <-> HEX-ID) с тем же cleanTitle
+    // Синхронизируем парные записи (SEO-slug <-> HEX-ID) по imageKey или по полному совпадению названия
     const normTitle = normalizeTitleKey(merged.title);
-    if (normTitle && normTitle.length >= 4) {
-      for (const [k, v] of Object.entries(db)) {
-        if (k !== slug && v && normalizeTitleKey(v.title) === normTitle) {
-          db[k] = { ...merged, slug: k };
-        }
+    for (const [k, v] of Object.entries(db)) {
+      if (k === slug || !v) continue;
+      const sameImg = merged.imageKey && v.imageKey && merged.imageKey === v.imageKey;
+      const sameTitle = normTitle && normTitle.length >= 4 && normalizeTitleKey(v.title) === normTitle;
+      if (sameImg || sameTitle) {
+        db[k] = { ...merged, slug: k };
       }
     }
   }
@@ -1336,7 +1345,15 @@ async function recordPricesBatch(accountId, items) {
         const data = await resp.json();
         if (data && data.summaries) {
           for (const [sKey, sVal] of Object.entries(data.summaries)) {
-            db[sKey] = { ...db[sKey], ...sVal };
+            const cur = db[sKey];
+            // Сохраняем эталонное название из карточки товара!
+            const bestTitle = cur?.isCanonicalCardTitle ? cur.title : (sVal.title || cur?.title);
+            db[sKey] = {
+              ...cur,
+              ...sVal,
+              title: bestTitle,
+              isCanonicalCardTitle: Boolean(cur?.isCanonicalCardTitle)
+            };
             updatedSummaries[sKey] = db[sKey];
           }
           chrome.storage.local.set({ [PRICE_DB_KEY]: db });
@@ -1370,11 +1387,92 @@ function parsePriceFromLavkaHtml(html) {
   return null;
 }
 
-async function probeGuestPriceWithoutCookies(slug, title = '', currentPrice = null, accountId = null) {
+/**
+ * Извлекает ПОЛНОЕ ОРИГИНАЛЬНОЕ НАЗВАНИЕ, фасовку, бренд, картинку и цену
+ * напрямую из HTML оригинальной карточки товара (`https://lavka.yandex.ru/good/<slug>`).
+ */
+function parseFullProductCardFromLavkaHtml(html) {
+  if (!html) return null;
+  const price = parsePriceFromLavkaHtml(html);
+
+  let cardTitle = '';
+  let cardAmount = '';
+  let cardBrand = '';
+  let imageKey = null;
+
+  // 1. Заголовок <h1 data-testid="product-title">...</h1>
+  const h1Match = html.match(/<h1[^>]*data-testid="product-title"[^>]*>([\s\S]*?)<\/h1>/i);
+  if (h1Match) {
+    cardTitle = decodeHtmlEntities(h1Match[1]).replace(/[\u00ad\u200b]/g, '').trim();
+  }
+
+  // 2. Фасовка <span data-testid="product-amount">...</span>
+  const amtMatch = html.match(/<span[^>]*data-testid="product-amount"[^>]*>([\s\S]*?)<\/span>/i);
+  if (amtMatch) {
+    cardAmount = decodeHtmlEntities(amtMatch[1]).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
+  }
+
+  // 3. JSON-LD схема Product (содержит полное название, бренд и описание)
+  const ldMatches = html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
+  for (const m of ldMatches) {
+    try {
+      const parsed = JSON.parse(m[1]);
+      const graph = parsed['@graph'] || [parsed];
+      const prod = graph.find((it) => it && it['@type'] === 'Product');
+      if (prod) {
+        if (!cardTitle && prod.name) {
+          cardTitle = String(prod.name).replace(/[\u00ad\u200b]/g, '').trim();
+        }
+        if (prod.brand) {
+          cardBrand = typeof prod.brand === 'string' ? prod.brand : (prod.brand.name || '');
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 4. Fallback на <title>, если h1 и JSON-LD не сработали
+  if (!cardTitle) {
+    const titleTagMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (titleTagMatch) {
+      const rawT = decodeHtmlEntities(titleTagMatch[1]);
+      const splitT = rawT.split(/\s*[—–|]\s*купить|\s*[—–|]\s*Яндекс/i)[0].trim();
+      if (splitT && splitT.length > 3) {
+        cardTitle = splitT;
+      }
+    }
+  }
+
+  // 5. Ключ изображения (get-grocery-goods/...)
+  const imgMatch = html.match(/get-grocery-goods\/(\d+\/[a-f0-9-]+)/i);
+  if (imgMatch) {
+    imageKey = imgMatch[1].toLowerCase();
+  }
+
+  return {
+    price,
+    cardTitle,
+    cardAmount,
+    cardBrand,
+    imageKey
+  };
+}
+
+/**
+ * Запрашивает оригинальную карточку товара `https://lavka.yandex.ru/good/<slug>`
+ * и возвращает как гостевую цену, так и ПОЛНОЕ название и характеристики из карточки товара!
+ */
+async function probeGuestPriceAndCardMeta(slug, fallbackTitle = '', currentPrice = null, accountId = null, fallbackAmount = '', fallbackImageKey = null) {
   if (!slug) return null;
   const cleanSlug = String(slug).trim().toLowerCase();
+  const url = `https://lavka.yandex.ru/good/${encodeURIComponent(cleanSlug)}`;
+
+  let parsedCard = null;
+  let guestPrice = null;
+
+  // Сначала пробуем без куки (получаем и гостевую цену, и полное название из оригинальной карточки!)
   try {
-    const url = `https://lavka.yandex.ru/good/${encodeURIComponent(cleanSlug)}`;
     const resp = await fetchWithTimeout(
       url,
       {
@@ -1387,37 +1485,97 @@ async function probeGuestPriceWithoutCookies(slug, title = '', currentPrice = nu
       },
       3800
     );
-    if (!resp.ok) return null;
-    const html = await resp.text();
-    const guestPrice = parsePriceFromLavkaHtml(html);
-    if (guestPrice && guestPrice > 0) {
-      const summaries = await recordPricesBatch(accountId, [
-        {
-          slug: cleanSlug,
-          title: title || cleanSlug,
-          price: currentPrice || guestPrice,
-          guestPrice
-        }
-      ]);
-      return summaries[cleanSlug] || { slug: cleanSlug, guestPrice };
+    if (resp.ok) {
+      const html = await resp.text();
+      parsedCard = parseFullProductCardFromLavkaHtml(html);
+      if (parsedCard && parsedCard.price > 0) {
+        guestPrice = parsedCard.price;
+      }
     }
   } catch {
-    // ignore network error
+    // ignore
+  }
+
+  // Если без куки Лавка не отдала заголовок h1 карточки (например, редирект локации), запрашиваем с куками пользователя!
+  if (!parsedCard || !parsedCard.cardTitle) {
+    try {
+      const respAuth = await fetchWithTimeout(
+        url,
+        {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            'Accept-Language': 'ru-RU,ru;q=0.9'
+          }
+        },
+        3800
+      );
+      if (respAuth.ok) {
+        const htmlAuth = await respAuth.text();
+        const parsedAuth = parseFullProductCardFromLavkaHtml(htmlAuth);
+        if (parsedAuth && parsedAuth.cardTitle) {
+          parsedCard = {
+            ...parsedAuth,
+            price: guestPrice || parsedAuth.price
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const canonicalTitle = parsedCard?.cardTitle
+    ? buildFullProductSearchQuery(parsedCard.cardTitle, parsedCard.cardBrand || '', parsedCard.cardAmount || fallbackAmount)
+    : fallbackTitle;
+  const canonicalAmount = parsedCard?.cardAmount || fallbackAmount || '';
+  const canonicalBrand = parsedCard?.cardBrand || '';
+  const canonicalImageKey = parsedCard?.imageKey || fallbackImageKey || null;
+  const hasCanonicalTitle = Boolean(parsedCard?.cardTitle);
+
+  if (guestPrice || hasCanonicalTitle || currentPrice) {
+    const summaries = await recordPricesBatch(accountId, [
+      {
+        slug: cleanSlug,
+        title: canonicalTitle || cleanSlug,
+        isCanonicalCardTitle: hasCanonicalTitle,
+        brand: canonicalBrand,
+        imageKey: canonicalImageKey,
+        amount: canonicalAmount,
+        price: currentPrice || guestPrice || 0,
+        guestPrice: guestPrice || null
+      }
+    ]);
+    return summaries[cleanSlug] || {
+      slug: cleanSlug,
+      title: canonicalTitle,
+      isCanonicalCardTitle: hasCanonicalTitle,
+      brand: canonicalBrand,
+      imageKey: canonicalImageKey,
+      amount: canonicalAmount,
+      guestPrice
+    };
   }
   return null;
 }
 
-async function getProductPriceIntelligence(slug, title = '', currentPrice = null, oldPrice = null, amount = '', accountId = null) {
+async function getProductPriceIntelligence(slug, title = '', currentPrice = null, oldPrice = null, amount = '', accountId = null, isFromProductCard = false, imageKey = null, brand = '') {
   const cleanSlug = String(slug || '').trim().toLowerCase();
   if (!cleanSlug) return null;
   const settings = await getSettings();
   const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
 
+  const fullCardTitle = isFromProductCard ? buildFullProductSearchQuery(title, brand, amount) : title;
+
   if (currentPrice && currentPrice > 0) {
     await recordPricesBatch(acc, [
       {
         slug: cleanSlug,
-        title,
+        title: fullCardTitle,
+        isCanonicalCardTitle: Boolean(isFromProductCard && title),
+        brand: brand || '',
+        imageKey: imageKey || null,
         price: currentPrice,
         oldPrice,
         amount
@@ -1426,12 +1584,12 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
   }
 
   const db = await getLocalPriceDb();
-  let summary = findPriceEntryInDb(db, cleanSlug, title);
+  let summary = findPriceEntryInDb(db, cleanSlug, fullCardTitle, imageKey);
 
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   if (backendUrl && Date.now() > backendOfflineUntilTs) {
     try {
-      const qTitle = title ? `?title=${encodeURIComponent(title)}` : '';
+      const qTitle = fullCardTitle ? `?title=${encodeURIComponent(fullCardTitle)}` : '';
       const r = await fetchWithTimeout(
         `${backendUrl}/api/price/product/${encodeURIComponent(cleanSlug)}${qTitle}`,
         { method: 'GET', headers: LQS_CLIENT_HEADER },
@@ -1440,9 +1598,12 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
       if (r.ok) {
         const j = await r.json();
         if (j && j.status === 'ok' && j.summary) {
+          const keepCanonicalTitle = summary?.isCanonicalCardTitle ? summary.title : (fullCardTitle || j.summary.title);
           summary = {
             ...(summary || {}),
             ...j.summary,
+            title: keepCanonicalTitle,
+            isCanonicalCardTitle: Boolean(summary?.isCanonicalCardTitle || isFromProductCard),
             accounts: { ...(summary?.accounts || {}), ...(j.summary.accounts || {}) }
           };
           db[cleanSlug] = summary;
@@ -1454,31 +1615,42 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
     }
   }
 
-  if (settings.enableGuestPriceProbe !== false && (!summary || !summary.guestPrice)) {
-    const probed = await probeGuestPriceWithoutCookies(cleanSlug, title, currentPrice, acc);
+  if (
+    (settings.enableGuestPriceProbe !== false && (!summary || !summary.guestPrice)) ||
+    (!summary || !summary.isCanonicalCardTitle)
+  ) {
+    const probed = await probeGuestPriceAndCardMeta(
+      cleanSlug,
+      fullCardTitle,
+      currentPrice,
+      acc,
+      amount,
+      imageKey
+    );
     if (probed) {
       summary = { ...(summary || {}), ...probed };
     }
   }
 
   if (summary) {
+    const authoritativeTitle = summary.title || fullCardTitle || '';
+    const authoritativeAmount = summary.amount || amount || '';
+    const authoritativeBrand = summary.brand || brand || '';
     summary.competitorOffers = sanitizeCompetitorOffersForProduct(
       summary.competitorOffers || [],
-      title || summary.title || '',
-      amount || summary.amount || ''
+      authoritativeTitle,
+      authoritativeAmount
     );
     summary.storeSearchLinks = buildDirectStoreSearchLinks(
-      title || summary.title || '',
-      amount || summary.amount || ''
+      authoritativeTitle,
+      authoritativeAmount,
+      authoritativeBrand
     );
   }
 
   return summary;
 }
 
-/**
- * Генерирует прямые ссылки для быстрого поиска ПОЛНОГО названия товара (с «без сахара», вкусом и объёмом!) в магазинах-конкурентах
- */
 function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
   const fullQuery = buildFullProductSearchQuery(rawTitle, brand, amount);
   const enc = encodeURIComponent(fullQuery || rawTitle || '');
@@ -1494,17 +1666,42 @@ function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
 
 /**
  * Пакетный аудит корзины по конкурентам и гостевым ценам:
- * - Сохраняет полное название + объём (например «Напиток Cola «Добрый» газированный без сахара 1,5 л»)
- * - Отсекает нерелевантные товары (обычную колу с сахаром или баночки другого объёма)
- * - Защищает DuckDuckGo от сетевого шторма при больших корзинах
+ * ГАРАНТИРУЕТ, что для каждого товара корзины название и характеристики берутся
+ * СТРОГО ИЗ ОРИГИНАЛЬНОЙ КАРТОЧКИ ТОВАРА (`/good/<slug>`), а не из сокращённого текста в корзине!
  */
 async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetworkSearch = false) {
   const stopKeepAlive = startSwKeepAlive();
   try {
     const settings = await getSettings();
     const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
-    const priceDb = await getLocalPriceDb();
-    const aiCache = await getLocalAiCacheMap();
+    let priceDb = await getLocalPriceDb();
+
+    // Шаг 1: Для всех позиций корзины, у которых ещё нет полного названия из оригинальной карточки товара (`isCanonicalCardTitle`),
+    // параллельно подтягиваем оригинальную карточку `https://lavka.yandex.ru/good/<slug>`!
+    const itemsNeedingCardResolution = items.filter((item) => {
+      if (!item || !item.slug) return false;
+      const existing = findPriceEntryInDb(priceDb, item.slug, item.title, item.imageKey);
+      return !existing || !existing.isCanonicalCardTitle || (settings.enableGuestPriceProbe !== false && !existing.guestPrice);
+    });
+
+    for (let i = 0; i < itemsNeedingCardResolution.length; i += 4) {
+      const chunk = itemsNeedingCardResolution.slice(i, i + 4);
+      await Promise.all(
+        chunk.map((it) =>
+          probeGuestPriceAndCardMeta(
+            it.slug,
+            it.title || it.slug,
+            it.price,
+            acc,
+            it.amount || '',
+            it.imageKey || null
+          )
+        )
+      );
+    }
+
+    // Перечитываем обновлённую БД после резолва оригинальных карточек
+    priceDb = await getLocalPriceDb();
 
     const enrichedItems = [];
     let totalLavkaPrice = 0;
@@ -1522,28 +1719,25 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
       const slug = String(item.slug).trim().toLowerCase();
       const qty = Math.max(1, Number(item.qty) || 1);
       const price = Number(item.price) || 0;
-      const rawTitle = item.title || slug;
-      const amount = item.amount || '';
-      const fullDisplayTitle = buildFullProductSearchQuery(rawTitle, '', amount);
 
       totalLavkaPrice += price * qty;
 
-      let pEntry = findPriceEntryInDb(priceDb, slug, rawTitle);
-      const aiEntry = await getLocalAiCacheEntry(slug, rawTitle);
+      const pEntry = findPriceEntryInDb(priceDb, slug, item.title, item.imageKey);
 
-      let guestPrice = pEntry?.guestPrice || null;
-      if (!guestPrice && settings.enableGuestPriceProbe !== false) {
-        const probed = await probeGuestPriceWithoutCookies(slug, fullDisplayTitle, price, acc);
-        if (probed && probed.guestPrice) {
-          guestPrice = probed.guestPrice;
-          pEntry = { ...(pEntry || {}), ...probed };
-        }
-      }
+      // БЕРЁМ НАЗВАНИЕ, ФАСОВКУ И БРЕНД СТРОГО ИЗ ОРИГИНАЛЬНОЙ КАРТОЧКИ ТОВАРА!
+      const cardTitle = (pEntry && pEntry.title) ? pEntry.title : (item.title || slug);
+      const cardAmount = (pEntry && pEntry.amount) ? pEntry.amount : (item.amount || '');
+      const cardBrand = (pEntry && pEntry.brand) ? pEntry.brand : '';
+      const cardImageKey = (pEntry && pEntry.imageKey) ? pEntry.imageKey : (item.imageKey || null);
+      const fullAuthoritativeTitle = buildFullProductSearchQuery(cardTitle, cardBrand, cardAmount);
+
+      const aiEntry = await getLocalAiCacheEntry(slug, fullAuthoritativeTitle, cardImageKey);
+      const guestPrice = pEntry?.guestPrice || null;
 
       let compOffers = sanitizeCompetitorOffersForProduct(
         pEntry?.competitorOffers || [],
-        rawTitle,
-        amount
+        fullAuthoritativeTitle,
+        cardAmount
       );
       let compMin = null;
       let compSum = '';
@@ -1557,16 +1751,30 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
       }
 
       if (compOffers.length === 0 && aiEntry && Array.isArray(aiEntry.sources) && aiEntry.sources.length > 0) {
-        const extracted = extractCompetitorPricesFromSources(aiEntry.sources, price, rawTitle, amount);
+        const extracted = extractCompetitorPricesFromSources(
+          aiEntry.sources,
+          price,
+          fullAuthoritativeTitle,
+          cardAmount
+        );
         if (extracted.competitorMinPrice) compMin = extracted.competitorMinPrice;
         if (extracted.competitorSummary) compSum = extracted.competitorSummary;
         if (extracted.competitorOffers.length > 0) compOffers = extracted.competitorOffers;
       }
 
-      if ((forceNetworkSearch || (!compMin && compOffers.length === 0)) && rawTitle && ddgNetworkCallsMade < maxDdgCallsPerPass) {
+      if (
+        (forceNetworkSearch || (!compMin && compOffers.length === 0)) &&
+        fullAuthoritativeTitle &&
+        ddgNetworkCallsMade < maxDdgCallsPerPass
+      ) {
         ddgNetworkCallsMade += 1;
-        const foundSources = await searchWebReviewsDirect(rawTitle, '', amount);
-        const extracted = extractCompetitorPricesFromSources(foundSources, price, rawTitle, amount);
+        const foundSources = await searchWebReviewsDirect(fullAuthoritativeTitle, cardBrand, cardAmount);
+        const extracted = extractCompetitorPricesFromSources(
+          foundSources,
+          price,
+          fullAuthoritativeTitle,
+          cardAmount
+        );
         if (extracted.competitorMinPrice) compMin = extracted.competitorMinPrice;
         if (extracted.competitorSummary) compSum = extracted.competitorSummary;
         if (extracted.competitorOffers.length > 0) {
@@ -1574,7 +1782,7 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
         } else if (foundSources.length > 0) {
           compOffers = foundSources
             .filter((s) => s.url && !s.url.includes('otzovik.com') && !s.url.includes('irecommend.ru'))
-            .filter((s) => isSearchResultMatchingProduct(s.title, s.snippet, rawTitle, amount).isSameProduct)
+            .filter((s) => isSearchResultMatchingProduct(s.title, s.snippet, fullAuthoritativeTitle, cardAmount).isSameProduct)
             .slice(0, 4)
             .map((s) => ({
               store: s.source || 'Магазин',
@@ -1586,10 +1794,13 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
 
         batchUpdates.push({
           slug,
-          title: fullDisplayTitle,
+          title: fullAuthoritativeTitle,
+          isCanonicalCardTitle: Boolean(pEntry?.isCanonicalCardTitle),
+          brand: cardBrand,
+          imageKey: cardImageKey,
           price,
           oldPrice: item.oldPrice || null,
-          amount,
+          amount: cardAmount,
           guestPrice: guestPrice || null,
           competitorMinPrice: compMin || null,
           competitorSummary: compSum || null,
@@ -1633,8 +1844,10 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
 
       enrichedItems.push({
         slug,
-        title: fullDisplayTitle,
-        amount,
+        title: fullAuthoritativeTitle,
+        amount: cardAmount,
+        brand: cardBrand,
+        imageKey: cardImageKey,
         qty,
         price,
         rowTotal: Math.round(price * qty),
@@ -1648,7 +1861,7 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
         competitorOffers: compOffers,
         overpayVsCompetitorPerUnit,
         overpayVsCompetitorTotal,
-        storeSearchLinks: buildDirectStoreSearchLinks(rawTitle, amount)
+        storeSearchLinks: buildDirectStoreSearchLinks(fullAuthoritativeTitle, cardAmount, cardBrand)
       });
     }
 
@@ -1720,7 +1933,22 @@ async function getSavedCartsState() {
 async function saveCartSnapshot(accountId, items, totalPrice = 0) {
   const settings = await getSettings();
   const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
-  const cleanItems = (Array.isArray(items) ? items : []).filter((i) => i && i.slug);
+  const priceDb = await getLocalPriceDb();
+
+  // Обогащаем позиции корзины полными названиями из оригинальных карточек товаров, если они уже есть в базе
+  const cleanItems = (Array.isArray(items) ? items : [])
+    .filter((i) => i && i.slug)
+    .map((i) => {
+      const existing = findPriceEntryInDb(priceDb, i.slug, i.title, i.imageKey);
+      const bestTitle = existing?.isCanonicalCardTitle ? existing.title : i.title;
+      return {
+        ...i,
+        title: bestTitle || i.title,
+        amount: existing?.amount || i.amount || '',
+        imageKey: i.imageKey || existing?.imageKey || null
+      };
+    });
+
   const calcTotal = Math.round(cleanItems.reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.qty) || 1), 0));
   const totalUnits = cleanItems.reduce((sum, i) => sum + (Number(i.qty) || 1), 0);
   const finalTotal = totalPrice > 0 ? Math.round(totalPrice) : calcTotal;
@@ -1748,6 +1976,8 @@ async function saveCartSnapshot(accountId, items, totalPrice = 0) {
     cleanItems.map((i) => ({
       slug: i.slug,
       title: i.title,
+      isCanonicalCardTitle: false, // из корзины не перезаписываем эталонный заголовок карточки!
+      imageKey: i.imageKey || null,
       price: i.price,
       oldPrice: i.oldPrice,
       amount: i.amount
@@ -1804,17 +2034,26 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
       const slug = String(item.slug || '').trim().toLowerCase();
       const qty = Number(item.qty) || 1;
       const sourcePrice = Number(item.price) || 0;
-      const existingEntry = findPriceEntryInDb(priceDb, slug, item.title);
+      const existingEntry = findPriceEntryInDb(priceDb, slug, item.title, item.imageKey);
 
       let currentPrice = null;
       let guestPrice = existingEntry?.guestPrice || null;
+      let cardTitle = existingEntry?.isCanonicalCardTitle ? existingEntry.title : (item.title || slug);
+      let isCanonical = Boolean(existingEntry?.isCanonicalCardTitle);
 
       try {
         const url = `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}`;
         const resp = await fetchWithTimeout(url, { method: 'GET', credentials: 'include', cache: 'no-store' }, 3800);
         if (resp.ok) {
           const html = await resp.text();
-          currentPrice = parsePriceFromLavkaHtml(html);
+          const parsed = parseFullProductCardFromLavkaHtml(html);
+          if (parsed) {
+            if (parsed.price > 0) currentPrice = parsed.price;
+            if (parsed.cardTitle) {
+              cardTitle = buildFullProductSearchQuery(parsed.cardTitle, parsed.cardBrand || '', parsed.cardAmount || item.amount || '');
+              isCanonical = true;
+            }
+          }
         }
       } catch {
         // fallback to priceDb
@@ -1830,7 +2069,14 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
           const respG = await fetchWithTimeout(url, { method: 'GET', credentials: 'omit', cache: 'no-store' }, 3500);
           if (respG.ok) {
             const htmlG = await respG.text();
-            guestPrice = parsePriceFromLavkaHtml(htmlG);
+            const parsedG = parseFullProductCardFromLavkaHtml(htmlG);
+            if (parsedG) {
+              if (parsedG.price > 0) guestPrice = parsedG.price;
+              if (!isCanonical && parsedG.cardTitle) {
+                cardTitle = buildFullProductSearchQuery(parsedG.cardTitle, parsedG.cardBrand || '', parsedG.cardAmount || item.amount || '');
+                isCanonical = true;
+              }
+            }
           }
         } catch {
           // ignore
@@ -1847,16 +2093,18 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
       if (currentPrice) {
         batchToRecord.push({
           slug,
-          title: item.title || slug,
+          title: cardTitle,
+          isCanonicalCardTitle: isCanonical,
+          imageKey: item.imageKey || existingEntry?.imageKey || null,
           price: currentPrice,
           guestPrice: guestPrice || null,
-          amount: item.amount || ''
+          amount: item.amount || existingEntry?.amount || ''
         });
       }
 
       comparedItems.push({
         slug,
-        title: item.title || slug,
+        title: cardTitle,
         qty,
         sourcePrice,
         currentPrice: effCurrent,
@@ -1914,11 +2162,6 @@ async function waitForTabCompleteSafe(tabId, timeoutMs = 6000) {
   });
 }
 
-/**
- * Добавляет один товар в нужном количестве (desiredQty) на открытой вкладке Лавки:
- * - Честно учитывает лимит остатка на складе (не завышает addedUnits при нехватке товара).
- * - Умеет как увеличивать (+), так и уменьшать (-), если в корзине уже лежало больше единиц.
- */
 async function addSingleItemOnTab(tabId, item) {
   const desiredQty = Math.max(1, Math.min(30, Number(item.qty) || 1));
   const targetSlug = String(item.slug || '').trim().toLowerCase();
@@ -2115,7 +2358,6 @@ async function addSingleItemOnTab(tabId, item) {
             }
           }
 
-          // Если в корзине на этом аккаунте уже лежало БОЛЬШЕ штук, чем нужно — уменьшаем кнопкой «-»
           let safetyMinus = 0;
           while (currentQty > qtyToSet && safetyMinus < 20) {
             safetyMinus += 1;
@@ -2290,10 +2532,6 @@ function unwrapDdgUrl(rawHref) {
   return /^https?:\/\//i.test(href) ? href : '';
 }
 
-/**
- * Извлекает цены конкурентов ТОЛЬКО из тех источников, которые прошли проверку
- * точного совпадения модификации («без сахара» / вкус / бренд / объём).
- */
 function extractCompetitorPricesFromSources(sources, lavkaPrice = null, productTitle = '', productAmount = '') {
   if (!Array.isArray(sources) || sources.length === 0) {
     return { competitorMinPrice: null, competitorSummary: '', competitorOffers: [] };
@@ -2438,7 +2676,6 @@ async function searchWebReviewsDirect(title, brand = '', amount = '') {
   const fullQ = buildFullProductSearchQuery(title, brand, amount);
   if (!fullQ) return [];
 
-  // Если товар «без сахара», берём "без сахара" в кавычки, чтобы поисковик не подсовывал обычную колу с сахаром
   let strictQ = fullQ;
   if (/без\s+сахара/i.test(strictQ)) {
     strictQ = strictQ.replace(/без\s+сахара/i, '"без сахара"');
@@ -2617,7 +2854,7 @@ function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = fals
 }
 
 // ============================================================================
-// 6. РАБОТА С ВКЛАДКОЙ GEMINI И КУКАМИ GOOGLE (С ЗАЩИТОЙ ОТ ЗАВИСАНИЯ)
+// 6. РАБОТА С ВКЛАДКОЙ GEMINI И КУКАМИ GOOGLE
 // ============================================================================
 async function inspectGeminiCookies() {
   try {
@@ -2822,7 +3059,6 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
             };
           }
 
-          // Если во вкладке Gemini ещё генерируется предыдущий ответ — аккуратно останавливаем его перед новым запросом
           const findStopBtn = () =>
             document.querySelector(
               'button[aria-label*="Stop"], button[aria-label*="Остановить"], button[aria-label*="Прервать"], button.stop-button'
@@ -2890,7 +3126,6 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
           let stableTicks = 0;
           let retriedSend = false;
 
-          // Максимум 52 тика по 450 мс (~23.4 сек), чтобы гарантированно уложиться до 30-сек лимита MV3
           for (let i = 0; i < 52; i++) {
             await wait(450);
             const nodes = document.querySelectorAll(responseSelector);
@@ -2899,7 +3134,6 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
             const currentText = latestNode ? (latestNode.innerText || '').trim() : '';
             const isNew = hasNewNode || (currentText && currentText !== initialLastText);
 
-            // Если через 2.5 секунды отправка не сработала и текст остался в поле ввода — пробуем нажать ещё раз
             if (i === 5 && !isNew && !isStillGenerating() && !retriedSend) {
               retriedSend = true;
               if ((editor.innerText || editor.value || '').trim().length > 10) {
@@ -2967,9 +3201,6 @@ function enqueueGeminiTabExecution(taskFn) {
   return next;
 }
 
-/**
- * Проверяет, открыт ли ещё этот товар хотя бы на одной вкладке Яндекс Лавки (чтобы не тратить очередь Gemini на закрытые товары)
- */
 async function isProductStillRelevantForUser(slug, title, forceRefresh = false) {
   if (forceRefresh) return true;
   const reqKey = normalizeCacheKey(slug, title);
@@ -3101,11 +3332,16 @@ async function orchestrateProductAnalysisInternal(payload) {
       payload.price,
       payload.oldPrice,
       payload.amount,
-      acc
+      acc,
+      true, // вызов со страницы оригинальной карточки товара!
+      payload.imageKey || null,
+      payload.brand || ''
     );
 
+    const authoritativeTitle = buildFullProductSearchQuery(payload.title, payload.brand, payload.amount);
+
     if (!payload.forceRefresh) {
-      const localCached = await getLocalAiCacheEntry(payload.slug, payload.title);
+      const localCached = await getLocalAiCacheEntry(payload.slug, authoritativeTitle, payload.imageKey);
       if (localCached && localCached.verdict) {
         const resObj = {
           ok: true,
@@ -3115,7 +3351,7 @@ async function orchestrateProductAnalysisInternal(payload) {
           sources: localCached.sources || [],
           priceSummary: priceIntel
         };
-        broadcastAiVerdictToLavkaTabs(payload.slug, payload.title, resObj);
+        broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
         return resObj;
       }
     }
@@ -3139,6 +3375,7 @@ async function orchestrateProductAnalysisInternal(payload) {
               headers: { 'Content-Type': 'application/json', ...LQS_CLIENT_HEADER },
               body: JSON.stringify({
                 ...payload,
+                title: authoritativeTitle,
                 accountId: acc,
                 guestPrice: priceIntel?.guestPrice || null,
                 aiBaseUrl: settings.aiBaseUrl,
@@ -3159,7 +3396,7 @@ async function orchestrateProductAnalysisInternal(payload) {
             }
             if (data.verdict && data.aiOk !== false && !data.verdict.startsWith('⚠️')) {
               const modeLabel = data.cached ? 'FastAPI SQLite Cache (:8765)' : `FastAPI (:8765) + ${settings.aiModel}`;
-              await saveLocalAiCacheEntry(payload.slug, payload.title, data.verdict, webSources, modeLabel);
+              await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, data.verdict, webSources, modeLabel, payload.imageKey);
               const resObj = {
                 ok: true,
                 cached: Boolean(data.cached),
@@ -3168,7 +3405,7 @@ async function orchestrateProductAnalysisInternal(payload) {
                 sources: webSources,
                 priceSummary: priceIntel
               };
-              broadcastAiVerdictToLavkaTabs(payload.slug, payload.title, resObj);
+              broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
               return resObj;
             }
           }
@@ -3179,15 +3416,18 @@ async function orchestrateProductAnalysisInternal(payload) {
     }
 
     if (!webSources || webSources.length === 0) {
-      webSources = await searchWebReviewsDirect(payload.title, payload.brand, payload.amount);
+      webSources = await searchWebReviewsDirect(authoritativeTitle, payload.brand, payload.amount);
     }
 
-    const comp = extractCompetitorPricesFromSources(webSources, payload.price, payload.title, payload.amount);
+    const comp = extractCompetitorPricesFromSources(webSources, payload.price, authoritativeTitle, payload.amount);
     if (comp.competitorMinPrice || comp.competitorSummary || comp.competitorOffers.length > 0) {
       const updatedMap = await recordPricesBatch(acc, [
         {
           slug: payload.slug,
-          title: payload.title,
+          title: authoritativeTitle,
+          isCanonicalCardTitle: true,
+          brand: payload.brand || '',
+          imageKey: payload.imageKey || null,
           price: payload.price || 0,
           oldPrice: payload.oldPrice || null,
           amount: payload.amount || '',
@@ -3204,7 +3444,7 @@ async function orchestrateProductAnalysisInternal(payload) {
 
     if (aiBaseUrl && Date.now() > bridgeOfflineUntilTs) {
       try {
-        const promptForBridge = buildProductReviewPrompt(payload, webSources, false, priceIntel);
+        const promptForBridge = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, false, priceIntel);
         const headers = { 'Content-Type': 'application/json' };
         if (settings.aiApiKey) {
           headers.Authorization = `Bearer ${settings.aiApiKey}`;
@@ -3230,9 +3470,9 @@ async function orchestrateProductAnalysisInternal(payload) {
           if (reply) {
             const cleanReply = reply.trim();
             const modeLabel = `Мост ${settings.aiModel} (${aiBaseUrl})`;
-            await saveLocalAiCacheEntry(payload.slug, payload.title, cleanReply, webSources, modeLabel);
+            await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, cleanReply, webSources, modeLabel, payload.imageKey);
             if (backendOnline) {
-              saveVerdictToBackendCache(backendUrl, payload.slug, payload.title, cleanReply, webSources);
+              saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, cleanReply, webSources);
             }
             const resObj = {
               ok: true,
@@ -3242,7 +3482,7 @@ async function orchestrateProductAnalysisInternal(payload) {
               sources: webSources,
               priceSummary: priceIntel
             };
-            broadcastAiVerdictToLavkaTabs(payload.slug, payload.title, resObj);
+            broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
             return resObj;
           }
         }
@@ -3252,9 +3492,8 @@ async function orchestrateProductAnalysisInternal(payload) {
     }
 
     return await enqueueGeminiTabExecution(async () => {
-      // Если пока запрос ждал в очереди, ответ уже появился в кэше (например по парному slug/title) — отдаём сразу!
       if (!payload.forceRefresh) {
-        const alreadyCached = await getLocalAiCacheEntry(payload.slug, payload.title);
+        const alreadyCached = await getLocalAiCacheEntry(payload.slug, authoritativeTitle, payload.imageKey);
         if (alreadyCached && alreadyCached.verdict) {
           const resObj = {
             ok: true,
@@ -3264,13 +3503,12 @@ async function orchestrateProductAnalysisInternal(payload) {
             sources: alreadyCached.sources || [],
             priceSummary: priceIntel
           };
-          broadcastAiVerdictToLavkaTabs(payload.slug, payload.title, resObj);
+          broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
           return resObj;
         }
       }
 
-      // Если пользователь уже закрыл или ушёл с этого товара — не блокируем вкладку Gemini!
-      const stillRelevant = await isProductStillRelevantForUser(payload.slug, payload.title, payload.forceRefresh);
+      const stillRelevant = await isProductStillRelevantForUser(payload.slug, authoritativeTitle, payload.forceRefresh);
       if (!stillRelevant) {
         return {
           ok: false,
@@ -3285,14 +3523,14 @@ async function orchestrateProductAnalysisInternal(payload) {
       if (geminiTab && geminiTab.id) {
         const email = await detectTabAccountEmail(geminiTab.id);
         const accIdx = extractAccountIndexFromUrl(geminiTab.url);
-        const promptForTab = buildProductReviewPrompt(payload, webSources, true, priceIntel);
+        const promptForTab = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, true, priceIntel);
         const tabResult = await executePromptInsideGeminiTab(geminiTab.id, promptForTab);
         if (tabResult && tabResult.ok && tabResult.text) {
           const accLabel = email ? `${email} (/u/${accIdx})` : `/u/${accIdx}`;
           const modeLabel = `Вкладка Gemini [${accLabel}]`;
-          await saveLocalAiCacheEntry(payload.slug, payload.title, tabResult.text, webSources, modeLabel);
+          await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, tabResult.text, webSources, modeLabel, payload.imageKey);
           if (backendOnline) {
-            saveVerdictToBackendCache(backendUrl, payload.slug, payload.title, tabResult.text, webSources);
+            saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, tabResult.text, webSources);
           }
           const resObj = {
             ok: true,
@@ -3302,7 +3540,7 @@ async function orchestrateProductAnalysisInternal(payload) {
             sources: webSources,
             priceSummary: priceIntel
           };
-          broadcastAiVerdictToLavkaTabs(payload.slug, payload.title, resObj);
+          broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
           return resObj;
         }
         return {
@@ -3383,7 +3621,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_PRICE_INTEL') {
-    getProductPriceIntelligence(msg.slug, msg.title, msg.price, msg.oldPrice, msg.amount, msg.accountId)
+    getProductPriceIntelligence(
+      msg.slug,
+      msg.title,
+      msg.price,
+      msg.oldPrice,
+      msg.amount,
+      msg.accountId,
+      Boolean(msg.isFromProductCard),
+      msg.imageKey || null,
+      msg.brand || ''
+    )
       .then((summary) => sendResponse({ ok: Boolean(summary), summary }))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
@@ -3467,7 +3715,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_CACHED_AI_VERDICT') {
-    getLocalAiCacheEntry(msg.slug, msg.title)
+    getLocalAiCacheEntry(msg.slug, msg.title, msg.imageKey || null)
       .then((entry) => sendResponse({ ok: Boolean(entry), entry: entry || null }))
       .catch(() => sendResponse({ ok: false, entry: null }));
     return true;
