@@ -1,20 +1,22 @@
 """
-Lavka Quality Shield v2.0.3 — Локальный FastAPI сервер (127.0.0.1:8765)
+Lavka Quality Shield v2.1.0 — Локальный FastAPI сервер (127.0.0.1:8765)
 1. Принимает название, состав, БЖУ и цену товара из расширения Lavka Quality Shield.
 2. Ищет реальные отзывы о продукте в сети (Отзовик, IRecommend, Роскачество, ВкусВилл, Ozon).
 3. Кэширует результаты в локальной базе SQLite (lavka_ai_cache.db).
-4. Отправляет найденные отзывы + состав в твой локальный Cookie-мост Gemini 4 Argon (http://localhost:8083/v1)
-   или любой другой OpenAI-совместимый облачный/локальный ИИ.
-5. Содержит эндпоинт GET /api/health для встроенной системы диагностики расширения.
+4. Отправляет найденные отзывы + состав в локальный мост Gemini 4 Argon (http://localhost:8083/v1)
+   или любой другой OpenAI-совместимый облачный/локальный ИИ (DeepSeek, Ollama, Unsloth).
+5. Ведёт кольцевой бортовой журнал запросов (GET /api/logs и GET /api/health) для экспорта в ИИ при отладке.
 """
 
 import os
 import re
 import json
 import sqlite3
+import time
 import urllib.parse
-from datetime import datetime
-from typing import List, Optional
+from collections import deque
+from datetime import datetime, timezone
+from typing import Deque, Dict, List, Optional
 
 # Защита от перехвата локальных запросов системным прокси/VPN на Windows
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
@@ -28,7 +30,7 @@ from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.0.3")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +39,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Кольцевой буфер серверных событий для бортового журнала расширения
+SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=80)
+
+
+def log_event(level: str, msg: str) -> None:
+    now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    SERVER_LOGS.appendleft({"ts": now_str, "level": level, "msg": msg})
 
 
 def init_db() -> None:
@@ -53,6 +63,7 @@ def init_db() -> None:
             """
         )
         conn.commit()
+    log_event("INIT", f"SQLite cache initialized at {os.path.basename(DB_PATH)}")
 
 
 init_db()
@@ -79,13 +90,22 @@ async def health_check():
         with sqlite3.connect(DB_PATH) as conn:
             row = conn.execute("SELECT COUNT(*) FROM product_ai_cache").fetchone()
             cached_count = row[0] if row else 0
-    except Exception:
-        pass
+    except Exception as exc:
+        log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.0.3",
+        "version": "2.1.0",
         "cachedItems": cached_count,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/logs")
+async def get_server_logs():
+    return {
+        "status": "ok",
+        "version": "2.1.0",
+        "logs": list(SERVER_LOGS),
     }
 
 
@@ -103,9 +123,11 @@ async def search_web_reviews(product_title: str) -> List[dict]:
     }
 
     results = []
+    t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
+            dt_ms = int((time.perf_counter() - t0) * 1000)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 for block in soup.select(".result")[:5]:
@@ -126,8 +148,11 @@ async def search_web_reviews(product_title: str) -> List[dict]:
                             "url": real_url,
                         }
                     )
-    except Exception:
-        pass
+                log_event("SEARCH", f"DDG search for '{clean_q[:35]}' -> {len(results)} snippets in {dt_ms}ms")
+            else:
+                log_event("WARN", f"DDG HTTP {resp.status_code} for '{clean_q[:35]}' ({dt_ms}ms)")
+    except Exception as exc:
+        log_event("ERROR", f"DDG search error for '{clean_q[:35]}': {exc}")
 
     return results
 
@@ -164,16 +189,21 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict]) -> str:
         "temperature": 0.3,
     }
 
+    t0 = time.perf_counter()
     async with httpx.AsyncClient(timeout=25.0, trust_env=not is_local) as client:
         resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+        dt_ms = int((time.perf_counter() - t0) * 1000)
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
+        reply = data["choices"][0]["message"]["content"].strip()
+        log_event("LLM_OK", f"Model '{req.aiModel}' @ {base_url} replied in {dt_ms}ms ({len(reply)} chars)")
+        return reply
 
 
 @app.post("/api/analyze-product")
 async def analyze_product(req: AnalyzeRequest):
     cache_key = (req.slug or req.title).strip().lower()
+    log_event("REQ", f"Analyze request for slug='{cache_key}' (force={req.forceRefresh})")
 
     if not req.forceRefresh:
         with sqlite3.connect(DB_PATH) as conn:
@@ -182,6 +212,7 @@ async def analyze_product(req: AnalyzeRequest):
                 (cache_key,),
             ).fetchone()
             if row:
+                log_event("CACHE_HIT", f"Returned SQLite cached verdict for '{cache_key}'")
                 return {
                     "cached": True,
                     "verdict": row[0],
@@ -189,29 +220,34 @@ async def analyze_product(req: AnalyzeRequest):
                 }
 
     sources = await search_web_reviews(req.title)
+    ai_ok = True
     try:
         verdict = await call_ai_model(req, sources)
     except Exception as exc:
+        ai_ok = False
+        log_event("LLM_ERR", f"AI call failed ({req.aiModel} @ {req.aiBaseUrl}): {exc}")
         verdict = (
             f"⚠️ Ошибка вызова ИИ ({req.aiModel} @ {req.aiBaseUrl}): {exc}\n"
-            f"Проверь, что контейнер gemini-argon (:8083) запущен и API Key указан в настройках расширения."
+            f"Проверь, что локальный мост или API запущен и API Key указан в настройках расширения."
         )
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO product_ai_cache (slug, title, verdict, sources_json, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                cache_key,
-                req.title,
-                verdict,
-                json.dumps(sources, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
-            ),
-        )
-        conn.commit()
+    # Не кэшируем в SQLite сообщение об ошибке соединения, чтобы повторный клик сразу шёл в ИИ
+    if ai_ok:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO product_ai_cache (slug, title, verdict, sources_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    cache_key,
+                    req.title,
+                    verdict,
+                    json.dumps(sources, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
 
     return {
         "cached": False,
