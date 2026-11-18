@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Lavka Quality Shield v2.4.0 — Anti-Scam & Multi-Account Cart Cloner Styles
+   Lavka Quality Shield v2.5.0 — UI Fixes, Cart Competitor Dropdown & Account Switcher
    ========================================================================== */
 
 :root {
@@ -26,15 +26,21 @@
 .lqs-product-panel *::before,
 .lqs-product-panel *::after,
 .lqs-cart-audit-banner,
-.lqs-cart-audit-banner * {
+.lqs-cart-audit-banner *,
+.lqs-cart-audit-banner *::before,
+.lqs-cart-audit-banner *::after,
+.lqs-passport-helper,
+.lqs-passport-helper * {
   box-sizing: border-box !important;
   font-family: -apple-system, BlinkMacSystemFont, "YS Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
   letter-spacing: normal !important;
   text-transform: none !important;
+  line-height: 1.35 !important;
 }
 
 div.lqs-product-panel button *,
-div.lqs-product-panel .lqs-tag-chip * {
+div.lqs-product-panel .lqs-tag-chip *,
+.lqs-cart-audit-banner button * {
   pointer-events: none !important;
 }
 
@@ -49,7 +55,7 @@ div.lqs-product-panel {
   color: var(--lqs-text) !important;
   border: 1px solid var(--lqs-border) !important;
   border-radius: 14px !important;
-  padding: 8px 12px !important;
+  padding: 9px 12px !important;
   margin: 10px 0 14px 0 !important;
   font-size: 13px !important;
   line-height: 1.35 !important;
@@ -76,7 +82,7 @@ div.lqs-product-panel .lqs-main-bar {
   flex-wrap: wrap !important;
   gap: 6px !important;
   width: 100% !important;
-  min-height: 32px !important;
+  min-height: 30px !important;
   height: auto !important;
 }
 
@@ -86,6 +92,7 @@ div.lqs-product-panel .lqs-core-left {
   flex-wrap: wrap !important;
   gap: 6px !important;
   min-width: 0 !important;
+  flex: 1 1 auto !important;
 }
 
 div.lqs-product-panel .lqs-stars-inline {
@@ -109,6 +116,7 @@ div.lqs-product-panel button.lqs-star-btn {
   padding: 0 1px !important;
   margin: 0 !important;
   width: 19px !important;
+  min-width: 19px !important;
   height: 24px !important;
   min-height: 24px !important;
   font-size: 16px !important;
@@ -143,15 +151,15 @@ div.lqs-product-panel .lqs-metric-pill {
   display: inline-flex !important;
   align-items: center !important;
   gap: 4px !important;
-  height: 28px !important;
+  height: auto !important;
   min-height: 28px !important;
-  padding: 0 9px !important;
+  padding: 4px 9px !important;
   background: #ffffff !important;
   color: var(--lqs-text) !important;
   border: 1px solid var(--lqs-border) !important;
   border-radius: 9px !important;
   font-size: 12px !important;
-  line-height: 1 !important;
+  line-height: 1.2 !important;
   font-weight: 600 !important;
   white-space: nowrap !important;
   flex-shrink: 0 !important;
@@ -198,6 +206,8 @@ div.lqs-product-panel button.lqs-drawer-toggle-btn {
   color: var(--lqs-text) !important;
   border: 1px solid var(--lqs-border) !important;
   border-radius: 9px !important;
+  width: auto !important;
+  min-width: 0 !important;
   height: 28px !important;
   min-height: 28px !important;
   padding: 0 10px !important;
@@ -261,10 +271,11 @@ div.lqs-product-panel .lqs-price-radar-bar {
   background: #ffffff !important;
   border: 1px solid #bae6fd !important;
   border-radius: 9px !important;
-  padding: 6px 10px !important;
+  padding: 7px 10px !important;
   font-size: 11.5px !important;
-  line-height: 1.4 !important;
+  line-height: 1.45 !important;
   color: #0f172a !important;
+  word-break: break-word !important;
 }
 
 div.lqs-product-panel .lqs-drawer-toolbar {
@@ -291,6 +302,8 @@ div.lqs-product-panel button.lqs-mini-btn,
   color: var(--lqs-text) !important;
   border: 1px solid var(--lqs-border) !important;
   border-radius: 9px !important;
+  width: auto !important;
+  min-width: 0 !important;
   height: 28px !important;
   min-height: 28px !important;
   padding: 0 10px !important;
@@ -305,9 +318,16 @@ div.lqs-product-panel button.lqs-mini-btn,
   justify-content: center !important;
   gap: 5px !important;
   white-space: nowrap !important;
+  flex-shrink: 0 !important;
 }
 
-div.lqs-product-panel button.lqs-mini-btn.ai-btn {
+div.lqs-product-panel button.lqs-mini-btn:hover,
+.lqs-cart-audit-banner button.lqs-mini-btn:hover {
+  background: var(--lqs-surface-hover) !important;
+}
+
+div.lqs-product-panel button.lqs-mini-btn.ai-btn,
+.lqs-cart-audit-banner button.lqs-mini-btn.btn-accent {
   background: var(--lqs-yellow) !important;
   border-color: #e5cb00 !important;
   color: #21201f !important;
@@ -393,6 +413,7 @@ div.lqs-product-panel span.lqs-tag-chip.selected {
 
 div.lqs-product-panel .lqs-note-wrap {
   display: flex !important;
+  flex-direction: row !important;
   gap: 8px !important;
   align-items: stretch !important;
   width: 100% !important;
@@ -401,6 +422,7 @@ div.lqs-product-panel .lqs-note-wrap {
 div.lqs-product-panel textarea.lqs-note-input {
   flex: 1 1 auto !important;
   width: 100% !important;
+  min-width: 0 !important;
   min-height: 44px !important;
   background: #ffffff !important;
   color: var(--lqs-text) !important;
@@ -412,16 +434,35 @@ div.lqs-product-panel textarea.lqs-note-input {
   resize: vertical !important;
 }
 
+/* Исправление кнопки "💾 Ок" на карточке товара (защита от стилей кнопок Лавки) */
 div.lqs-product-panel button.lqs-save-btn {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
   background: #21201f !important;
   color: #ffffff !important;
   border: none !important;
   border-radius: 10px !important;
-  padding: 0 13px !important;
-  min-height: 36px !important;
-  font-size: 12px !important;
-  font-weight: 600 !important;
+  padding: 0 14px !important;
+  margin: 0 !important;
+  width: auto !important;
+  min-width: 64px !important;
+  max-width: none !important;
+  height: auto !important;
+  min-height: 44px !important;
+  font-size: 12.5px !important;
+  line-height: 1.1 !important;
+  font-weight: 700 !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
   cursor: pointer !important;
+}
+
+div.lqs-product-panel button.lqs-save-btn:hover {
+  background: #3a3836 !important;
 }
 
 div.lqs-product-panel .lqs-ai-box {
@@ -442,26 +483,67 @@ div.lqs-product-panel .lqs-ai-box.visible {
   display: flex !important;
 }
 
+/* Исправление шапки ИИ-блока и кнопки "🔄 Обновить" (защита от наложения текста) */
 div.lqs-product-panel .lqs-ai-header {
   display: flex !important;
+  flex-direction: row !important;
   justify-content: space-between !important;
   align-items: center !important;
+  flex-wrap: nowrap !important;
   gap: 8px !important;
-  font-weight: 700 !important;
-  font-size: 12.5px !important;
-  padding-bottom: 6px !important;
+  width: 100% !important;
+  min-height: 28px !important;
+  height: auto !important;
+  padding-bottom: 7px !important;
   border-bottom: 1px solid #f0eee9 !important;
 }
 
-div.lqs-product-panel .lqs-ai-refresh-btn {
+div.lqs-product-panel .lqs-ai-header-title {
+  display: block !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  font-weight: 700 !important;
+  font-size: 12.5px !important;
+  line-height: 1.35 !important;
+  color: var(--lqs-text) !important;
+  white-space: normal !important;
+  word-break: break-word !important;
+}
+
+div.lqs-product-panel button.lqs-ai-refresh-btn {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
   background: #f5f4f2 !important;
   border: 1px solid var(--lqs-border) !important;
-  border-radius: 7px !important;
-  padding: 3px 8px !important;
-  font-size: 11px !important;
+  border-radius: 8px !important;
+  padding: 0 9px !important;
+  margin: 0 !important;
+  width: auto !important;
+  min-width: 0 !important;
+  height: 26px !important;
+  min-height: 26px !important;
+  font-size: 11.5px !important;
+  line-height: 1 !important;
   font-weight: 600 !important;
-  color: #5c5a57 !important;
+  color: #4b4946 !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
   cursor: pointer !important;
+}
+
+div.lqs-product-panel button.lqs-ai-refresh-btn:hover {
+  background: #e7e5e0 !important;
+}
+
+div.lqs-product-panel .lqs-ai-content {
+  font-size: 12.5px !important;
+  line-height: 1.5 !important;
+  color: var(--lqs-text) !important;
+  word-break: break-word !important;
 }
 
 div.lqs-product-panel .lqs-ai-sources {
@@ -471,7 +553,8 @@ div.lqs-product-panel .lqs-ai-sources {
   margin-top: 2px !important;
 }
 
-div.lqs-product-panel .lqs-ai-sources a {
+div.lqs-product-panel .lqs-ai-sources a,
+.lqs-cart-audit-banner .lqs-store-link {
   display: inline-flex !important;
   align-items: center !important;
   gap: 4px !important;
@@ -482,18 +565,29 @@ div.lqs-product-panel .lqs-ai-sources a {
   padding: 3px 8px !important;
   border-radius: 7px !important;
   font-size: 11.5px !important;
-  font-weight: 500 !important;
+  line-height: 1.2 !important;
+  font-weight: 600 !important;
+  white-space: nowrap !important;
 }
 
-/* БАННЕР АУДИТОРА КОРЗИНЫ */
+div.lqs-product-panel .lqs-ai-sources a:hover,
+.lqs-cart-audit-banner .lqs-store-link:hover {
+  background: #dbeafe !important;
+}
+
+/* ==========================================================================
+   БАННЕР АУДИТОРА КОРЗИНЫ (.lqs-cart-audit-banner) + СРАВНЕНИЕ С МАГАЗИНАМИ
+   ========================================================================== */
 .lqs-cart-audit-banner {
-  margin: 10px 0 !important;
-  border-radius: 12px !important;
-  overflow: hidden !important;
+  margin: 10px 0 14px 0 !important;
+  border-radius: 14px !important;
+  overflow: visible !important;
   border: 1px solid #cbd5e1 !important;
   background: #f8fafc !important;
-  padding: 10px 12px !important;
+  padding: 11px 14px !important;
   font-size: 12.5px !important;
+  color: #0f172a !important;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05) !important;
 }
 
 .lqs-cart-audit-head {
@@ -504,13 +598,135 @@ div.lqs-product-panel .lqs-ai-sources a {
   gap: 8px !important;
 }
 
+.lqs-cart-summary-row {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  margin-top: 8px !important;
+}
+
+.lqs-cart-pill {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  padding: 4px 9px !important;
+  border-radius: 8px !important;
+  font-size: 11.5px !important;
+  line-height: 1.2 !important;
+  font-weight: 600 !important;
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #334155 !important;
+}
+
+.lqs-cart-pill.overpay-bad {
+  background: #fee2e2 !important;
+  border-color: #fca5a5 !important;
+  color: #991b1b !important;
+  font-weight: 700 !important;
+}
+
+.lqs-cart-pill.overpay-warn {
+  background: #fef3c7 !important;
+  border-color: #fcd34d !important;
+  color: #92400e !important;
+  font-weight: 700 !important;
+}
+
+.lqs-cart-pill.overpay-good {
+  background: #dcfce7 !important;
+  border-color: #86efac !important;
+  color: #166534 !important;
+  font-weight: 700 !important;
+}
+
 .lqs-cart-tamper-warn {
   margin-top: 8px !important;
   padding: 8px 10px !important;
-  border-radius: 8px !important;
+  border-radius: 9px !important;
   background: #fee2e2 !important;
   border: 1px solid #fca5a5 !important;
   color: #991b1b !important;
+  font-size: 12px !important;
+}
+
+.lqs-cart-dropdown {
+  display: none !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  margin-top: 10px !important;
+  padding-top: 10px !important;
+  border-top: 1px solid #e2e8f0 !important;
+}
+
+.lqs-cart-dropdown.open {
+  display: flex !important;
+}
+
+.lqs-cart-comp-item {
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 10px !important;
+  padding: 8px 11px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 5px !important;
+}
+
+.lqs-cart-comp-top {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+}
+
+.lqs-cart-comp-title {
+  font-weight: 700 !important;
+  font-size: 12.5px !important;
+  color: #0f172a !important;
+  text-decoration: none !important;
+}
+
+.lqs-cart-comp-title:hover {
+  text-decoration: underline !important;
+}
+
+.lqs-cart-comp-links {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  gap: 5px !important;
+}
+
+.lqs-store-link.is-cheaper {
+  background: #dcfce7 !important;
+  border-color: #86efac !important;
+  color: #166534 !important;
+  font-weight: 700 !important;
+}
+
+.lqs-store-link.is-search {
+  background: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+  color: #334155 !important;
+  font-weight: 500 !important;
+}
+
+/* ПАНЕЛЬ БЫСТРОГО ВХОДА НА PASSPORT.YANDEX.RU / ID.YANDEX.RU */
+.lqs-passport-helper {
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  z-index: 999999 !important;
+  background: #ffffff !important;
+  color: #21201f !important;
+  border: 2px solid #fce000 !important;
+  border-radius: 12px !important;
+  padding: 10px 12px !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18) !important;
+  max-width: 340px !important;
   font-size: 12px !important;
 }
 

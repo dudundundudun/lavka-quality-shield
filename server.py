@@ -1,12 +1,12 @@
 """
-Lavka Quality Shield v2.4.0 — Локальный FastAPI сервер (127.0.0.1:8765)
+Lavka Quality Shield v2.5.0 — Локальный FastAPI сервер (127.0.0.1:8765)
 1. Принимает название, состав, БЖУ, фасовку и расчёт цены товара из расширения Lavka Quality Shield.
-2. Ищет реальные отзывы И ЦЕНЫ КОНКУРЕНТОВ в сети по списку проверенных площадок (Отзовик, IRecommend,
+2. Ищет реальные отзывы И ЦЕНЫ КОНКУРЕНТОВ со ссылками в сети по списку проверенных площадок (Отзовик, IRecommend,
    Роскачество, Росконтроль, ВкусВилл, Перекрёсток, Азбука Вкуса, Ozon, Яндекс Маркет, Лента, Wildberries, Купер).
 3. Ведёт единую мульти-аккаунт базу истории цен в SQLite (product_price_summary + price_observations):
    позволяет сравнивать цены между разными аккаунтами и профилями Chrome, а также с ценой Гостя (без куки).
-4. Хранит слепки корзин (saved_carts) для мгновенной сверки и авто-сборки корзины между аккаунтами.
-5. Кэширует ответы ИИ в SQLite (product_ai_cache) и общается с мостом Gemini (:8083) или вкладкой браузера.
+4. Хранит слепки корзин (saved_carts) и сейф аккаунтов Лавки (saved_accounts: куки-сессии, логины, пароли, заметки).
+5. Выполняет пакетный аудит корзины по конкурентам (/api/cart/audit-competitors) с прямыми ссылками на магазины.
 """
 
 import os
@@ -39,7 +39,7 @@ from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.4.0")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -118,12 +118,19 @@ def init_db() -> None:
                 guest_price REAL,
                 competitor_min_price REAL,
                 competitor_summary TEXT,
+                competitor_offers_json TEXT,
                 accounts_json TEXT,
                 history_json TEXT,
                 updated_at TEXT
             )
             """
         )
+        # Безопасная миграция для существующих БД v2.4.0
+        try:
+            conn.execute("ALTER TABLE product_price_summary ADD COLUMN competitor_offers_json TEXT")
+        except Exception:
+            pass
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS saved_carts (
@@ -135,9 +142,25 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_accounts (
+                account_id TEXT PRIMARY KEY,
+                label TEXT,
+                login TEXT,
+                password TEXT,
+                note TEXT,
+                yandex_login TEXT,
+                cookie_count INTEGER,
+                cookies_json TEXT,
+                local_storage_json TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
         conn.commit()
-    log_event("INIT", f"SQLite v2.4.0 initialized (AI cache + Multi-Account Price Matrix + Cart Cloner)")
+    log_event("INIT", "SQLite v2.5.0 initialized (AI cache + Price Matrix + Cart Audit + Account Vault)")
 
 
 init_db()
@@ -184,6 +207,7 @@ class PriceItemInput(BaseModel):
     guestPrice: Optional[float] = None
     competitorMinPrice: Optional[float] = None
     competitorSummary: Optional[str] = None
+    competitorOffers: Optional[List[Dict[str, Any]]] = None
 
 
 class RecordPricesRequest(BaseModel):
@@ -207,6 +231,19 @@ class SaveCartSnapshotRequest(BaseModel):
     totalPrice: float = 0.0
 
 
+class AccountVaultItemModel(BaseModel):
+    accountId: str
+    label: str
+    login: Optional[str] = ""
+    password: Optional[str] = ""
+    note: Optional[str] = ""
+    yandexLogin: Optional[str] = ""
+    cookieCount: int = 0
+    cookies: List[Dict[str, Any]] = []
+    localStorageData: Dict[str, Any] = {}
+    updatedAt: Optional[str] = None
+
+
 def upsert_price_observation_sync(
     conn: sqlite3.Connection,
     slug: str,
@@ -218,6 +255,7 @@ def upsert_price_observation_sync(
     guest_price: Optional[float] = None,
     competitor_min: Optional[float] = None,
     competitor_summary: Optional[str] = None,
+    competitor_offers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     clean_slug = slug.strip().lower()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -235,7 +273,7 @@ def upsert_price_observation_sync(
     row = conn.execute(
         """
         SELECT title, amount, min_price, max_price, avg_price, last_price, guest_price,
-               competitor_min_price, competitor_summary, accounts_json, history_json
+               competitor_min_price, competitor_summary, competitor_offers_json, accounts_json, history_json
         FROM product_price_summary WHERE slug = ?
         """,
         (clean_slug,),
@@ -248,11 +286,16 @@ def upsert_price_observation_sync(
         cur_comp_min = competitor_min if (competitor_min and competitor_min > 0) else row[7]
         cur_comp_sum = competitor_summary if competitor_summary else row[8]
         try:
-            accounts_map = json.loads(row[9] or "{}")
+            existing_offers = json.loads(row[9] or "[]")
+        except Exception:
+            existing_offers = []
+        cur_comp_offers = competitor_offers if (competitor_offers and len(competitor_offers) > 0) else existing_offers
+        try:
+            accounts_map = json.loads(row[10] or "{}")
         except Exception:
             accounts_map = {}
         try:
-            history_list = json.loads(row[10] or "[]")
+            history_list = json.loads(row[11] or "[]")
         except Exception:
             history_list = []
     else:
@@ -261,6 +304,7 @@ def upsert_price_observation_sync(
         cur_guest = guest_price if (guest_price and guest_price > 0) else None
         cur_comp_min = competitor_min if (competitor_min and competitor_min > 0) else None
         cur_comp_sum = competitor_summary or None
+        cur_comp_offers = competitor_offers or []
         accounts_map = {}
         history_list = []
 
@@ -308,9 +352,9 @@ def upsert_price_observation_sync(
         """
         INSERT OR REPLACE INTO product_price_summary (
             slug, title, amount, min_price, max_price, avg_price, last_price,
-            guest_price, competitor_min_price, competitor_summary,
+            guest_price, competitor_min_price, competitor_summary, competitor_offers_json,
             accounts_json, history_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             clean_slug,
@@ -323,6 +367,7 @@ def upsert_price_observation_sync(
             cur_guest,
             cur_comp_min,
             cur_comp_sum,
+            json.dumps(cur_comp_offers, ensure_ascii=False),
             json.dumps(accounts_map, ensure_ascii=False),
             json.dumps(history_list, ensure_ascii=False),
             now_iso,
@@ -340,6 +385,7 @@ def upsert_price_observation_sync(
         "guestPrice": cur_guest,
         "competitorMinPrice": cur_comp_min,
         "competitorSummary": cur_comp_sum,
+        "competitorOffers": cur_comp_offers,
         "accounts": accounts_map,
         "history": history_list,
         "updatedAt": now_iso,
@@ -351,6 +397,7 @@ async def health_check():
     cached_count = 0
     tracked_prices = 0
     saved_carts_count = 0
+    saved_accounts_count = 0
     try:
         with sqlite3.connect(DB_PATH) as conn:
             row1 = conn.execute("SELECT COUNT(*) FROM product_ai_cache").fetchone()
@@ -359,14 +406,17 @@ async def health_check():
             tracked_prices = row2[0] if row2 else 0
             row3 = conn.execute("SELECT COUNT(*) FROM saved_carts").fetchone()
             saved_carts_count = row3[0] if row3 else 0
+            row4 = conn.execute("SELECT COUNT(*) FROM saved_accounts").fetchone()
+            saved_accounts_count = row4[0] if row4 else 0
     except Exception as exc:
         log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "cachedItems": cached_count,
         "trackedPrices": tracked_prices,
         "savedCarts": saved_carts_count,
+        "savedAccounts": saved_accounts_count,
         "reviewSites": [s["domain"] for s in REVIEW_SEARCH_SITES],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -376,9 +426,77 @@ async def health_check():
 async def get_server_logs():
     return {
         "status": "ok",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "logs": list(SERVER_LOGS),
     }
+
+
+@app.post("/api/accounts/save")
+async def save_account_vault_endpoint(req: AccountVaultItemModel):
+    now_iso = req.updatedAt or datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO saved_accounts (
+                account_id, label, login, password, note, yandex_login,
+                cookie_count, cookies_json, local_storage_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                req.accountId,
+                req.label,
+                req.login or "",
+                req.password or "",
+                req.note or "",
+                req.yandexLogin or "",
+                int(req.cookieCount or len(req.cookies or [])),
+                json.dumps(req.cookies or [], ensure_ascii=False),
+                json.dumps(req.localStorageData or {}, ensure_ascii=False),
+                now_iso,
+            ),
+        )
+        conn.commit()
+    log_event("ACCOUNT_VAULT", f"Saved account profile '{req.label}' ({req.cookieCount} cookies)")
+    return {"status": "ok", "accountId": req.accountId, "updatedAt": now_iso}
+
+
+@app.get("/api/accounts/list")
+async def list_saved_accounts_endpoint():
+    accounts = []
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT account_id, label, login, password, note, yandex_login,
+                   cookie_count, cookies_json, local_storage_json, updated_at
+            FROM saved_accounts
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        for r in rows:
+            accounts.append(
+                {
+                    "accountId": r[0],
+                    "label": r[1],
+                    "login": r[2],
+                    "password": r[3],
+                    "note": r[4],
+                    "yandexLogin": r[5],
+                    "cookieCount": r[6],
+                    "cookies": json.loads(r[7] or "[]"),
+                    "localStorageData": json.loads(r[8] or "{}"),
+                    "updatedAt": r[9],
+                }
+            )
+    return {"status": "ok", "accounts": accounts}
+
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_saved_account_endpoint(account_id: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM saved_accounts WHERE account_id = ?", (account_id,))
+        conn.commit()
+    log_event("ACCOUNT_VAULT", f"Deleted account profile '{account_id}'")
+    return {"status": "ok"}
 
 
 @app.post("/api/price/record")
@@ -401,6 +519,7 @@ async def record_prices_endpoint(req: RecordPricesRequest):
                 guest_price=item.guestPrice,
                 competitor_min=item.competitorMinPrice,
                 competitor_summary=item.competitorSummary,
+                competitor_offers=item.competitorOffers,
             )
             summaries[summary["slug"]] = summary
         conn.commit()
@@ -415,7 +534,7 @@ async def get_product_price_summary(slug: str):
         row = conn.execute(
             """
             SELECT slug, title, amount, min_price, max_price, avg_price, last_price,
-                   guest_price, competitor_min_price, competitor_summary,
+                   guest_price, competitor_min_price, competitor_summary, competitor_offers_json,
                    accounts_json, history_json, updated_at
             FROM product_price_summary WHERE slug = ?
             """,
@@ -436,9 +555,10 @@ async def get_product_price_summary(slug: str):
                 "guestPrice": row[7],
                 "competitorMinPrice": row[8],
                 "competitorSummary": row[9],
-                "accounts": json.loads(row[10] or "{}"),
-                "history": json.loads(row[11] or "[]"),
-                "updatedAt": row[12],
+                "competitorOffers": json.loads(row[10] or "[]"),
+                "accounts": json.loads(row[11] or "{}"),
+                "history": json.loads(row[12] or "[]"),
+                "updatedAt": row[13],
             },
         }
 
@@ -450,7 +570,7 @@ async def list_tracked_prices(limit: int = 200):
         rows = conn.execute(
             """
             SELECT slug, title, amount, min_price, max_price, avg_price, last_price,
-                   guest_price, competitor_min_price, competitor_summary,
+                   guest_price, competitor_min_price, competitor_summary, competitor_offers_json,
                    accounts_json, updated_at
             FROM product_price_summary
             ORDER BY updated_at DESC
@@ -459,7 +579,7 @@ async def list_tracked_prices(limit: int = 200):
             (limit,),
         ).fetchall()
         for r in rows:
-            accounts = json.loads(r[10] or "{}")
+            accounts = json.loads(r[11] or "{}")
             items.append(
                 {
                     "slug": r[0],
@@ -472,8 +592,9 @@ async def list_tracked_prices(limit: int = 200):
                     "guestPrice": r[7],
                     "competitorMinPrice": r[8],
                     "competitorSummary": r[9],
+                    "competitorOffers": json.loads(r[10] or "[]"),
                     "accounts": accounts,
-                    "updatedAt": r[11],
+                    "updatedAt": r[12],
                 }
             )
     return {"status": "ok", "count": len(items), "items": items}
@@ -496,7 +617,6 @@ async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
                 """,
                 (cid, acc, json.dumps(items_list, ensure_ascii=False), final_total, now_iso),
             )
-        # Также попутно записываем цены всех товаров корзины в общую базу цен!
         for item in req.items:
             if item.slug and item.price > 0:
                 upsert_price_observation_sync(
@@ -527,10 +647,9 @@ async def get_latest_cart_snapshot():
             return {"status": "empty", "latest": None, "cartsByAccount": []}
 
         items = json.loads(row[2] or "[]")
-        # Обогащаем каждый товар корзины известными ценами с других аккаунтов из product_price_summary
         for it in items:
             s_row = conn.execute(
-                "SELECT min_price, avg_price, guest_price, competitor_min_price, competitor_summary, accounts_json FROM product_price_summary WHERE slug = ?",
+                "SELECT min_price, avg_price, guest_price, competitor_min_price, competitor_summary, competitor_offers_json, accounts_json FROM product_price_summary WHERE slug = ?",
                 (str(it.get("slug", "")).lower(),),
             ).fetchone()
             if s_row:
@@ -539,7 +658,8 @@ async def get_latest_cart_snapshot():
                 it["guestPrice"] = s_row[2]
                 it["competitorMinPrice"] = s_row[3]
                 it["competitorSummary"] = s_row[4]
-                it["accounts"] = json.loads(s_row[5] or "{}")
+                it["competitorOffers"] = json.loads(s_row[5] or "[]")
+                it["accounts"] = json.loads(s_row[6] or "{}")
 
         carts_by_account = [
             {
@@ -620,34 +740,52 @@ def detect_source_label(url: str) -> Tuple[str, bool]:
     return host.replace("www.", "") or "Веб", False
 
 
-def extract_competitor_prices_from_sources(sources: List[Dict[str, Any]], lavka_price: Optional[float] = None) -> Tuple[Optional[float], str]:
-    """Извлекает упоминания цен в рублях из сниппетов и заголовков магазинов-конкурентов."""
-    found: List[Tuple[str, float]] = []
+def extract_competitor_prices_from_sources(
+    sources: List[Dict[str, Any]], lavka_price: Optional[float] = None
+) -> Tuple[Optional[float], str, List[Dict[str, Any]]]:
+    """Извлекает упоминания цен в рублях и ссылки из сниппетов и заголовков магазинов-конкурентов."""
+    found: List[Dict[str, Any]] = []
     for s in sources:
         text = f"{s.get('title', '')} {s.get('snippet', '')}"
         source_name = s.get("source") or "Магазин"
-        for m in re.finditer(r"(?:от\s+|цена\s+|за\s+)?(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])", text, re.IGNORECASE):
+        url = s.get("url") or ""
+        raw_title = s.get("title") or source_name
+        for m in re.finditer(
+            r"(?:от\s+|цена\s+|за\s+)?(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])",
+            text,
+            re.IGNORECASE,
+        ):
             try:
                 val = float(m.group(1).replace(",", "."))
                 if 20 <= val <= 9500:
                     if lavka_price and (val < lavka_price * 0.22 or val > lavka_price * 3.5):
                         continue
-                    found.append((source_name, round(val)))
+                    found.append(
+                        {
+                            "store": source_name,
+                            "price": int(round(val)),
+                            "url": url,
+                            "title": raw_title[:80],
+                        }
+                    )
             except Exception:
                 pass
     if not found:
-        return None, ""
-    found.sort(key=lambda x: x[1])
-    min_p = float(found[0][1])
+        return None, "", []
+    found.sort(key=lambda x: x["price"])
+    min_p = float(found[0]["price"])
     seen_stores = set()
     parts = []
-    for store, p in found:
-        if store not in seen_stores:
-            seen_stores.add(store)
-            parts.append(f"{store}: ~{int(p)} ₽")
-        if len(parts) >= 3:
+    unique_offers: List[Dict[str, Any]] = []
+    for item in found:
+        st = item["store"]
+        if st not in seen_stores:
+            seen_stores.add(st)
+            parts.append(f"{st}: ~{item['price']} ₽")
+            unique_offers.append(item)
+        if len(unique_offers) >= 5:
             break
-    return min_p, ", ".join(parts)
+    return min_p, ", ".join(parts[:3]), unique_offers
 
 
 async def run_ddg_query(client: httpx.AsyncClient, query: str, headers: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -702,7 +840,7 @@ async def search_web_reviews(product_title: str, brand: Optional[str] = None) ->
         f"{clean_q} отзывы цена "
         f"(site:otzovik.com OR site:irecommend.ru OR site:vkusvill.ru OR site:perekrestok.ru OR site:ozon.ru OR site:rskrf.ru)"
     )
-    q_fallback = f"{clean_q} отзывы покупателей цена"
+    q_fallback = f"{clean_q} купить цена отзывы"
 
     collected: List[Dict[str, Any]] = []
     seen_urls = set()
@@ -904,7 +1042,7 @@ async def analyze_product(req: AnalyzeRequest):
     log_event("REQ", f"Analyze request for slug='{cache_key}' (force={req.forceRefresh})")
 
     sources = await search_web_reviews(req.title, req.brand)
-    comp_min, comp_sum = extract_competitor_prices_from_sources(sources, req.price)
+    comp_min, comp_sum, comp_offers = extract_competitor_prices_from_sources(sources, req.price)
 
     price_summary = None
     with sqlite3.connect(DB_PATH) as conn:
@@ -920,6 +1058,7 @@ async def analyze_product(req: AnalyzeRequest):
                 guest_price=req.guestPrice,
                 competitor_min=comp_min,
                 competitor_summary=comp_sum,
+                competitor_offers=comp_offers,
             )
             conn.commit()
 

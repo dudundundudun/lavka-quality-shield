@@ -1,11 +1,13 @@
 /**
- * Lavka Quality Shield v2.4.0 — Background Service Worker
+ * Lavka Quality Shield v2.5.0 — Background Service Worker
  * Полный комбайн:
  * 1. Zero-Click Автопилот ИИ + вечный кэш ИИ в браузере (lqs_ai_cache_v1) + очередь запросов к Gemini.
- * 2. Единая база истории цен и мульти-аккаунт матрица (lqs_price_db_v1 + синхронизация с SQLite :8765).
- * 3. Анонимный зонд цен без куки (Incognito Guest Price Probe: credentials: 'omit') против «штрафа за лояльность».
- * 4. Парсер цен конкурентов (ВкусВилл, Перекрёсток, Азбука Вкуса, Ozon, Лента) прямо из поисковой выдачи.
- * 5. Слепок корзины (Cart Snapshot), 2-секундная сверка всей корзины между аккаунтами и Авто-сборщик корзины в 1 клик.
+ * 2. Менеджер Аккаунтов Лавки (Account Vault: сохранение куки-сессий .yandex.ru / lavka.yandex.ru + логинов и паролей,
+ *    переключение между аккаунтами в 1 клик без повторного входа и авто-ввод на passport.yandex.ru).
+ * 3. Единая база истории цен и мульти-аккаунт матрица (lqs_price_db_v1 + синхронизация с SQLite :8765).
+ * 4. Анонимный зонд цен без куки (Incognito Guest Price Probe: credentials: 'omit') против «штрафа за лояльность».
+ * 5. Пакетный аудит корзины по конкурентам (ВкусВилл, Перекрёсток, Азбука Вкуса, Ozon, Лента, Я.Маркет, Купер) со ссылками.
+ * 6. Исправленный и усиленный Авто-сборщик корзины (поддержка SVG-кнопки «+» для qty > 1, защита от гонок вкладок, ретраи).
  */
 
 'use strict';
@@ -15,6 +17,7 @@ const AI_CACHE_KEY = 'lqs_ai_cache_v1';
 const PRICE_DB_KEY = 'lqs_price_db_v1';
 const SAVED_CARTS_KEY = 'lqs_saved_carts_v1';
 const CART_LOCKS_KEY = 'lqs_cart_locks_v1';
+const ACCOUNTS_VAULT_KEY = 'lqs_accounts_vault_v1';
 
 const MAX_LOCAL_AI_CACHE_ITEMS = 500;
 const MAX_LOCAL_PRICE_DB_ITEMS = 1500;
@@ -33,6 +36,45 @@ const DEFAULT_SETTINGS = {
   lavkaAccountLabel: 'Аккаунт #1 (Основной)',
   enableGuestPriceProbe: true
 };
+
+const DEFAULT_ACCOUNT_PROFILES = [
+  {
+    accountId: 'acc_1',
+    label: 'Аккаунт #1 (Основной)',
+    login: '',
+    password: '',
+    note: 'Основной профиль',
+    yandexLogin: '',
+    cookieCount: 0,
+    cookies: [],
+    localStorageData: {},
+    updatedAt: null
+  },
+  {
+    accountId: 'acc_2',
+    label: 'Аккаунт #2 (Новичок / Семья)',
+    login: '',
+    password: '',
+    note: 'Второй аккаунт для проверки скидок',
+    yandexLogin: '',
+    cookieCount: 0,
+    cookies: [],
+    localStorageData: {},
+    updatedAt: null
+  },
+  {
+    accountId: 'acc_3',
+    label: 'Аккаунт #3 (Запасной)',
+    login: '',
+    password: '',
+    note: 'Запасной профиль',
+    yandexLogin: '',
+    cookieCount: 0,
+    cookies: [],
+    localStorageData: {},
+    updatedAt: null
+  }
+];
 
 const REVIEW_SEARCH_SITES = [
   { domain: 'otzovik.com', name: 'Отзовик' },
@@ -147,7 +189,588 @@ async function clearLocalAiCache() {
 }
 
 // ============================================================================
-// 2. МУЛЬТИ-АККАУНТ БАЗА ИСТОРИИ ЦЕН И АНОНИМНЫЙ ЗОНД БЕЗ КУКИ
+// 2. МЕНЕДЖЕР АККАУНТОВ ЛАВКИ (КУКИ-СЕССИИ + ЛОГИНЫ/ПАРОЛИ + 1-КЛИК СВИТЧЕР)
+// ============================================================================
+async function getAccountsVaultMap() {
+  const localMap = await new Promise((resolve) => {
+    chrome.storage.local.get([ACCOUNTS_VAULT_KEY], (res) => {
+      resolve(res && res[ACCOUNTS_VAULT_KEY] && typeof res[ACCOUNTS_VAULT_KEY] === 'object' ? res[ACCOUNTS_VAULT_KEY] : null);
+    });
+  });
+
+  const map = localMap ? { ...localMap } : {};
+  if (Object.keys(map).length === 0) {
+    DEFAULT_ACCOUNT_PROFILES.forEach((p) => {
+      map[p.accountId] = { ...p };
+    });
+    await new Promise((r) => chrome.storage.local.set({ [ACCOUNTS_VAULT_KEY]: map }, r));
+  }
+  return map;
+}
+
+async function saveAccountsVaultMap(map) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [ACCOUNTS_VAULT_KEY]: map }, () => resolve(map));
+  });
+}
+
+/**
+ * Считывает текущие куки авторизации Яндекса и Лавки из браузера
+ */
+async function captureCurrentYandexCookies() {
+  const allCookies = [];
+  const seen = new Set();
+
+  const queries = [
+    { domain: 'yandex.ru' },
+    { url: 'https://lavka.yandex.ru/' },
+    { url: 'https://passport.yandex.ru/' },
+    { url: 'https://id.yandex.ru/' }
+  ];
+
+  for (const q of queries) {
+    try {
+      const list = await chrome.cookies.getAll(q);
+      for (const c of list || []) {
+        if (!c || !c.name) continue;
+        const key = `${c.name}|${c.domain}|${c.path}|${c.storeId || ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        allCookies.push({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || '/',
+          secure: Boolean(c.secure),
+          httpOnly: Boolean(c.httpOnly),
+          sameSite: c.sameSite || 'unspecified',
+          expirationDate: c.expirationDate || null,
+          hostOnly: Boolean(c.hostOnly)
+        });
+      }
+    } catch {
+      // ignore domain permission error if any
+    }
+  }
+
+  let yandexLogin = '';
+  const loginCookie = allCookies.find((c) => c.name === 'yandex_login' && c.value);
+  if (loginCookie) {
+    try {
+      yandexLogin = decodeURIComponent(loginCookie.value);
+    } catch {
+      yandexLogin = loginCookie.value;
+    }
+  }
+  const hasSessionId = allCookies.some((c) => (c.name === 'Session_id' || c.name === 'sessionid2') && c.value);
+
+  // Также захватываем важные ключи localStorage с открытой вкладки Лавки (например, выбранный адрес)
+  let localStorageData = {};
+  try {
+    const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
+    if (lavkaTabs && lavkaTabs.length > 0 && lavkaTabs[0].id) {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: lavkaTabs[0].id },
+        func: () => {
+          const captured = {};
+          try {
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (k && /address|location|cart|user|zone|region|auth/i.test(k)) {
+                const v = localStorage.getItem(k);
+                if (v && v.length < 4000) captured[k] = v;
+              }
+            }
+          } catch {
+            // ignore
+          }
+          return captured;
+        }
+      });
+      if (res && res[0] && res[0].result) {
+        localStorageData = res[0].result;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return {
+    cookies: allCookies,
+    cookieCount: allCookies.length,
+    yandexLogin,
+    isLoggedIn: Boolean(hasSessionId || yandexLogin),
+    localStorageData
+  };
+}
+
+/**
+ * Очищает текущие сессионные куки Яндекса и Лавки перед переключением аккаунта
+ */
+async function clearCurrentYandexAuthCookies() {
+  const snap = await captureCurrentYandexCookies();
+  for (const c of snap.cookies) {
+    try {
+      const cleanDomain = String(c.domain || 'lavka.yandex.ru').replace(/^\./, '');
+      const proto = c.secure ? 'https://' : 'http://';
+      const url = `${proto}${cleanDomain}${c.path || '/'}`;
+      await chrome.cookies.remove({ url, name: c.name });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * Восстанавливает сохранённый набор куки для выбранного аккаунта Лавки
+ */
+async function restoreAccountCookies(cookiesList, localStorageData = {}) {
+  if (!Array.isArray(cookiesList) || cookiesList.length === 0) {
+    return { restoredCount: 0 };
+  }
+
+  await clearCurrentYandexAuthCookies();
+
+  let restoredCount = 0;
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  for (const c of cookiesList) {
+    if (!c || !c.name) continue;
+    try {
+      const cleanDomain = String(c.domain || 'lavka.yandex.ru').replace(/^\./, '');
+      const isHostPrefix = c.name.startsWith('__Host-');
+      const isSecurePrefix = c.name.startsWith('__Secure-') || isHostPrefix;
+      const secureFlag = Boolean(c.secure || isSecurePrefix);
+      const proto = secureFlag ? 'https://' : 'http://';
+      const pathVal = isHostPrefix ? '/' : (c.path || '/');
+      const url = `${proto}${cleanDomain}${pathVal}`;
+
+      const details = {
+        url,
+        name: c.name,
+        value: String(c.value ?? ''),
+        path: pathVal,
+        secure: secureFlag,
+        httpOnly: Boolean(c.httpOnly)
+      };
+
+      if (!c.hostOnly && !isHostPrefix && c.domain) {
+        details.domain = c.domain;
+      }
+
+      if (c.sameSite && ['no_restriction', 'lax', 'strict'].includes(c.sameSite)) {
+        details.sameSite = c.sameSite;
+      }
+
+      if (c.expirationDate && c.expirationDate > nowSec + 60) {
+        details.expirationDate = c.expirationDate;
+      } else {
+        details.expirationDate = nowSec + 30 * 86400;
+      }
+
+      await chrome.cookies.set(details);
+      restoredCount += 1;
+    } catch {
+      // ignore individual cookie restriction
+    }
+  }
+
+  // Восстанавливаем localStorage на открытой вкладке Лавки, если есть
+  if (localStorageData && Object.keys(localStorageData).length > 0) {
+    try {
+      const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
+      if (lavkaTabs && lavkaTabs.length > 0 && lavkaTabs[0].id) {
+        await chrome.scripting.executeScript({
+          target: { tabId: lavkaTabs[0].id },
+          args: [localStorageData],
+          func: (lsMap) => {
+            try {
+              for (const [k, v] of Object.entries(lsMap || {})) {
+                localStorage.setItem(k, v);
+              }
+            } catch {
+              // ignore
+            }
+          }
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { restoredCount };
+}
+
+async function getAccountsVaultStatus() {
+  const settings = await getSettings();
+  const map = await getAccountsVaultMap();
+
+  // Синхронизируемся с SQLite на :8765, если сервер запущен
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  if (backendUrl) {
+    try {
+      const r = await fetchWithTimeout(`${backendUrl}/api/accounts/list`, { method: 'GET' }, 1200);
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.accounts)) {
+          let changed = false;
+          for (const srvAcc of j.accounts) {
+            if (!srvAcc || !srvAcc.accountId) continue;
+            const loc = map[srvAcc.accountId];
+            if (!loc || (!loc.cookieCount && srvAcc.cookieCount > 0)) {
+              map[srvAcc.accountId] = { ...(loc || {}), ...srvAcc };
+              changed = true;
+            }
+          }
+          if (changed) await saveAccountsVaultMap(map);
+        }
+      }
+    } catch {
+      // offline
+    }
+  }
+
+  const liveSession = await captureCurrentYandexCookies();
+  const accountsList = Object.values(map).sort((a, b) => String(a.accountId).localeCompare(String(b.accountId)));
+
+  return {
+    ok: true,
+    activeAccountLabel: settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)',
+    liveSession: {
+      isLoggedIn: liveSession.isLoggedIn,
+      yandexLogin: liveSession.yandexLogin,
+      cookieCount: liveSession.cookieCount
+    },
+    accounts: accountsList.map((a) => ({
+      accountId: a.accountId,
+      label: a.label,
+      login: a.login || '',
+      password: a.password || '',
+      note: a.note || '',
+      yandexLogin: a.yandexLogin || '',
+      cookieCount: Array.isArray(a.cookies) ? a.cookies.length : (a.cookieCount || 0),
+      updatedAt: a.updatedAt || null
+    }))
+  };
+}
+
+async function saveAccountToVault(payload = {}) {
+  const settings = await getSettings();
+  const map = await getAccountsVaultMap();
+  const nowIso = new Date().toISOString();
+
+  let accountId = payload.accountId || '';
+  const label = (payload.label || settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)').trim();
+
+  if (!accountId) {
+    const existingByLabel = Object.values(map).find((a) => a.label === label);
+    accountId = existingByLabel ? existingByLabel.accountId : `acc_${Date.now()}`;
+  }
+
+  const existing = map[accountId] || {
+    accountId,
+    label,
+    login: '',
+    password: '',
+    note: '',
+    yandexLogin: '',
+    cookieCount: 0,
+    cookies: [],
+    localStorageData: {},
+    updatedAt: nowIso
+  };
+
+  let cookies = existing.cookies || [];
+  let localStorageData = existing.localStorageData || {};
+  let yandexLogin = existing.yandexLogin || '';
+
+  if (payload.captureCookies !== false) {
+    const captured = await captureCurrentYandexCookies();
+    if (captured.cookies.length > 0) {
+      cookies = captured.cookies;
+      localStorageData = captured.localStorageData || {};
+      if (captured.yandexLogin) yandexLogin = captured.yandexLogin;
+    }
+  }
+
+  const updated = {
+    ...existing,
+    accountId,
+    label: label || existing.label,
+    login: payload.login !== undefined ? String(payload.login).trim() : (existing.login || yandexLogin || ''),
+    password: payload.password !== undefined ? String(payload.password) : (existing.password || ''),
+    note: payload.note !== undefined ? String(payload.note).trim() : (existing.note || ''),
+    yandexLogin,
+    cookieCount: cookies.length,
+    cookies,
+    localStorageData,
+    updatedAt: nowIso
+  };
+
+  map[accountId] = updated;
+  await saveAccountsVaultMap(map);
+  await saveSettingsPatch({ lavkaAccountLabel: updated.label });
+
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  if (backendUrl) {
+    try {
+      await fetchWithTimeout(
+        `${backendUrl}/api/accounts/save`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updated)
+        },
+        2000
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    ok: true,
+    account: {
+      ...updated,
+      cookies: undefined
+    },
+    vaultStatus: await getAccountsVaultStatus()
+  };
+}
+
+async function deleteAccountFromVault(accountId) {
+  const settings = await getSettings();
+  const map = await getAccountsVaultMap();
+  if (map[accountId]) {
+    delete map[accountId];
+    await saveAccountsVaultMap(map);
+  }
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  if (backendUrl) {
+    try {
+      await fetchWithTimeout(`${backendUrl}/api/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' }, 1500);
+    } catch {
+      // ignore
+    }
+  }
+  return await getAccountsVaultStatus();
+}
+
+/**
+ * Автоматически вводит сохранённый логин и пароль на странице Яндекс ID (passport.yandex.ru / id.yandex.ru)
+ */
+async function autofillYandexPassportTab(accountId) {
+  const map = await getAccountsVaultMap();
+  const acc = map[accountId] || Object.values(map).find((a) => a.label === accountId);
+  if (!acc || (!acc.login && !acc.password)) {
+    return { ok: false, error: 'Для этого профиля ещё не указаны логин и пароль.' };
+  }
+
+  await saveSettingsPatch({ lavkaAccountLabel: acc.label });
+
+  const passportTabs = await chrome.tabs.query({
+    url: ['https://passport.yandex.ru/*', 'https://id.yandex.ru/*']
+  });
+
+  let targetTab = passportTabs && passportTabs.length > 0 ? passportTabs[0] : null;
+  if (!targetTab) {
+    targetTab = await chrome.tabs.create({
+      url: 'https://passport.yandex.ru/auth?retpath=https%3A%2F%2Flavka.yandex.ru%2F',
+      active: true
+    });
+    await waitForTabCompleteSafe(targetTab.id, 5500);
+  } else {
+    await chrome.tabs.update(targetTab.id, { active: true });
+  }
+
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      args: [acc.login || '', acc.password || ''],
+      func: async (loginVal, passVal) => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const setReactInputValue = (el, val) => {
+          if (!el) return false;
+          el.focus();
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          if (setter) {
+            setter.call(el, val);
+          } else {
+            el.value = val;
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        };
+
+        let filledLogin = false;
+        let filledPassword = false;
+
+        if (loginVal) {
+          const loginInput =
+            document.querySelector('input[name="login"]') ||
+            document.querySelector('input#passp-field-login') ||
+            document.querySelector('input#passp-field-phone') ||
+            document.querySelector('input[autocomplete="username"]') ||
+            document.querySelector('input[type="text"], input[type="tel"], input[type="email"]');
+
+          if (loginInput) {
+            filledLogin = setReactInputValue(loginInput, loginVal);
+            await wait(250);
+            const submitBtn =
+              document.querySelector('button[id="passp:sign-in"]') ||
+              document.querySelector('button[type="submit"]');
+            if (submitBtn && passVal) {
+              submitBtn.click();
+              await wait(900);
+            }
+          }
+        }
+
+        if (passVal) {
+          for (let i = 0; i < 8; i++) {
+            const passInput =
+              document.querySelector('input[name="passwd"]') ||
+              document.querySelector('input#passp-field-passwd') ||
+              document.querySelector('input[type="password"]');
+            if (passInput) {
+              filledPassword = setReactInputValue(passInput, passVal);
+              break;
+            }
+            await wait(300);
+          }
+        }
+
+        return { ok: Boolean(filledLogin || filledPassword), filledLogin, filledPassword };
+      }
+    });
+    const r = res && res[0] ? res[0].result : null;
+    return {
+      ok: true,
+      filledLogin: r?.filledLogin || false,
+      filledPassword: r?.filledPassword || false,
+      label: acc.label
+    };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+}
+
+/**
+ * Переключает аккаунт Яндекс Лавки в 1 клик (с авто-сохранением куки текущего аккаунта и подменой сессии)
+ */
+async function switchLavkaAccountInOneClick(options = {}) {
+  const { accountId, label, autoBackupCurrent = true, buildCartAfterSwitch = false } = options;
+  const settings = await getSettings();
+  const map = await getAccountsVaultMap();
+
+  // 1. Авто-бэкап текущего залогиненного аккаунта перед выходом/переключением
+  if (autoBackupCurrent) {
+    const currentLive = await captureCurrentYandexCookies();
+    if (currentLive.isLoggedIn && currentLive.cookies.length > 0) {
+      const curLabel = settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
+      const curEntry = Object.values(map).find(
+        (a) => a.label === curLabel || (currentLive.yandexLogin && a.yandexLogin === currentLive.yandexLogin)
+      );
+      if (curEntry) {
+        curEntry.cookies = currentLive.cookies;
+        curEntry.cookieCount = currentLive.cookies.length;
+        curEntry.localStorageData = currentLive.localStorageData || {};
+        if (currentLive.yandexLogin) curEntry.yandexLogin = currentLive.yandexLogin;
+        curEntry.updatedAt = new Date().toISOString();
+        map[curEntry.accountId] = curEntry;
+        await saveAccountsVaultMap(map);
+      }
+    }
+  }
+
+  // 2. Находим целевой аккаунт
+  const targetAcc =
+    (accountId && map[accountId]) ||
+    Object.values(map).find((a) => a.label === label || a.accountId === accountId);
+
+  if (!targetAcc) {
+    if (label) {
+      await saveSettingsPatch({ lavkaAccountLabel: label });
+    }
+    return {
+      ok: false,
+      error: 'Профиль не найден в сейфе аккаунтов.',
+      vaultStatus: await getAccountsVaultStatus()
+    };
+  }
+
+  await saveSettingsPatch({ lavkaAccountLabel: targetAcc.label });
+
+  let switchedCookies = false;
+  let restoredCount = 0;
+
+  if (Array.isArray(targetAcc.cookies) && targetAcc.cookies.length > 0) {
+    const restoreRes = await restoreAccountCookies(targetAcc.cookies, targetAcc.localStorageData || {});
+    restoredCount = restoreRes.restoredCount;
+    switchedCookies = restoredCount > 0;
+  }
+
+  // Обновляем открытую вкладку Лавки
+  const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
+  if (lavkaTabs && lavkaTabs.length > 0 && lavkaTabs[0].id) {
+    if (buildCartAfterSwitch) {
+      await chrome.tabs.update(lavkaTabs[0].id, { active: true });
+    } else {
+      await chrome.tabs.reload(lavkaTabs[0].id);
+    }
+  }
+
+  let autoBuildResult = null;
+  if (buildCartAfterSwitch) {
+    await new Promise((r) => setTimeout(r, 900));
+    autoBuildResult = await autoBuildCartInBrowser(null);
+  }
+
+  // Если у целевого аккаунта нет сохранённых куки, но есть логин/пароль — предлагаем/запускаем авто-вход
+  let autofillTriggered = false;
+  if (!switchedCookies && (targetAcc.login || targetAcc.password)) {
+    await clearCurrentYandexAuthCookies();
+    await autofillYandexPassportTab(targetAcc.accountId);
+    autofillTriggered = true;
+  }
+
+  return {
+    ok: true,
+    switchedTo: targetAcc.label,
+    switchedCookies,
+    restoredCount,
+    autofillTriggered,
+    autoBuildResult,
+    vaultStatus: await getAccountsVaultStatus()
+  };
+}
+
+/**
+ * Выход в чистую сессию (с предварительным сохранением куки текущего аккаунта в сейф)
+ */
+async function logoutToCleanLavkaSession() {
+  const settings = await getSettings();
+  await saveAccountToVault({
+    label: settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)',
+    captureCookies: true
+  });
+  await clearCurrentYandexAuthCookies();
+
+  const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
+  if (lavkaTabs && lavkaTabs.length > 0 && lavkaTabs[0].id) {
+    await chrome.tabs.reload(lavkaTabs[0].id);
+  }
+
+  return {
+    ok: true,
+    vaultStatus: await getAccountsVaultStatus()
+  };
+}
+
+// ============================================================================
+// 3. МУЛЬТИ-АККАУНТ БАЗА ИСТОРИИ ЦЕН И АНОНИМНЫЙ ЗОНД БЕЗ КУКИ
 // ============================================================================
 async function getLocalPriceDb() {
   return new Promise((resolve) => {
@@ -165,6 +788,10 @@ function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
   const guestPrice = item.guestPrice ? Number(item.guestPrice) : (existing?.guestPrice || null);
   const compMin = item.competitorMinPrice ? Number(item.competitorMinPrice) : (existing?.competitorMinPrice || null);
   const compSum = item.competitorSummary || existing?.competitorSummary || null;
+  const compOffers =
+    Array.isArray(item.competitorOffers) && item.competitorOffers.length > 0
+      ? item.competitorOffers
+      : (Array.isArray(existing?.competitorOffers) ? existing.competitorOffers : []);
 
   const entry = existing || {
     slug,
@@ -177,6 +804,7 @@ function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
     guestPrice: null,
     competitorMinPrice: null,
     competitorSummary: null,
+    competitorOffers: [],
     accounts: {},
     history: [],
     updatedAt: nowIso
@@ -194,6 +822,7 @@ function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
   }
   if (compMin && compMin > 0) entry.competitorMinPrice = Math.round(compMin);
   if (compSum) entry.competitorSummary = compSum;
+  if (compOffers.length > 0) entry.competitorOffers = compOffers;
 
   if (price > 0) {
     const rounded = Math.round(price);
@@ -248,7 +877,6 @@ async function recordPricesBatch(accountId, items) {
     updatedSummaries[slug] = merged;
   }
 
-  // LRU trim
   const keys = Object.keys(db);
   if (keys.length > MAX_LOCAL_PRICE_DB_ITEMS) {
     keys
@@ -261,7 +889,6 @@ async function recordPricesBatch(accountId, items) {
     chrome.storage.local.set({ [PRICE_DB_KEY]: db }, resolve);
   });
 
-  // Синхронизируем с локальным FastAPI SQLite (:8765), чтобы другие профили Chrome сразу видели эти цены!
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   if (backendUrl) {
     try {
@@ -285,31 +912,25 @@ async function recordPricesBatch(accountId, items) {
         }
       }
     } catch {
-      // backend offline — local storage is already updated
+      // backend offline
     }
   }
 
   return updatedSummaries;
 }
 
-/**
- * Вытаскивает цену товара из HTML-кода страницы Яндекс Лавки
- */
 function parsePriceFromLavkaHtml(html) {
   if (!html) return null;
-  // 1. data-testid="price-text"
   const mTestId = html.match(/data-testid="price-text"[^>]*>([\d\s,.]+)</i);
   if (mTestId) {
     const val = parseFloat(mTestId[1].replace(/[^\d.,]/g, '').replace(',', '.'));
     if (val > 0) return Math.round(val);
   }
-  // 2. JSON-LD Product offers.price
   const mLd = html.match(/"@type"\s*:\s*"Offer"[\s\S]{0,250}?"price"\s*:\s*"?([\d.]+)"?/i);
   if (mLd) {
     const val = parseFloat(mLd[1]);
     if (val > 0) return Math.round(val);
   }
-  // 3. SSR state "price":124 or "pricing":{"price":124}
   const mState = html.match(/"pricing"\s*:\s*\{[^}]*"price"\s*:\s*(\d+(?:\.\d+)?)/i);
   if (mState) {
     const val = parseFloat(mState[1]);
@@ -318,9 +939,6 @@ function parsePriceFromLavkaHtml(html) {
   return null;
 }
 
-/**
- * Анонимный зонд цены без куки (credentials: 'omit') — ловит «штраф за лояльность»!
- */
 async function probeGuestPriceWithoutCookies(slug, title = '', currentPrice = null, accountId = null) {
   if (!slug) return null;
   const cleanSlug = String(slug).trim().toLowerCase();
@@ -364,7 +982,6 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
   const settings = await getSettings();
   const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
 
-  // Если передана текущая цена — сразу записываем наблюдение
   if (currentPrice && currentPrice > 0) {
     await recordPricesBatch(acc, [
       {
@@ -380,7 +997,6 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
   const db = await getLocalPriceDb();
   let summary = db[cleanSlug] || null;
 
-  // Подтягиваем актуальные данные с локального SQLite (:8765), если там есть цены с других профилей Chrome
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   if (backendUrl) {
     try {
@@ -388,7 +1004,11 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
       if (r.ok) {
         const j = await r.json();
         if (j && j.status === 'ok' && j.summary) {
-          summary = { ...(summary || {}), ...j.summary, accounts: { ...(summary?.accounts || {}), ...(j.summary.accounts || {}) } };
+          summary = {
+            ...(summary || {}),
+            ...j.summary,
+            accounts: { ...(summary?.accounts || {}), ...(j.summary.accounts || {}) }
+          };
           db[cleanSlug] = summary;
           chrome.storage.local.set({ [PRICE_DB_KEY]: db });
         }
@@ -398,7 +1018,6 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
     }
   }
 
-  // Если гостевая цена без куки ещё не проверялась (или проверялась давно) — запускаем анонимный зонд!
   if (settings.enableGuestPriceProbe !== false && (!summary || !summary.guestPrice)) {
     const probed = await probeGuestPriceWithoutCookies(cleanSlug, title, currentPrice, acc);
     if (probed) {
@@ -409,8 +1028,181 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
   return summary;
 }
 
+/**
+ * Генерирует прямые ссылки для быстрого поиска конкретного товара в популярных магазинах-конкурентах
+ */
+function buildDirectStoreSearchLinks(rawTitle) {
+  const q = cleanProductQueryForSearch(rawTitle, '');
+  const enc = encodeURIComponent(q || rawTitle || '');
+  return [
+    { store: 'Перекрёсток', url: `https://www.perekrestok.ru/cat/search?search=${enc}` },
+    { store: 'ВкусВилл', url: `https://vkusvill.ru/search/?q=${enc}` },
+    { store: 'Ozon', url: `https://www.ozon.ru/search/?text=${enc}` },
+    { store: 'Я.Маркет', url: `https://market.yandex.ru/search?text=${enc}` },
+    { store: 'Лента', url: `https://lenta.com/search/?searchText=${enc}` },
+    { store: 'Купер', url: `https://kuper.ru/multisearch?q=${enc}` }
+  ];
+}
+
+/**
+ * Пакетный аудит корзины: проверяет цены конкурентов, ссылки на магазины, гостевые цены и переплату по всей корзине!
+ */
+async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetworkSearch = false) {
+  const settings = await getSettings();
+  const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
+  const priceDb = await getLocalPriceDb();
+  const aiCache = await getLocalAiCacheMap();
+
+  const enrichedItems = [];
+  let totalLavkaPrice = 0;
+  let totalOverpayVsCompetitors = 0;
+  let totalOverpayVsAltAccount = 0;
+  let cheaperAtCompetitorsCount = 0;
+  let cheaperOnAltAccountCount = 0;
+
+  const batchUpdates = [];
+
+  for (const item of items) {
+    if (!item || !item.slug) continue;
+    const slug = String(item.slug).trim().toLowerCase();
+    const qty = Math.max(1, Number(item.qty) || 1);
+    const price = Number(item.price) || 0;
+    const title = item.title || slug;
+
+    totalLavkaPrice += price * qty;
+
+    let pEntry = priceDb[slug] || null;
+    const aiEntry = aiCache[slug] || null;
+
+    let guestPrice = pEntry?.guestPrice || null;
+    if (!guestPrice && settings.enableGuestPriceProbe !== false) {
+      const probed = await probeGuestPriceWithoutCookies(slug, title, price, acc);
+      if (probed && probed.guestPrice) {
+        guestPrice = probed.guestPrice;
+        pEntry = { ...(pEntry || {}), ...probed };
+      }
+    }
+
+    let compMin = pEntry?.competitorMinPrice || null;
+    let compSum = pEntry?.competitorSummary || '';
+    let compOffers = Array.isArray(pEntry?.competitorOffers) ? [...pEntry.competitorOffers] : [];
+
+    // Если в кэше ИИ уже были источники, извлекаем из них офферы конкурентов со ссылками
+    if (compOffers.length === 0 && aiEntry && Array.isArray(aiEntry.sources) && aiEntry.sources.length > 0) {
+      const extracted = extractCompetitorPricesFromSources(aiEntry.sources, price);
+      if (extracted.competitorMinPrice) compMin = extracted.competitorMinPrice;
+      if (extracted.competitorSummary) compSum = extracted.competitorSummary;
+      if (extracted.competitorOffers.length > 0) compOffers = extracted.competitorOffers;
+    }
+
+    // Если данных по конкурентам для этого товара корзины ещё нет — ищем через DuckDuckGo!
+    if ((forceNetworkSearch || (!compMin && compOffers.length === 0)) && title) {
+      const foundSources = await searchWebReviewsDirect(title, '');
+      const extracted = extractCompetitorPricesFromSources(foundSources, price);
+      if (extracted.competitorMinPrice) compMin = extracted.competitorMinPrice;
+      if (extracted.competitorSummary) compSum = extracted.competitorSummary;
+      if (extracted.competitorOffers.length > 0) {
+        compOffers = extracted.competitorOffers;
+      } else if (foundSources.length > 0) {
+        // Даже если в сниппете не было цены в рублях, сохраняем прямые найденные ссылки на магазины
+        compOffers = foundSources
+          .filter((s) => s.url && !s.url.includes('otzovik.com') && !s.url.includes('irecommend.ru'))
+          .slice(0, 4)
+          .map((s) => ({
+            store: s.source || 'Магазин',
+            price: null,
+            url: s.url,
+            title: s.title || s.source
+          }));
+      }
+
+      batchUpdates.push({
+        slug,
+        title,
+        price,
+        oldPrice: item.oldPrice || null,
+        amount: item.amount || '',
+        guestPrice: guestPrice || null,
+        competitorMinPrice: compMin || null,
+        competitorSummary: compSum || null,
+        competitorOffers: compOffers
+      });
+    }
+
+    // Считаем лучшую цену среди других наших аккаунтов или Гостя (без куки)
+    let bestAltPrice = null;
+    let bestAltLabel = '';
+    if (guestPrice && guestPrice < price - 2) {
+      bestAltPrice = guestPrice;
+      bestAltLabel = 'Без куки (Гость)';
+    }
+    const accountsMap = pEntry?.accounts || {};
+    for (const [accName, accVal] of Object.entries(accountsMap)) {
+      if (accName !== acc && accVal && accVal.price && accVal.price < price - 2) {
+        if (!bestAltPrice || accVal.price < bestAltPrice) {
+          bestAltPrice = accVal.price;
+          bestAltLabel = accName;
+        }
+      }
+    }
+    if (pEntry?.minPrice && pEntry.minPrice < price - 2 && (!bestAltPrice || pEntry.minPrice < bestAltPrice)) {
+      bestAltPrice = pEntry.minPrice;
+      bestAltLabel = 'Мин. в БД';
+    }
+
+    const overpayVsCompetitorPerUnit = compMin && compMin < price - 3 ? Math.round(price - compMin) : 0;
+    const overpayVsCompetitorTotal = overpayVsCompetitorPerUnit * qty;
+    if (overpayVsCompetitorTotal > 0) {
+      totalOverpayVsCompetitors += overpayVsCompetitorTotal;
+      cheaperAtCompetitorsCount += 1;
+    }
+
+    const overpayVsAltPerUnit = bestAltPrice && bestAltPrice < price - 2 ? Math.round(price - bestAltPrice) : 0;
+    const overpayVsAltTotal = overpayVsAltPerUnit * qty;
+    if (overpayVsAltTotal > 0) {
+      totalOverpayVsAltAccount += overpayVsAltTotal;
+      cheaperOnAltAccountCount += 1;
+    }
+
+    enrichedItems.push({
+      slug,
+      title,
+      qty,
+      price,
+      rowTotal: Math.round(price * qty),
+      guestPrice: guestPrice || null,
+      bestAltPrice: bestAltPrice || null,
+      bestAltLabel: bestAltLabel || '',
+      overpayVsAltPerUnit,
+      overpayVsAltTotal,
+      competitorMinPrice: compMin || null,
+      competitorSummary: compSum || '',
+      competitorOffers: compOffers,
+      overpayVsCompetitorPerUnit,
+      overpayVsCompetitorTotal,
+      storeSearchLinks: buildDirectStoreSearchLinks(title)
+    });
+  }
+
+  if (batchUpdates.length > 0) {
+    await recordPricesBatch(acc, batchUpdates);
+  }
+
+  return {
+    ok: true,
+    accountId: acc,
+    totalLavkaPrice: Math.round(totalLavkaPrice),
+    totalOverpayVsCompetitors: Math.round(totalOverpayVsCompetitors),
+    totalOverpayVsAltAccount: Math.round(totalOverpayVsAltAccount),
+    cheaperAtCompetitorsCount,
+    cheaperOnAltAccountCount,
+    items: enrichedItems,
+    updatedAt: new Date().toISOString()
+  };
+}
+
 // ============================================================================
-// 3. КЛОНИРОВАНИЕ, СВЕРКА И АВТО-СБОРКА КОРЗИНЫ МЕЖДУ АККАУНТАМИ
+// 4. КЛОНИРОВАНИЕ, СВЕРКА И АВТО-СБОРКА КОРЗИНЫ МЕЖДУ АККАУНТАМИ
 // ============================================================================
 async function getSavedCartsState() {
   const settings = await getSettings();
@@ -434,7 +1226,11 @@ async function getSavedCartsState() {
               if (c && c.accountId) byAcc[c.accountId] = c;
             });
           }
-          const merged = { latest: j.latest, byAccount: byAcc };
+          // Если локальный слепок свежее серверного, оставляем локальный
+          const srvTime = String(j.latest.updatedAt || '');
+          const locTime = String(localState.latest?.updatedAt || '');
+          const bestLatest = locTime > srvTime ? localState.latest : j.latest;
+          const merged = { latest: bestLatest, byAccount: byAcc };
           chrome.storage.local.set({ [SAVED_CARTS_KEY]: merged });
           return merged;
         }
@@ -452,12 +1248,14 @@ async function saveCartSnapshot(accountId, items, totalPrice = 0) {
   const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
   const cleanItems = (Array.isArray(items) ? items : []).filter((i) => i && i.slug);
   const calcTotal = Math.round(cleanItems.reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.qty) || 1), 0));
+  const totalUnits = cleanItems.reduce((sum, i) => sum + (Number(i.qty) || 1), 0);
   const finalTotal = totalPrice > 0 ? Math.round(totalPrice) : calcTotal;
   const nowIso = new Date().toISOString();
 
   const snapshot = {
     accountId: acc,
     items: cleanItems,
+    totalUnits,
     totalPrice: finalTotal,
     updatedAt: nowIso
   };
@@ -471,7 +1269,6 @@ async function saveCartSnapshot(accountId, items, totalPrice = 0) {
     chrome.storage.local.set({ [SAVED_CARTS_KEY]: state }, resolve);
   });
 
-  // Записываем цены товаров корзины в базу цен
   await recordPricesBatch(
     acc,
     cleanItems.map((i) => ({
@@ -507,9 +1304,6 @@ async function saveCartSnapshot(accountId, items, totalPrice = 0) {
   return snapshot;
 }
 
-/**
- * Мгновенная сверка сохранённой корзины на текущем аккаунте (проверяет живые цены каждого товара на текущем аккаунте и без куки)
- */
 async function compareSavedCartOnCurrentAccount(targetAccountId) {
   const settings = await getSettings();
   const currentAcc = targetAccountId || settings.lavkaAccountLabel || 'Текущий аккаунт';
@@ -538,7 +1332,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
     let currentPrice = null;
     let guestPrice = priceDb[slug]?.guestPrice || null;
 
-    // 1. Пробуем запросить страницу товара с куками ТЕКУЩЕГО аккаунта (credentials: 'include')
     try {
       const url = `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}`;
       const resp = await fetchWithTimeout(url, { method: 'GET', credentials: 'include', cache: 'no-store' }, 4000);
@@ -554,7 +1347,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
       currentPrice = priceDb[slug]?.accounts?.[currentAcc]?.price || sourcePrice;
     }
 
-    // 2. Пробуем узнать цену без куки (Гость), если ещё не известна
     if (!guestPrice) {
       try {
         const url = `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}`;
@@ -616,8 +1408,266 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
 }
 
 /**
- * Авто-сборщик корзины в 1 клик: проходит по всем товарам из слепка корзины и добавляет их в корзину текущего аккаунта!
+ * Безопасное ожидание полной загрузки вкладки без утечки слушателей chrome.tabs.onUpdated
  */
+async function waitForTabCompleteSafe(tabId, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+    };
+
+    const listener = (updatedTabId, info) => {
+      if (updatedTabId === tabId && info.status === 'complete') {
+        cleanup();
+        setTimeout(resolve, 650);
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Добавляет один товар в нужном количестве (desiredQty) на открытой вкладке Лавки.
+ * Исправляет баг v2.4.0 («6 из 8 единиц»):
+ * 1) Ждёт, пока URL и DOM карточки товара реально соответствуют целевому slug.
+ * 2) Ищет кнопку «В корзину» и степпер «- N +» СТРОГО внутри блока основного товара (не кликает по рекомендациям).
+ * 3) Находит кнопку «+» даже когда внутри неё только <svg> без текста '+' (берёт правую кнопку степпера).
+ * 4) Проверяет реальное число на счётчике между «-» и «+» и дожимает до нужного количества (desiredQty).
+ */
+async function addSingleItemOnTab(tabId, item) {
+  const desiredQty = Math.max(1, Math.min(30, Number(item.qty) || 1));
+  const targetSlug = String(item.slug || '').trim().toLowerCase();
+  const targetUrl = `https://lavka.yandex.ru/good/${encodeURIComponent(targetSlug)}`;
+
+  await chrome.tabs.update(tabId, { url: targetUrl });
+  await waitForTabCompleteSafe(tabId, 6500);
+
+  try {
+    const execRes = await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [targetSlug, desiredQty],
+      func: async (expectedSlug, qtyToSet) => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        window.__lqsAutoBuilding = true;
+
+        try {
+          // 1. Ждём гидратации именно нужной карточки товара
+          let mainScope = null;
+          for (let tick = 0; tick < 26; tick++) {
+            const pathNow = decodeURIComponent(window.location.pathname || '').toLowerCase();
+            const mainEl = document.querySelector('main[data-testid="good-page-desktop"]') || document.querySelector('main');
+            const titleEl = document.querySelector('h1[data-testid="product-title"]') || (mainEl && mainEl.querySelector('h1'));
+            if (mainEl && titleEl && (!expectedSlug || pathNow.includes(expectedSlug.slice(0, 16)))) {
+              mainScope =
+                mainEl.querySelector('div[data-testid="product-info"]') ||
+                mainEl.querySelector('div[data-testid="product-card-header"]') ||
+                mainEl;
+              break;
+            }
+            await wait(250);
+          }
+
+          if (!mainScope) {
+            return { ok: false, addedUnits: 0, reason: 'Не удалось дождаться загрузки страницы товара' };
+          }
+
+          const barScope = mainScope.querySelector('div[data-testid="bar-container"]') || mainScope;
+
+          // 2. Вспомогательная функция: считывает текущее количество этого товара в корзине из степпера "- N +"
+          const readCurrentQtyInStepper = () => {
+            const containers = [barScope, mainScope];
+            for (const root of containers) {
+              if (!root) continue;
+              const candidates = root.querySelectorAll('span, div, input');
+              for (const el of candidates) {
+                if (el.closest('.lqs-product-panel') || el.closest('div[data-testid="product-card"]')) continue;
+                const txt = (el.tagName === 'INPUT' ? el.value : el.textContent || '').trim();
+                if (/^\d{1,2}$/.test(txt)) {
+                  // Проверяем, что рядом в родителе есть 2 кнопки (- и +)
+                  const parent = el.parentElement;
+                  const grand = parent ? parent.parentElement : null;
+                  const btnsInParent = parent ? parent.querySelectorAll('button').length : 0;
+                  const btnsInGrand = grand ? grand.querySelectorAll('button').length : 0;
+                  if (btnsInParent >= 2 || btnsInGrand >= 2) {
+                    const n = parseInt(txt, 10);
+                    if (n >= 1 && n <= 50) return { qty: n, stepperRoot: btnsInParent >= 2 ? parent : grand };
+                  }
+                }
+              }
+            }
+            return { qty: 0, stepperRoot: null };
+          };
+
+          // 3. Ищем кнопку первого добавления («В корзину») строго вне карточек рекомендаций
+          const findMainAddButton = () => {
+            const selectors = [
+              'button[data-testid="snippet-control"]',
+              'button[data-testid*="add"]',
+              'button[aria-label*="В корзину"]'
+            ];
+            for (const sel of selectors) {
+              const btn = barScope.querySelector(sel) || mainScope.querySelector(sel);
+              if (btn && !btn.closest('div[data-testid="product-card"]') && !btn.closest('.lqs-product-panel')) {
+                return btn;
+              }
+            }
+            const allBtns = Array.from(barScope.querySelectorAll('button')).concat(
+              Array.from(mainScope.querySelectorAll('button'))
+            );
+            for (const b of allBtns) {
+              if (b.closest('div[data-testid="product-card"]') || b.closest('.lqs-product-panel')) continue;
+              const t = (b.textContent || '').trim().toLowerCase();
+              if (t.includes('в корзину') || t.includes('добавить')) {
+                return b;
+              }
+            }
+            return null;
+          };
+
+          // 4. Ищем кнопку "+" в степпере (включая кнопки с <svg> без текста)
+          const findPlusButton = () => {
+            const stepperInfo = readCurrentQtyInStepper();
+            if (stepperInfo.stepperRoot) {
+              const stepperBtns = Array.from(stepperInfo.stepperRoot.querySelectorAll('button')).filter(
+                (b) => !b.closest('.lqs-product-panel') && !b.disabled
+              );
+              if (stepperBtns.length >= 2) {
+                return stepperBtns[stepperBtns.length - 1]; // Правая кнопка в степпере "- N +" — всегда "+"
+              }
+            }
+
+            const explicitPlus =
+              barScope.querySelector(
+                'button[aria-label*="Увеличить"], button[aria-label*="Добавить"], button[aria-label*="Ещё"], button[data-testid*="plus"], button[data-testid*="increment"]'
+              ) ||
+              mainScope.querySelector(
+                'button[aria-label*="Увеличить"], button[aria-label*="Добавить"], button[aria-label*="Ещё"], button[data-testid*="plus"], button[data-testid*="increment"]'
+              );
+            if (explicitPlus && !explicitPlus.closest('div[data-testid="product-card"]')) {
+              return explicitPlus;
+            }
+
+            const barBtns = Array.from(barScope.querySelectorAll('button')).filter(
+              (b) => !b.closest('.lqs-product-panel') && !b.closest('div[data-testid="product-card"]')
+            );
+            for (const b of barBtns) {
+              if ((b.textContent || '').trim() === '+') return b;
+            }
+            if (barBtns.length >= 2) {
+              return barBtns[barBtns.length - 1];
+            }
+            return null;
+          };
+
+          // Ждём появления кнопки "В корзину" или уже активного степпера "- N +"
+          let addBtn = null;
+          let initialStepper = readCurrentQtyInStepper();
+          for (let waitIdx = 0; waitIdx < 16; waitIdx++) {
+            initialStepper = readCurrentQtyInStepper();
+            if (initialStepper.qty > 0) break;
+            addBtn = findMainAddButton();
+            if (addBtn && !addBtn.disabled) break;
+            await wait(250);
+          }
+
+          // Проверяем, не закончился ли товар на складе этого аккаунта
+          const pageText = (barScope.innerText || mainScope.innerText || '').toLowerCase();
+          if (!addBtn && initialStepper.qty === 0) {
+            if (/раскупили|нет в наличии|закончил/i.test(pageText)) {
+              return { ok: false, addedUnits: 0, reason: 'Нет в наличии (раскупили на этом складе)' };
+            }
+            return { ok: false, addedUnits: 0, reason: 'Кнопка «В корзину» не найдена на странице' };
+          }
+
+          // Если товара ещё нет в корзине — нажимаем «В корзину» (1-я единица)
+          let currentQty = initialStepper.qty;
+          if (currentQty === 0 && addBtn) {
+            addBtn.click();
+            await wait(450);
+            for (let retry = 0; retry < 6; retry++) {
+              currentQty = readCurrentQtyInStepper().qty;
+              if (currentQty >= 1) break;
+              const retryBtn = findMainAddButton();
+              if (retryBtn && retry === 2) {
+                retryBtn.click();
+              }
+              await wait(250);
+            }
+            if (currentQty === 0) currentQty = 1;
+          }
+
+          // Дожимаем кнопку «+» до нужного количества единиц (qtyToSet)
+          let safetyClicks = 0;
+          while (currentQty < qtyToSet && safetyClicks < qtyToSet + 4) {
+            safetyClicks += 1;
+            const plusBtn = findPlusButton();
+            if (!plusBtn) break;
+            plusBtn.click();
+            await wait(350);
+            const afterStep = readCurrentQtyInStepper().qty;
+            if (afterStep > currentQty) {
+              currentQty = afterStep;
+            } else {
+              currentQty += 1;
+            }
+          }
+
+          const priceEl = document.querySelector('span[data-testid="price-text"]');
+          const priceVal = priceEl ? parseFloat(priceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.')) : null;
+          return {
+            ok: currentQty >= 1,
+            addedUnits: Math.min(currentQty, qtyToSet),
+            requestedUnits: qtyToSet,
+            price: priceVal
+          };
+        } finally {
+          window.__lqsAutoBuilding = false;
+        }
+      }
+    });
+
+    const r = execRes && execRes[0] ? execRes[0].result : null;
+    if (r && r.ok) {
+      return {
+        slug: item.slug,
+        title: item.title,
+        qty: desiredQty,
+        addedUnits: r.addedUnits || desiredQty,
+        ok: true,
+        price: r.price
+      };
+    }
+    return {
+      slug: item.slug,
+      title: item.title,
+      qty: desiredQty,
+      addedUnits: r?.addedUnits || 0,
+      ok: false,
+      reason: r?.reason || 'Не удалось нажать кнопку'
+    };
+  } catch (err) {
+    return {
+      slug: item.slug,
+      title: item.title,
+      qty: desiredQty,
+      addedUnits: 0,
+      ok: false,
+      reason: err.message || String(err)
+    };
+  }
+}
+
 async function autoBuildCartInBrowser(customItems = null) {
   const cartsState = await getSavedCartsState();
   const items = Array.isArray(customItems) && customItems.length > 0
@@ -631,109 +1681,57 @@ async function autoBuildCartInBrowser(customItems = null) {
     };
   }
 
-  // Находим открытую вкладку Лавки или создаём новую
   const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
   let targetTab = lavkaTabs && lavkaTabs.length > 0 ? lavkaTabs[0] : null;
   if (!targetTab) {
     targetTab = await chrome.tabs.create({ url: 'https://lavka.yandex.ru/', active: true });
+    await waitForTabCompleteSafe(targetTab.id, 5000);
   } else {
     await chrome.tabs.update(targetTab.id, { active: true });
   }
 
-  let addedCount = 0;
   const resultsLog = [];
+  const failedItemsForRetry = [];
 
   for (const item of items) {
     if (!item || !item.slug) continue;
-    const targetUrl = `https://lavka.yandex.ru/good/${encodeURIComponent(item.slug)}`;
-    const desiredQty = Math.max(1, Math.min(20, Number(item.qty) || 1));
-
-    await chrome.tabs.update(targetTab.id, { url: targetUrl });
-
-    // Ждём загрузки карточки товара
-    await new Promise((resolve) => {
-      let done = false;
-      const timer = setTimeout(() => {
-        if (!done) {
-          done = true;
-          resolve();
-        }
-      }, 5500);
-      const listener = (tabId, info) => {
-        if (tabId === targetTab.id && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          if (!done) {
-            done = true;
-            clearTimeout(timer);
-            setTimeout(resolve, 900);
-          }
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
-
-    try {
-      const execRes = await chrome.scripting.executeScript({
-        target: { tabId: targetTab.id },
-        args: [desiredQty],
-        func: async (qtyToSet) => {
-          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-          let addBtn = null;
-          for (let i = 0; i < 15; i++) {
-            addBtn =
-              document.querySelector('main[data-testid="good-page-desktop"] button[data-testid="snippet-control"]') ||
-              document.querySelector('button[data-testid="snippet-control"]');
-            if (addBtn) break;
-            await wait(250);
-          }
-          if (!addBtn) return { ok: false, reason: 'Кнопка В корзину не найдена (возможно, нет в наличии)' };
-
-          // Первый клик добавляет 1 шт.
-          addBtn.click();
-          await wait(380);
-
-          // Если нужно больше 1 шт., ищем кнопку "+"
-          for (let q = 1; q < qtyToSet; q++) {
-            const plusBtn =
-              document.querySelector('main[data-testid="good-page-desktop"] button[aria-label*="Увеличить"]') ||
-              document.querySelector('main[data-testid="good-page-desktop"] button[data-testid*="plus"]') ||
-              Array.from(document.querySelectorAll('main[data-testid="good-page-desktop"] button')).find(
-                (b) => (b.textContent || '').trim() === '+'
-              );
-            if (plusBtn) {
-              plusBtn.click();
-              await wait(280);
-            }
-          }
-
-          const priceEl = document.querySelector('span[data-testid="price-text"]');
-          const priceVal = priceEl ? parseFloat(priceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.')) : null;
-          return { ok: true, price: priceVal };
-        }
-      });
-
-      const r = execRes && execRes[0] ? execRes[0].result : null;
-      if (r && r.ok) {
-        addedCount += 1;
-        resultsLog.push({ slug: item.slug, title: item.title, qty: desiredQty, ok: true, price: r.price });
-      } else {
-        resultsLog.push({ slug: item.slug, title: item.title, qty: desiredQty, ok: false, reason: r?.reason || 'Ошибка' });
-      }
-    } catch (err) {
-      resultsLog.push({ slug: item.slug, title: item.title, qty: desiredQty, ok: false, reason: err.message });
+    const res = await addSingleItemOnTab(targetTab.id, item);
+    if (!res.ok || res.addedUnits < res.qty) {
+      failedItemsForRetry.push({ item, firstResult: res });
+    } else {
+      resultsLog.push(res);
     }
   }
+
+  // Повторный проход (Retry Pass) для товаров, которые не успели прогрузиться с первого раза
+  for (const { item, firstResult } of failedItemsForRetry) {
+    if (firstResult.reason && firstResult.reason.includes('раскупили')) {
+      resultsLog.push(firstResult);
+      continue;
+    }
+    const retryRes = await addSingleItemOnTab(targetTab.id, item);
+    resultsLog.push(retryRes);
+  }
+
+  // После сборки открываем страницу корзины, чтобы пользователь сразу увидел результат
+  await chrome.tabs.update(targetTab.id, { url: 'https://lavka.yandex.ru/cart' });
+
+  const addedCount = resultsLog.filter((r) => r.ok).length;
+  const totalRequestedUnits = items.reduce((s, i) => s + (Math.max(1, Number(i.qty) || 1)), 0);
+  const totalAddedUnits = resultsLog.reduce((s, r) => s + (Number(r.addedUnits) || 0), 0);
 
   return {
     ok: true,
     addedCount,
     totalRequested: items.length,
+    totalAddedUnits,
+    totalRequestedUnits,
     results: resultsLog
   };
 }
 
 // ============================================================================
-// 4. ПОИСК ОТЗЫВОВ И ЦЕН КОНКУРЕНТОВ В DUCKDUCKGO
+// 5. ПОИСК ОТЗЫВОВ И ЦЕН КОНКУРЕНТОВ В DUCKDUCKGO
 // ============================================================================
 function cleanProductQueryForSearch(title, brand) {
   let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
@@ -796,34 +1794,46 @@ function unwrapDdgUrl(rawHref) {
 
 function extractCompetitorPricesFromSources(sources, lavkaPrice = null) {
   if (!Array.isArray(sources) || sources.length === 0) {
-    return { competitorMinPrice: null, competitorSummary: '' };
+    return { competitorMinPrice: null, competitorSummary: '', competitorOffers: [] };
   }
   const found = [];
   const priceRegex = /(?:от\s+|цена\s+|за\s+)?(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])/gi;
   for (const s of sources) {
     const text = `${s.title || ''} ${s.snippet || ''}`;
     const storeName = s.source || 'Магазин';
+    const url = s.url || '';
     for (const m of text.matchAll(priceRegex)) {
       const val = parseFloat(m[1].replace(',', '.'));
       if (val >= 20 && val <= 9500) {
         if (lavkaPrice && (val < lavkaPrice * 0.22 || val > lavkaPrice * 3.5)) continue;
-        found.push({ store: storeName, price: Math.round(val) });
+        found.push({
+          store: storeName,
+          price: Math.round(val),
+          url,
+          title: (s.title || storeName).slice(0, 80)
+        });
       }
     }
   }
-  if (found.length === 0) return { competitorMinPrice: null, competitorSummary: '' };
+  if (found.length === 0) return { competitorMinPrice: null, competitorSummary: '', competitorOffers: [] };
   found.sort((a, b) => a.price - b.price);
   const minP = found[0].price;
   const seen = new Set();
   const parts = [];
+  const uniqueOffers = [];
   for (const item of found) {
     if (!seen.has(item.store)) {
       seen.add(item.store);
       parts.push(`${item.store}: ~${item.price} ₽`);
+      uniqueOffers.push(item);
     }
-    if (parts.length >= 3) break;
+    if (uniqueOffers.length >= 5) break;
   }
-  return { competitorMinPrice: minP, competitorSummary: parts.join(', ') };
+  return {
+    competitorMinPrice: minP,
+    competitorSummary: parts.slice(0, 3).join(', '),
+    competitorOffers: uniqueOffers
+  };
 }
 
 async function parseDdgHtmlSearch(query) {
@@ -918,7 +1928,7 @@ async function searchWebReviewsDirect(title, brand) {
   if (!cleanQ) return [];
 
   const qPrimary = `${cleanQ} отзывы цена (site:otzovik.com OR site:irecommend.ru OR site:vkusvill.ru OR site:perekrestok.ru OR site:ozon.ru OR site:rskrf.ru)`;
-  const qFallback = `${cleanQ} отзывы покупателей цена`;
+  const qFallback = `${cleanQ} купить цена отзывы`;
 
   const collected = [];
   const seen = new Set();
@@ -1085,7 +2095,7 @@ function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = fals
 }
 
 // ============================================================================
-// 5. РАБОТА С ВКЛАДКОЙ GEMINI И КУКАМИ
+// 6. РАБОТА С ВКЛАДКОЙ GEMINI И КУКАМИ GOOGLE
 // ============================================================================
 async function inspectGeminiCookies() {
   try {
@@ -1222,26 +2232,7 @@ async function createGeminiTab(targetUrl, makeActive = false) {
     active: makeActive,
     pinned: !makeActive
   });
-  await new Promise((resolve) => {
-    let done = false;
-    const timeout = setTimeout(() => {
-      if (!done) {
-        done = true;
-        resolve();
-      }
-    }, 6500);
-    const listener = (tabId, info) => {
-      if (tabId === created.id && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        if (!done) {
-          done = true;
-          clearTimeout(timeout);
-          setTimeout(resolve, 1400);
-        }
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-  });
+  await waitForTabCompleteSafe(created.id, 6500);
   return created;
 }
 
@@ -1522,7 +2513,6 @@ async function orchestrateProductAnalysisInternal(payload) {
   const aiBaseUrl = settings.aiBaseUrl.replace(/\/$/, '');
   const acc = payload.accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
 
-  // Сначала получаем разведку по ценам (включая проверку без куки и историю)
   let priceIntel = await getProductPriceIntelligence(
     payload.slug,
     payload.title,
@@ -1532,7 +2522,6 @@ async function orchestrateProductAnalysisInternal(payload) {
     acc
   );
 
-  // 0. Проверяем встроенный браузерный кэш ИИ
   if (!payload.forceRefresh) {
     const localCached = await getLocalAiCacheEntry(payload.slug, payload.title);
     if (localCached && localCached.verdict) {
@@ -1550,7 +2539,6 @@ async function orchestrateProductAnalysisInternal(payload) {
   let webSources = [];
   let backendOnline = false;
 
-  // 1. Запрашиваем локальный FastAPI (:8765)
   try {
     const resp = await fetchWithTimeout(
       `${backendUrl}/api/analyze-product`,
@@ -1595,13 +2583,12 @@ async function orchestrateProductAnalysisInternal(payload) {
     // FastAPI (:8765) выключен — работаем автономно
   }
 
-  // 1b. Автономный поиск отзывов и цен конкурентов в DuckDuckGo
   if (!webSources || webSources.length === 0) {
     webSources = await searchWebReviewsDirect(payload.title, payload.brand);
   }
 
   const comp = extractCompetitorPricesFromSources(webSources, payload.price);
-  if (comp.competitorMinPrice || comp.competitorSummary) {
+  if (comp.competitorMinPrice || comp.competitorSummary || comp.competitorOffers.length > 0) {
     const updatedMap = await recordPricesBatch(acc, [
       {
         slug: payload.slug,
@@ -1610,7 +2597,8 @@ async function orchestrateProductAnalysisInternal(payload) {
         oldPrice: payload.oldPrice || null,
         amount: payload.amount || '',
         competitorMinPrice: comp.competitorMinPrice,
-        competitorSummary: comp.competitorSummary
+        competitorSummary: comp.competitorSummary,
+        competitorOffers: comp.competitorOffers
       }
     ]);
     const cleanSlug = String(payload.slug || '').trim().toLowerCase();
@@ -1619,7 +2607,6 @@ async function orchestrateProductAnalysisInternal(payload) {
     }
   }
 
-  // 2. Пробуем прямой запрос в мост (:8083 / DeepSeek / Ollama)
   try {
     const promptForBridge = buildProductReviewPrompt(payload, webSources, false, priceIntel);
     const headers = { 'Content-Type': 'application/json' };
@@ -1664,7 +2651,6 @@ async function orchestrateProductAnalysisInternal(payload) {
     // мост :8083 выключен
   }
 
-  // 3. Автопилот через вкладку Gemini
   return await enqueueGeminiTabExecution(async () => {
     const geminiTab = await findOpenGeminiTab(true, false);
     if (geminiTab && geminiTab.id) {
@@ -1725,10 +2711,11 @@ async function orchestrateProductAnalysis(payload) {
 }
 
 // ============================================================================
-// 6. СОБЫТИЯ ЖИЗНЕННОГО ЦИКЛА И ОБРАБОТЧИК СООБЩЕНИЙ
+// 7. СОБЫТИЯ ЖИЗНЕННОГО ЦИКЛА И ОБРАБОТЧИК СООБЩЕНИЙ
 // ============================================================================
 chrome.runtime.onInstalled.addListener(() => {
   ensureAutopilotWarmup('onInstalled');
+  getAccountsVaultMap();
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -1765,6 +2752,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'LQS_AUDIT_CART_COMPETITORS') {
+    auditCartCompetitorsAndAccounts(msg.accountId, msg.items || [], Boolean(msg.forceNetworkSearch))
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
   if (msg.type === 'LQS_SAVE_CART_SNAPSHOT') {
     saveCartSnapshot(msg.accountId, msg.items || [], msg.totalPrice || 0)
       .then((snapshot) => sendResponse({ ok: true, snapshot }))
@@ -1788,6 +2782,49 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'LQS_AUTO_BUILD_CART') {
     autoBuildCartInBrowser(msg.items || null)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  // --- МЕНЕДЖЕР АККАУНТОВ (КУКИ + ПАРОЛИ + СВИТЧЕР) ---
+  if (msg.type === 'LQS_GET_ACCOUNTS_VAULT') {
+    getAccountsVaultStatus()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_SAVE_ACCOUNT_TO_VAULT') {
+    saveAccountToVault(msg.payload || {})
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_DELETE_ACCOUNT_FROM_VAULT') {
+    deleteAccountFromVault(msg.accountId)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_SWITCH_LAVKA_ACCOUNT') {
+    switchLavkaAccountInOneClick(msg.payload || {})
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_LOGOUT_CLEAN_LAVKA_SESSION') {
+    logoutToCleanLavkaSession()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_AUTOFILL_YANDEX_LOGIN') {
+    autofillYandexPassportTab(msg.accountId)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;

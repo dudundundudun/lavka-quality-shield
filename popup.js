@@ -23,6 +23,7 @@ let searchQuery = '';
 let currentPriceFilter = 'all';
 let priceSearchQuery = '';
 let lastBackendPingSummary = null;
+let vaultAccountsCache = [];
 
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
@@ -128,8 +129,285 @@ function loadReviews() {
 }
 
 // ==========================================================================
-// ВКЛАДКА 2: МУЛЬТИ-АККАУНТ КЛОНЕР КОРЗИНЫ И БАЗА ЦЕН
+// ВКЛАДКА 2: МЕНЕДЖЕР АККАУНТОВ (КУКИ + ПАРОЛИ), КЛОНЕР КОРЗИНЫ И БАЗА ЦЕН
 // ==========================================================================
+function showAccountStatusMsg(html, isError = false) {
+  const box = document.getElementById('account-status-msg');
+  if (!box) return;
+  box.style.display = 'block';
+  box.style.color = isError ? '#b91c1c' : '#15803d';
+  box.innerHTML = html;
+}
+
+function getSelectedVaultAccountObj() {
+  const sel = document.getElementById('lavka-account-select');
+  const val = sel ? sel.value : '';
+  return vaultAccountsCache.find((a) => a.label === val || a.accountId === val) || null;
+}
+
+function syncSelectedAccountFields() {
+  const acc = getSelectedVaultAccountObj();
+  const metaEl = document.getElementById('selected-account-meta');
+  if (!acc) {
+    if (metaEl) metaEl.textContent = 'Профиль ещё не сохранён в сейфе.';
+    return;
+  }
+
+  document.getElementById('acc-label-input').value = acc.label || '';
+  document.getElementById('acc-login-input').value = acc.login || acc.yandexLogin || '';
+  document.getElementById('acc-password-input').value = acc.password || '';
+  document.getElementById('acc-note-input').value = acc.note || '';
+
+  const cookieInfo = acc.cookieCount > 0 ? `🍪 Сохранено куки: <b>${acc.cookieCount}</b>` : '⚪ Куки ещё не сохранены';
+  const loginInfo = acc.login || acc.yandexLogin ? ` • 🔑 Логин: <b>${escapeHtml(acc.login || acc.yandexLogin)}</b>` : '';
+  const passInfo = acc.password ? ' • 🔒 Пароль сохранён' : '';
+  if (metaEl) {
+    metaEl.innerHTML = `${cookieInfo}${loginInfo}${passInfo}`;
+  }
+}
+
+function renderAccountsVaultUI(vaultResp) {
+  if (!vaultResp || !vaultResp.ok) return;
+  vaultAccountsCache = Array.isArray(vaultResp.accounts) ? vaultResp.accounts : [];
+
+  const liveBadge = document.getElementById('live-cookie-badge');
+  if (liveBadge && vaultResp.liveSession) {
+    const ls = vaultResp.liveSession;
+    liveBadge.textContent = ls.isLoggedIn
+      ? `🟢 Вход: ${ls.yandexLogin || 'активен'} (${ls.cookieCount} куки)`
+      : `⚪ Гость (${ls.cookieCount} куки)`;
+  }
+
+  const sel = document.getElementById('lavka-account-select');
+  if (sel && vaultAccountsCache.length > 0) {
+    const prevVal = vaultResp.activeAccountLabel || sel.value;
+    sel.innerHTML = '';
+    vaultAccountsCache.forEach((a) => {
+      const opt = document.createElement('option');
+      opt.value = a.label;
+      opt.dataset.accountId = a.accountId;
+      const cTag = a.cookieCount > 0 ? ` [🍪${a.cookieCount}]` : '';
+      const lTag = a.login || a.yandexLogin ? ` (${a.login || a.yandexLogin})` : '';
+      opt.textContent = `${a.label}${cTag}${lTag}`;
+      sel.appendChild(opt);
+    });
+    if (Array.from(sel.options).some((o) => o.value === prevVal)) {
+      sel.value = prevVal;
+    }
+  }
+
+  syncSelectedAccountFields();
+}
+
+function loadAccountsVault() {
+  chrome.runtime.sendMessage({ type: 'LQS_GET_ACCOUNTS_VAULT' }, (resp) => {
+    if (!chrome.runtime.lastError && resp && resp.ok) {
+      renderAccountsVaultUI(resp);
+    }
+  });
+}
+
+document.getElementById('lavka-account-select').addEventListener('change', (e) => {
+  const newLabel = e.target.value;
+  saveSettingsPatch({ lavkaAccountLabel: newLabel }, () => {
+    syncSelectedAccountFields();
+  });
+});
+
+document.getElementById('toggle-creds-btn').addEventListener('click', () => {
+  const box = document.getElementById('account-creds-box');
+  box.classList.toggle('open');
+  syncSelectedAccountFields();
+});
+
+document.getElementById('add-account-btn').addEventListener('click', () => {
+  const nextNum = vaultAccountsCache.length + 1;
+  const newLabel = `Аккаунт #${nextNum} (Новый)`;
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
+      payload: {
+        accountId: `acc_${Date.now()}`,
+        label: newLabel,
+        login: '',
+        password: '',
+        note: '',
+        captureCookies: false
+      }
+    },
+    (resp) => {
+      if (resp && resp.vaultStatus) {
+        renderAccountsVaultUI(resp.vaultStatus);
+        document.getElementById('account-creds-box').classList.add('open');
+        showAccountStatusMsg(`✅ Создан профиль «${escapeHtml(newLabel)}». Заполни логин/пароль или сохрани куки!`);
+      }
+    }
+  );
+});
+
+document.getElementById('save-cookies-btn').addEventListener('click', () => {
+  const acc = getSelectedVaultAccountObj();
+  const label = document.getElementById('lavka-account-select').value;
+  const btn = document.getElementById('save-cookies-btn');
+  btn.textContent = '⏳...';
+
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
+      payload: {
+        accountId: acc ? acc.accountId : undefined,
+        label,
+        captureCookies: true
+      }
+    },
+    (resp) => {
+      btn.textContent = '💾 Запомнить куки';
+      if (resp && resp.ok) {
+        renderAccountsVaultUI(resp.vaultStatus);
+        showAccountStatusMsg(`✅ Куки и сессия сохранены в «${escapeHtml(label)}»!`);
+      }
+    }
+  );
+});
+
+document.getElementById('switch-account-btn').addEventListener('click', () => {
+  const acc = getSelectedVaultAccountObj();
+  const label = document.getElementById('lavka-account-select').value;
+  const btn = document.getElementById('switch-account-btn');
+  btn.textContent = '⏳ Переключаю...';
+
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SWITCH_LAVKA_ACCOUNT',
+      payload: {
+        accountId: acc ? acc.accountId : undefined,
+        label,
+        autoBackupCurrent: true,
+        buildCartAfterSwitch: false
+      }
+    },
+    (resp) => {
+      btn.textContent = '⚡ Переключить вход (1 клик)';
+      if (!resp || !resp.ok) {
+        showAccountStatusMsg(`⚠️ ${escapeHtml(resp?.error || 'Не удалось переключить профиль')}`, true);
+        return;
+      }
+      if (resp.vaultStatus) renderAccountsVaultUI(resp.vaultStatus);
+      if (resp.switchedCookies) {
+        showAccountStatusMsg(`✅ Сессия переключена на «${escapeHtml(resp.switchedTo)}» (восстановлено ${resp.restoredCount} куки)!`);
+      } else if (resp.autofillTriggered) {
+        showAccountStatusMsg(`🔑 Куки ещё не сохранялись — открыт Яндекс Паспорт и введён логин/пароль для «${escapeHtml(resp.switchedTo)}»!`);
+      } else {
+        showAccountStatusMsg(`ℹ️ Выбран профиль «${escapeHtml(resp.switchedTo)}». Войди на сайте и нажми «💾 Запомнить куки»!`);
+      }
+    }
+  );
+});
+
+document.getElementById('clean-logout-btn').addEventListener('click', () => {
+  const btn = document.getElementById('clean-logout-btn');
+  btn.textContent = '⏳...';
+  chrome.runtime.sendMessage({ type: 'LQS_LOGOUT_CLEAN_LAVKA_SESSION' }, (resp) => {
+    btn.textContent = '🧹 Выйти';
+    if (resp && resp.vaultStatus) renderAccountsVaultUI(resp.vaultStatus);
+    showAccountStatusMsg('✅ Текущие куки сохранены в сейф, сессия в браузере очищена (чистый Гость / вход в новый акк)!');
+  });
+});
+
+document.getElementById('save-creds-btn').addEventListener('click', () => {
+  const acc = getSelectedVaultAccountObj();
+  const label = document.getElementById('acc-label-input').value.trim() || document.getElementById('lavka-account-select').value;
+  const login = document.getElementById('acc-login-input').value.trim();
+  const password = document.getElementById('acc-password-input').value;
+  const note = document.getElementById('acc-note-input').value.trim();
+
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
+      payload: {
+        accountId: acc ? acc.accountId : undefined,
+        label,
+        login,
+        password,
+        note,
+        captureCookies: true
+      }
+    },
+    (resp) => {
+      if (resp && resp.ok) {
+        renderAccountsVaultUI(resp.vaultStatus);
+        showAccountStatusMsg(`✅ Логин, пароль и куки сохранены для «${escapeHtml(label)}»!`);
+      }
+    }
+  );
+});
+
+document.getElementById('autofill-passport-btn').addEventListener('click', () => {
+  const acc = getSelectedVaultAccountObj();
+  if (!acc) return;
+  // Сначала сохраним введённые поля, если пользователь их только что вписал
+  const login = document.getElementById('acc-login-input').value.trim();
+  const password = document.getElementById('acc-password-input').value;
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
+      payload: {
+        accountId: acc.accountId,
+        label: document.getElementById('acc-label-input').value.trim() || acc.label,
+        login,
+        password,
+        note: document.getElementById('acc-note-input').value.trim(),
+        captureCookies: false
+      }
+    },
+    () => {
+      chrome.runtime.sendMessage({ type: 'LQS_AUTOFILL_YANDEX_LOGIN', accountId: acc.accountId }, (r) => {
+        if (r && r.ok) {
+          showAccountStatusMsg(`🔑 Открыт Яндекс ID и введены данные для «${escapeHtml(acc.label)}»!`);
+        } else {
+          showAccountStatusMsg(`⚠️ ${escapeHtml(r?.error || 'Укажи логин и пароль')}`, true);
+        }
+      });
+    }
+  );
+});
+
+document.getElementById('delete-acc-btn').addEventListener('click', () => {
+  const acc = getSelectedVaultAccountObj();
+  if (!acc) return;
+  if (vaultAccountsCache.length <= 1) {
+    showAccountStatusMsg('⚠️ Нельзя удалить единственный профиль.', true);
+    return;
+  }
+  chrome.runtime.sendMessage({ type: 'LQS_DELETE_ACCOUNT_FROM_VAULT', accountId: acc.accountId }, (resp) => {
+    if (resp && resp.ok) {
+      renderAccountsVaultUI(resp);
+      showAccountStatusMsg(`🗑️ Профиль «${escapeHtml(acc.label)}» удалён.`);
+    }
+  });
+});
+
+document.getElementById('toggle-pass-vis-btn').addEventListener('click', () => {
+  const inp = document.getElementById('acc-password-input');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+});
+
+document.getElementById('copy-login-btn').addEventListener('click', async () => {
+  const val = document.getElementById('acc-login-input').value;
+  if (val) {
+    await navigator.clipboard.writeText(val);
+    showAccountStatusMsg('📋 Логин скопирован в буфер обмена!');
+  }
+});
+
+document.getElementById('copy-pass-btn').addEventListener('click', async () => {
+  const val = document.getElementById('acc-password-input').value;
+  if (val) {
+    await navigator.clipboard.writeText(val);
+    showAccountStatusMsg('📋 Пароль скопирован в буфер обмена!');
+  }
+});
+
 function hasPriceDiscrepancy(entry) {
   if (!entry) return false;
   if (entry.minPrice && entry.maxPrice && entry.maxPrice - entry.minPrice >= 3) return true;
@@ -138,16 +416,19 @@ function hasPriceDiscrepancy(entry) {
 }
 
 function loadPricesAndCartTab() {
+  loadAccountsVault();
+
   // 1. Загружаем сохранённый слепок корзины
   chrome.runtime.sendMessage({ type: 'LQS_GET_SAVED_CARTS' }, (resp) => {
     const badgeEl = document.getElementById('saved-cart-badge');
     const sumEl = document.getElementById('saved-cart-summary');
     if (resp && resp.latest && Array.isArray(resp.latest.items) && resp.latest.items.length > 0) {
       const lat = resp.latest;
-      badgeEl.textContent = `✅ ${lat.items.length} поз. (${lat.totalPrice} ₽)`;
+      const totalUnits = lat.totalUnits || lat.items.reduce((s, i) => s + (Number(i.qty) || 1), 0);
+      badgeEl.textContent = `✅ ${lat.items.length} поз. / ${totalUnits} шт. (${lat.totalPrice} ₽)`;
       const names = lat.items.slice(0, 4).map((i) => `${escapeHtml(i.title.slice(0, 22))} (${i.qty} шт × ${i.price}₽)`).join(', ');
       sumEl.innerHTML =
-        `Сохранена с профиля <b>${escapeHtml(lat.accountId)}</b> на сумму <b>${lat.totalPrice} ₽</b>:<br>` +
+        `Сохранена с профиля <b>${escapeHtml(lat.accountId)}</b> (позиций: <b>${lat.items.length}</b>, штук: <b>${totalUnits}</b>, сумма: <b>${lat.totalPrice} ₽</b>):<br>` +
         `<span style="color:#57534e;">${names}${lat.items.length > 4 ? ` и ещё ${lat.items.length - 4}...` : ''}</span>`;
     } else {
       badgeEl.textContent = 'Пока пусто';
@@ -226,10 +507,6 @@ function loadPricesAndCartTab() {
   });
 }
 
-document.getElementById('lavka-account-select').addEventListener('change', (e) => {
-  saveSettingsPatch({ lavkaAccountLabel: e.target.value });
-});
-
 document.getElementById('capture-cart-btn').addEventListener('click', () => {
   const btn = document.getElementById('capture-cart-btn');
   const acc = document.getElementById('lavka-account-select').value;
@@ -256,9 +533,10 @@ document.getElementById('capture-cart-btn').addEventListener('click', () => {
           totalPrice: resp.totalPrice
         },
         () => {
-          btn.textContent = `✅ Снято (${resp.items.length} поз.)`;
+          const units = resp.totalUnits || resp.items.reduce((s, i) => s + (Number(i.qty) || 1), 0);
+          btn.textContent = `✅ Снято (${resp.items.length} поз. / ${units} шт.)`;
           loadPricesAndCartTab();
-          setTimeout(() => { btn.textContent = '📸 Снять слепок корзины'; }, 2000);
+          setTimeout(() => { btn.textContent = '📸 Снять слепок корзины'; }, 2200);
         }
       );
     });
@@ -315,9 +593,9 @@ document.getElementById('compare-cart-btn').addEventListener('click', () => {
 document.getElementById('autobuild-cart-btn').addEventListener('click', () => {
   const btn = document.getElementById('autobuild-cart-btn');
   const out = document.getElementById('cart-compare-output');
-  btn.textContent = '⏳ Собираю корзину в Лавке...';
+  btn.textContent = '⏳ Собираю все позиции и штуки...';
   out.style.display = 'block';
-  out.textContent = 'Авто-сборщик открывает товары из слепка и нажимает «В корзину»...';
+  out.textContent = 'Авто-сборщик открывает товары из слепка, нажимает «В корзину» и выставляет точное количество штук («+»)...';
 
   chrome.runtime.sendMessage({ type: 'LQS_AUTO_BUILD_CART' }, (resp) => {
     btn.textContent = '🚀 Авто-собрать сохранённую корзину на этом аккаунте (1 клик)';
@@ -325,7 +603,25 @@ document.getElementById('autobuild-cart-btn').addEventListener('click', () => {
       out.innerHTML = `⚠️ ${escapeHtml(resp?.error || 'Ошибка авто-сборки корзины')}`;
       return;
     }
-    out.innerHTML = `✅ <b>Готово!</b> Автоматически добавлено в корзину: <b>${resp.addedCount} из ${resp.totalRequested}</b> товаров.`;
+
+    const detailsHtml = Array.isArray(resp.results)
+      ? resp.results
+          .map((r) => {
+            const st = r.ok
+              ? `<span style="color:#15803d;font-weight:700;">✅ ${r.addedUnits || r.qty}/${r.qty} шт.</span>`
+              : `<span style="color:#dc2626;font-weight:700;">❌ ${escapeHtml(r.reason || 'Ошибка')}</span>`;
+            return `<div style="border-bottom:1px solid #f0eee9;padding:2px 0;">${escapeHtml((r.title || r.slug).slice(0, 34))}: ${st}</div>`;
+          })
+          .join('')
+      : '';
+
+    out.innerHTML = `
+      <div style="margin-bottom:5px;">
+        ✅ <b>Готово!</b> Позиций: <b>${resp.addedCount} из ${resp.totalRequested}</b> |
+        Всего единиц (штук): <b>${resp.totalAddedUnits ?? resp.addedCount} из ${resp.totalRequestedUnits ?? resp.totalRequested} шт.</b>
+      </div>
+      ${detailsHtml}
+    `;
   });
 });
 
@@ -359,7 +655,9 @@ function loadSettings() {
     document.getElementById('chk-guest-probe').checked = cfg.enableGuestPriceProbe !== false;
     if (cfg.lavkaAccountLabel) {
       const sel = document.getElementById('lavka-account-select');
-      if (sel) sel.value = cfg.lavkaAccountLabel;
+      if (sel && Array.from(sel.options).some((o) => o.value === cfg.lavkaAccountLabel)) {
+        sel.value = cfg.lavkaAccountLabel;
+      }
     }
   });
 }
@@ -781,7 +1079,7 @@ document.getElementById('diag-download-btn').addEventListener('click', async () 
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `lavka-quality-shield-v2.4.0-debug.log`;
+  a.download = `lavka-quality-shield-v2.5.0-debug.log`;
   a.click();
 });
 
@@ -791,4 +1089,5 @@ document.getElementById('diag-clear-btn').addEventListener('click', () => {
 
 loadReviews();
 loadSettings();
+loadAccountsVault();
 refreshAiRadar();

@@ -2,10 +2,10 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.4.0</title>
+  <title>Lavka Quality Shield v2.5.0</title>
   <style>
     body {
-      width: 420px;
+      width: 430px;
       margin: 0;
       padding: 12px;
       background: #f5f4f2;
@@ -183,6 +183,86 @@
       border-radius: 12px;
       padding: 10px;
       font-size: 12px;
+    }
+
+    /* КАРТОЧКА МЕНЕДЖЕРА АККАУНТОВ (КУКИ + ПАРОЛИ) */
+    .account-vault-card {
+      background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+      border: 1px solid #93c5fd;
+      border-radius: 10px;
+      padding: 9px 10px;
+      margin-bottom: 9px;
+    }
+    .account-vault-title {
+      font-weight: 800;
+      font-size: 12px;
+      color: #1e3a8a;
+      margin-bottom: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .btn-blue {
+      flex: 1;
+      background: #2563eb;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn-blue:hover {
+      background: #1d4ed8;
+    }
+    .btn-outline-blue {
+      flex: 1;
+      background: #ffffff;
+      color: #1e40af;
+      border: 1px solid #93c5fd;
+      border-radius: 8px;
+      padding: 6px 6px;
+      font-size: 10.5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn-outline-blue:hover {
+      background: #eff6ff;
+    }
+    .creds-box {
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      padding: 7px 8px;
+      margin-top: 6px;
+      display: none;
+    }
+    .creds-box.open {
+      display: block;
+    }
+    .mini-row {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .mini-row input {
+      flex: 1;
+      padding: 5px 7px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 11px;
+      background: #ffffff;
+    }
+    .icon-btn {
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      border-radius: 6px;
+      padding: 4px 7px;
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: 600;
     }
 
     /* КАРТОЧКА КЛОНЕРА КОРЗИНЫ И МУЛЬТИ-АККАУНТА */
@@ -450,12 +530,12 @@
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.4.0 Anti-Scam</span>
+    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.5.0 Account &amp; Cart</span>
   </div>
 
   <div class="tabs">
     <button class="tab-btn active" id="tab-reviews-btn">⭐ Отзывы</button>
-    <button class="tab-btn" id="tab-prices-btn">💰 Цены и Корзина</button>
+    <button class="tab-btn" id="tab-prices-btn">🔐 Акки и Корзина</button>
     <button class="tab-btn" id="tab-settings-btn">⚙️ ИИ и Автопилот</button>
   </div>
 
@@ -480,24 +560,79 @@
     </div>
   </div>
 
-  <!-- ВКЛАДКА 2: МУЛЬТИ-АККАУНТ КЛОНЕР КОРЗИНЫ И БАЗА ЦЕН -->
+  <!-- ВКЛАДКА 2: МЕНЕДЖЕР АККАУНТОВ (КУКИ + ПАРОЛИ), КЛОНЕР КОРЗИНЫ И БАЗА ЦЕН -->
   <div class="settings-panel" id="panel-prices">
-    <div class="field" style="margin-bottom:8px;">
-      <label>👤 Текущий профиль Яндекс Лавки (для записи цен и корзины):</label>
-      <select id="lavka-account-select">
-        <option value="Аккаунт #1 (Основной)">Аккаунт #1 (Основной)</option>
-        <option value="Аккаунт #2 (Новичок / Семья)">Аккаунт #2 (Новичок / Семья)</option>
-        <option value="Аккаунт #3 (Запасной)">Аккаунт #3 (Запасной)</option>
-      </select>
+    <!-- СЕЙФ АККАУНТОВ И ПЕРЕКЛЮЧАТЕЛЬ КУКИ -->
+    <div class="account-vault-card">
+      <div class="account-vault-title">
+        <span>🔐 Менеджер Аккаунтов Лавки (Куки + Пароли)</span>
+        <span id="live-cookie-badge" style="font-size:10px;color:#1e40af;">🍪 Проверка...</span>
+      </div>
+
+      <div style="display:flex;gap:4px;margin-bottom:5px;">
+        <select id="lavka-account-select" style="flex:1;padding:5px 7px;border-radius:7px;border:1px solid #93c5fd;font-size:11.5px;font-weight:700;background:#ffffff;">
+          <option value="Аккаунт #1 (Основной)">Аккаунт #1 (Основной)</option>
+          <option value="Аккаунт #2 (Новичок / Семья)">Аккаунт #2 (Новичок / Семья)</option>
+          <option value="Аккаунт #3 (Запасной)">Аккаунт #3 (Запасной)</option>
+        </select>
+        <button type="button" class="icon-btn" id="toggle-creds-btn" title="Показать или редактировать логин, пароль и заметку профиля">🔑 Пароль ▾</button>
+        <button type="button" class="icon-btn" id="add-account-btn" title="Добавить новый профиль аккаунта">➕</button>
+      </div>
+
+      <div id="selected-account-meta" style="font-size:10.5px;color:#1e3a8a;margin-bottom:6px;">
+        Выбери профиль и нажми «💾 Запомнить куки» или «⚡ Переключить»!
+      </div>
+
+      <div style="display:flex;gap:4px;margin-bottom:4px;">
+        <button type="button" class="btn-blue" id="switch-account-btn" title="Подменить куки в браузере на выбранный аккаунт и перезагрузить Лавку">
+          ⚡ Переключить вход (1 клик)
+        </button>
+        <button type="button" class="btn-outline-blue" id="save-cookies-btn" title="Сохранить текущие куки и сессию Лавки в выбранный профиль">
+          💾 Запомнить куки
+        </button>
+        <button type="button" class="btn-outline-blue" id="clean-logout-btn" title="Сохранить текущие куки в сейф и очистить вход для гостевого режима или нового аккаунта">
+          🧹 Выйти
+        </button>
+      </div>
+
+      <!-- РАСКРЫВАЮЩИЙСЯ БЛОК ЛОГИНА И ПАРОЛЯ -->
+      <div class="creds-box" id="account-creds-box">
+        <div style="font-weight:700;font-size:11px;color:#1e3a8a;margin-bottom:4px;">
+          🔑 Учётные данные выбранного профиля (хранятся локально):
+        </div>
+        <div class="mini-row">
+          <input type="text" id="acc-label-input" placeholder="Название профиля (напр. Аккаунт #2 Скидка)">
+        </div>
+        <div class="mini-row">
+          <input type="text" id="acc-login-input" placeholder="Логин / телефон / почта Яндекс ID">
+          <button type="button" class="icon-btn" id="copy-login-btn" title="Скопировать логин">📋</button>
+        </div>
+        <div class="mini-row">
+          <input type="password" id="acc-password-input" placeholder="Пароль от аккаунта">
+          <button type="button" class="icon-btn" id="toggle-pass-vis-btn" title="Показать/скрыть пароль">👁️</button>
+          <button type="button" class="icon-btn" id="copy-pass-btn" title="Скопировать пароль">📋</button>
+        </div>
+        <div class="mini-row">
+          <input type="text" id="acc-note-input" placeholder="Заметка (адрес, промокод, карта)">
+        </div>
+        <div style="display:flex;gap:4px;margin-top:4px;">
+          <button type="button" class="btn-blue" id="save-creds-btn">💾 Сохранить профиль + куки</button>
+          <button type="button" class="btn-outline-blue" id="autofill-passport-btn" title="Открыть Яндекс Паспорт и автоматически ввести логин и пароль">🔑 Авто-вход</button>
+          <button type="button" class="icon-btn" id="delete-acc-btn" style="color:#dc2626;" title="Удалить этот профиль">🗑️</button>
+        </div>
+      </div>
+
+      <div id="account-status-msg" style="font-size:10.5px;color:#15803d;margin-top:4px;display:none;"></div>
     </div>
 
+    <!-- КЛОНЕР И АВТО-СБОРЩИК КОРЗИНЫ -->
     <div class="cart-cloner-card">
       <div class="cart-cloner-title">
         <span>🛒 Мульти-Аккаунт Клонер Корзины</span>
         <span id="saved-cart-badge" style="font-size:10.5px;">Нет слепка</span>
       </div>
       <div id="saved-cart-summary" style="font-size:11px;color:#78350f;margin-bottom:6px;">
-        Открой корзину в Лавке — слепок сохранится автоматически (или нажми кнопку ниже).
+        Открой корзину в Лавке — слепок всех позиций и штук сохранится автоматически.
       </div>
       <div style="display:flex;gap:5px;margin-bottom:5px;">
         <button type="button" class="btn-outline-gold" id="capture-cart-btn">📸 Снять слепок корзины</button>
@@ -519,7 +654,7 @@
       <button class="filter-btn active" data-pfilter="all">Все цены</button>
       <button class="filter-btn" data-pfilter="diff">🕵️ Разные цены / Штраф</button>
     </div>
-    <div class="list" id="prices-list" style="max-height:165px;"></div>
+    <div class="list" id="prices-list" style="max-height:140px;"></div>
   </div>
 
   <!-- ВКЛАДКА 3: ZERO-CLICK АВТОПИЛОТ И НАСТРОЙКИ ИИ -->

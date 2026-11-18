@@ -1,24 +1,24 @@
 /**
- * Lavka Quality Shield v2.4.0 — Content Script
- * Что нового в v2.4.0:
- * 1. Анти-Шулер Радар на карточке товара и в каталоге:
- *    - Автоматически проверяет цену без куки (Гость) и сравнивает с ценами на других твоих аккаунтах Лавки!
- *    - Если для твоего аккаунта цена завышена («штраф за лояльность») — выводит компактный бейдж:
- *      «🕵️ Наценка +135 ₽ (без входа / Акк2: 124 ₽)».
- *    - Сравнивает текущую цену с твоей базой истории цен (выводит «📉 Минимум!» или «📈 Выше обычной на +X ₽»)
- *      и показывает цены конкурентов (ВкусВилл, Перекрёсток, Ozon, Азбука Вкуса).
- * 2. Авто-сборщик базы цен со всего каталога:
- *    - При скролле любой категории или главной страницы автоматически собирает цены всех видимых карточек в общую БД.
- * 3. Фиксатор цен корзины (Cart Price Lock) + Слепок корзины между аккаунтами:
- *    - Запоминает обещанную цену в момент добавления товара в корзину.
- *    - На странице корзины пересчитывает честную сумму по калькулятору, ловит тихую подмену цен,
- *      позволяет в 1 клик сохранить слепок корзины для другого аккаунта или скачать пруф-отчёт для поддержки!
+ * Lavka Quality Shield v2.5.0 — Content Script
+ * Что нового в v2.5.0:
+ * 1. Исправлена вёрстка на карточке товара:
+ *    - Устранено наложение строк в шапке ИИ-блока (.lqs-ai-header) и в кнопке сохранения заметки («💾 Ок»).
+ *    - Полная изоляция line-height и flex-параметров кнопок от агрессивных стилей Яндекс Лавки.
+ * 2. Прокачанный Баннер Аудита Корзины (.lqs-cart-audit-banner):
+ *    - Автоматически сверяет все позиции корзины с ценами конкурентов и гостевыми ценами (без куки).
+ *    - Сразу на баннере показывает, сколько позиций дешевле у конкурентов и общую сумму переплаты в рублях.
+ *    - Выпадающий список по кнопке «🏪 Цены и ссылки в других магазинах ▾» с найденными ценами и прямыми ссылками
+ *      на Перекрёсток, ВкусВилл, Ozon, Яндекс Маркет, Ленту и Купер по каждому товару корзины.
+ *    - Быстрый переключатель аккаунтов Лавки («👤 Сменить аккаунт ▾») прямо из корзины в 1 клик.
+ * 3. Исправленный захват и авто-сборка корзины (8 из 8 позиций и точный подсчёт штук):
+ *    - Точное отделение строк корзины от каруселей рекомендаций, корректное чтение количества из степпера «- N +».
+ * 4. Помощник авто-входа на passport.yandex.ru / id.yandex.ru для сохранённых логинов и паролей.
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.4.0';
+  const VERSION = '2.5.0';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
@@ -67,6 +67,14 @@
   let lastObservedUrl = window.location.href;
   let lastCatalogHarvestTs = 0;
 
+  // Состояние аудита корзины и открытых выпадающих списков в корзине
+  let lastCartAuditSignature = '';
+  let lastCartCompetitorAudit = null;
+  let isCartAuditLoading = false;
+  let isCartCompDropdownOpen = false;
+  let isCartAccDropdownOpen = false;
+  let cachedAccountsVault = null;
+
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
     return String(str)
@@ -95,9 +103,6 @@
     return { cls: 'verdict-ok', text: '🤖 ИИ-вердикт готов', shortCatalog: '🤖' };
   }
 
-  /**
-   * Определяет имя/логин текущего аккаунта Яндекса на странице Лавки (или берёт имя из настроек)
-   */
   function detectCurrentAccountLabel() {
     try {
       const avatarEl =
@@ -114,6 +119,104 @@
       // ignore
     }
     return cachedSettings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
+  }
+
+  // ==========================================================================
+  // ПОМОЩНИК АВТО-ВХОДА НА PASSPORT.YANDEX.RU / ID.YANDEX.RU
+  // ==========================================================================
+  function initYandexPassportHelperIfNeeded() {
+    const host = window.location.hostname.toLowerCase();
+    if (!host.includes('passport.yandex.ru') && !host.includes('id.yandex.ru')) return false;
+
+    if (document.querySelector('.lqs-passport-helper')) return true;
+
+    chrome.runtime.sendMessage({ type: 'LQS_GET_ACCOUNTS_VAULT' }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !Array.isArray(resp.accounts)) return;
+      const box = document.createElement('div');
+      box.className = 'lqs-passport-helper';
+
+      const accWithCreds = resp.accounts;
+      box.innerHTML = `
+        <div style="font-weight:800;font-size:12.5px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+          <span>🔐 Lavka Quality Shield: Быстрый вход</span>
+          <button type="button" id="lqs-pass-close" style="border:none;background:transparent;cursor:pointer;font-size:14px;">×</button>
+        </div>
+        <div style="font-size:11px;color:#57534e;margin-bottom:6px;">
+          Выбери профиль для авто-ввода логина и пароля (или сохрани введённые данные в сейф):
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;">
+          ${accWithCreds
+            .map(
+              (a) => `
+            <div style="display:flex;gap:4px;align-items:center;">
+              <button type="button" class="lqs-pass-fill-btn" data-acc-id="${escapeHtml(a.accountId)}" style="flex:1;text-align:left;padding:5px 8px;border-radius:7px;border:1px solid #d6d3cd;background:#f5f4f2;cursor:pointer;font-size:11px;font-weight:600;">
+                🔑 ${escapeHtml(a.label)} ${a.login ? `(${escapeHtml(a.login)})` : '(без пароля)'}
+              </button>
+            </div>
+          `
+            )
+            .join('')}
+        </div>
+        <button type="button" id="lqs-pass-save-current" style="width:100%;padding:6px 8px;border-radius:7px;border:1px solid #ebd000;background:#fce000;font-weight:700;font-size:11px;cursor:pointer;">
+          💾 Запомнить введённый логин/пароль в активный профиль
+        </button>
+        <div id="lqs-pass-msg" style="font-size:10.5px;color:#15803d;margin-top:4px;"></div>
+      `;
+
+      document.body.appendChild(box);
+
+      box.querySelector('#lqs-pass-close').onclick = () => box.remove();
+
+      box.querySelectorAll('.lqs-pass-fill-btn').forEach((btn) => {
+        btn.onclick = () => {
+          const accId = btn.getAttribute('data-acc-id');
+          chrome.runtime.sendMessage({ type: 'LQS_AUTOFILL_YANDEX_LOGIN', accountId: accId }, (r) => {
+            const msgEl = box.querySelector('#lqs-pass-msg');
+            if (r && r.ok) {
+              msgEl.textContent = `✅ Введены данные для «${r.label}»`;
+            } else {
+              msgEl.textContent = `⚠️ ${r?.error || 'Заполни логин/пароль для этого профиля в расширении'}`;
+            }
+          });
+        };
+      });
+
+      box.querySelector('#lqs-pass-save-current').onclick = () => {
+        const loginInp =
+          document.querySelector('input[name="login"]') ||
+          document.querySelector('input#passp-field-login') ||
+          document.querySelector('input[type="text"], input[type="tel"], input[type="email"]');
+        const passInp =
+          document.querySelector('input[name="passwd"]') ||
+          document.querySelector('input#passp-field-passwd') ||
+          document.querySelector('input[type="password"]');
+
+        const loginVal = loginInp ? loginInp.value.trim() : '';
+        const passVal = passInp ? passInp.value : '';
+
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
+            payload: {
+              label: resp.activeAccountLabel || 'Аккаунт #1 (Основной)',
+              login: loginVal || undefined,
+              password: passVal || undefined,
+              captureCookies: true
+            }
+          },
+          () => {
+            const msgEl = box.querySelector('#lqs-pass-msg');
+            msgEl.textContent = `✅ Сохранено для «${resp.activeAccountLabel}»!`;
+          }
+        );
+      };
+    });
+
+    return true;
+  }
+
+  if (initYandexPassportHelperIfNeeded()) {
+    return;
   }
 
   // ==========================================================================
@@ -267,7 +370,7 @@
         url: window.location.href,
         pathname: window.location.pathname,
         slug: slug || null,
-        pageType: slug ? 'PRODUCT_PAGE' : 'CATALOG_OR_HOME',
+        pageType: slug ? 'PRODUCT_PAGE' : (window.location.pathname.includes('/cart') ? 'CART_PAGE' : 'CATALOG_OR_HOME'),
         selectors: {
           mainPage: Boolean(mainPage),
           infoBlock: Boolean(infoBlock),
@@ -309,7 +412,7 @@
         `3. **[CALCULATOR] Расчёт цены/кг, белка и КБЖУ**: \`${m.calculator.status}\` (${m.calculator.lastRun || '—'}) — ${m.calculator.summary}`,
         `4. **[WIDGET] Панель товара и Анти-Шулер Радар**: \`${m.widget.status}\` (${m.widget.lastRun || '—'}) — ${m.widget.summary}`,
         `5. **[CATALOG] Разметка карточек и сбор цен**: \`${m.catalog.status}\` (${m.catalog.lastRun || '—'}) — ${m.catalog.summary}`,
-        `6. **[CART_GUARD] Защита корзины и фиксатор цен**: \`${m.cartGuard.status}\` (${m.cartGuard.lastRun || '—'}) — ${m.cartGuard.summary}`,
+        `6. **[CART_GUARD] Аудитор корзины, конкуренты и свитчер**: \`${m.cartGuard.status}\` (${m.cartGuard.lastRun || '—'}) — ${m.cartGuard.summary}`,
         `7. **[STORAGE] Хранилище chrome.storage.local**: \`${m.storage.status}\` (${m.storage.lastRun || '—'}) — ${m.storage.summary}`,
         `8. **[AI_REVIEWER] Zero-Click ИИ Автопилот**: \`${m.aiReviewer.status}\` (${m.aiReviewer.lastRun || '—'}) — ${m.aiReviewer.summary}`
       ];
@@ -390,13 +493,12 @@
     const target = e.target;
     if (!target || !target.closest) return;
 
-    const lqsBtn = target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip');
+    const lqsBtn = target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip, .lqs-cart-audit-banner button');
     if (lqsBtn) {
       LQS_RECORDER.counters.clicksTotal += 1;
       return;
     }
 
-    // Если кликнули по кнопке добавления товара в корзину на странице товара или в каталоге
     const snippetBtn = target.closest('button[data-testid="snippet-control"], button[aria-label*="В корзину"], button[aria-label*="Увеличить"]');
     if (snippetBtn) {
       setTimeout(() => {
@@ -438,7 +540,13 @@
       }
       if (msg.type === 'LQS_EXTRACT_CURRENT_CART_FROM_PAGE') {
         const snap = extractCartItemsFromDOM();
-        sendResponse({ ok: true, accountId: detectCurrentAccountLabel(), items: snap.items, totalPrice: snap.totalPrice });
+        sendResponse({
+          ok: true,
+          accountId: detectCurrentAccountLabel(),
+          items: snap.items,
+          totalUnits: snap.totalUnits,
+          totalPrice: snap.totalPrice
+        });
         return true;
       }
       return false;
@@ -594,7 +702,7 @@
   }
 
   // ==========================================================================
-  // ФИКСАТОР ЦЕН КОРЗИНЫ (CART PRICE LOCK) И СЛЕПОК КОРЗИНЫ
+  // ФИКСАТОР ЦЕН КОРЗИНЫ (CART PRICE LOCK) И ТОЧНЫЙ ЗАХВАТ ВСЕХ ЕДИНИЦ КОРЗИНЫ
   // ==========================================================================
   function lockProductPriceOnCartAdd(btnEl) {
     try {
@@ -638,75 +746,198 @@
     }
   }
 
+  /**
+   * Находит точный DOM-контейнер одной строки товара в корзине (не поднимаясь до общего списка!)
+   */
+  function findCartRowContainerForLink(linkEl) {
+    let curr = linkEl;
+    let bestRow = linkEl.parentElement;
+
+    for (let depth = 0; depth < 7 && curr && curr.parentElement; depth++) {
+      const parent = curr.parentElement;
+      if (parent.tagName === 'MAIN' || parent.tagName === 'BODY') break;
+      if (parent.classList && parent.classList.contains('lqs-cart-audit-banner')) return null;
+
+      // Проверяем, сколько РАЗНЫХ товаров (/good/<slug>) лежит внутри parent
+      const linksInside = parent.querySelectorAll('a[href*="/good/"]');
+      const slugsInside = new Set();
+      linksInside.forEach((a) => {
+        const s = extractSlugFromUrl(a.getAttribute('href'));
+        if (s) slugsInside.add(s);
+      });
+
+      if (slugsInside.size > 1) {
+        // Родитель уже объединяет несколько разных товаров корзины — останавливаемся на curr!
+        return curr;
+      }
+
+      bestRow = parent;
+      curr = parent;
+    }
+
+    return bestRow;
+  }
+
+  /**
+   * Точно извлекает все позиции и количество штук (qty) из корзины Яндекс Лавки
+   */
   function extractCartItemsFromDOM() {
     const items = [];
     const seen = new Set();
-    // Ищем товары в корзине (как на странице /cart, так и в боковом/модальном дровере корзины)
-    const cartHolders = document.querySelectorAll(
-      '[data-testid^="cart_item_"], [data-testid="cart-item"], div[class*="CartItem"], li[class*="CartItem"], a[href*="/good/"]'
-    );
 
-    cartHolders.forEach((node) => {
-      const container = node.closest('[data-testid^="cart_item_"], [data-testid="cart-item"], li, div[class*="Item"]') || node.parentElement;
-      if (!container) return;
-      // Пропускаем обычные карточки каталога, если они не внутри корзины
-      if (container.getAttribute('data-testid') === 'product-card') return;
+    const allGoodLinks = document.querySelectorAll('a[href*="/good/"]');
+
+    allGoodLinks.forEach((linkEl) => {
+      // Исключаем ссылки внутри нашего собственного баннера и панели
+      if (linkEl.closest('.lqs-cart-audit-banner, .lqs-product-panel')) return;
+      // Исключаем карточки из каруселей рекомендаций ("С этим покупают", "Добавьте к заказу")
+      if (linkEl.closest('div[data-testid="product-card"]')) return;
+
       const inCartRegion =
         window.location.pathname.includes('/cart') ||
-        Boolean(container.closest('[data-testid*="cart"], aside, [role="dialog"]'));
+        Boolean(linkEl.closest('[data-testid*="cart"], aside, [role="dialog"]'));
       if (!inCartRegion) return;
 
-      const linkEl = container.querySelector('a[href*="/good/"]') || (node.tagName === 'A' ? node : null);
-      if (!linkEl) return;
       const slug = extractSlugFromUrl(linkEl.getAttribute('href'));
       if (!slug || seen.has(slug)) return;
 
-      const textAll = (container.innerText || '').replace(/\s+/g, ' ').trim();
+      const container = findCartRowContainerForLink(linkEl);
+      if (!container) return;
+
+      // Если внутри контейнера нет ни цены, ни кнопок степпера (- / +), это не строка корзины
+      const textAll = (container.innerText || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
       const priceMatches = Array.from(textAll.matchAll(/(\d[\d\s]*)\s*₽/g)).map((m) =>
         parseFloat(m[1].replace(/\s/g, ''))
       );
       if (priceMatches.length === 0) return;
 
       seen.add(slug);
-      const imgEl = container.querySelector('img');
-      const title =
-        (imgEl && imgEl.getAttribute('alt')) ||
-        (linkEl.textContent || '').trim() ||
-        slug;
 
+      // Название товара: берём из ссылки с текстом или alt картинки
+      let title = '';
+      const rowLinks = container.querySelectorAll('a[href*="/good/"]');
+      rowLinks.forEach((a) => {
+        const t = (a.textContent || '').trim();
+        if (t && t.length > title.length) title = t;
+      });
+      if (!title) {
+        const imgEl = container.querySelector('img[alt]');
+        title = (imgEl && imgEl.getAttribute('alt')) || '';
+      }
+      if (!title) {
+        // Первая строка текста контейнера до цены
+        const lines = (container.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
+        title = lines[0] || slug;
+      }
+
+      // Точное чтение количества (qty) из степпера "- N +"
       let qty = 1;
-      const qtyMatch = textAll.match(/(?:^|\s)(\d{1,2})\s*шт/i);
-      if (qtyMatch) {
-        qty = parseInt(qtyMatch[1], 10) || 1;
-      } else {
-        // Проверяем счётчик между кнопками - и +
-        const spans = container.querySelectorAll('span, div');
-        for (const sp of spans) {
-          const t = (sp.textContent || '').trim();
-          if (/^\d{1,2}$/.test(t)) {
-            const v = parseInt(t, 10);
-            if (v >= 1 && v <= 30) {
-              qty = v;
-              break;
+      let foundStepperQty = false;
+
+      // Ищем блок с двумя кнопками (- и +), между которыми написано число
+      const buttonsInRow = Array.from(container.querySelectorAll('button'));
+      if (buttonsInRow.length >= 2) {
+        for (let i = 0; i < buttonsInRow.length - 1; i++) {
+          const commonParent = buttonsInRow[i].parentElement;
+          if (commonParent && commonParent.contains(buttonsInRow[i + 1])) {
+            const leaves = commonParent.querySelectorAll('span, div, input');
+            for (const leaf of leaves) {
+              const valStr = (leaf.tagName === 'INPUT' ? leaf.value : leaf.textContent || '').trim();
+              if (/^\d{1,2}$/.test(valStr)) {
+                const parsed = parseInt(valStr, 10);
+                if (parsed >= 1 && parsed <= 50) {
+                  qty = parsed;
+                  foundStepperQty = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (foundStepperQty) break;
+        }
+      }
+
+      if (!foundStepperQty) {
+        const qtyMatch = textAll.match(/(?:^|\s)(\d{1,2})\s*шт(?![а-яa-z])/i);
+        if (qtyMatch) {
+          qty = parseInt(qtyMatch[1], 10) || 1;
+        } else {
+          const allSpans = container.querySelectorAll('span, div');
+          for (const sp of allSpans) {
+            if (sp.children.length > 0) continue;
+            const t = (sp.textContent || '').trim();
+            if (/^\d{1,2}$/.test(t)) {
+              const v = parseInt(t, 10);
+              if (v >= 1 && v <= 30) {
+                qty = v;
+                break;
+              }
             }
           }
         }
       }
 
-      const itemTotalOrUnit = priceMatches[0];
-      const unitPrice = qty > 1 && priceMatches.length === 1 ? Math.round(itemTotalOrUnit / qty) : itemTotalOrUnit;
+      // Первая цена в строке Лавки — актуальная цена (вторая, если есть — зачёркнутая старая цена)
+      const firstPrice = priceMatches[0];
+      const oldPrice = priceMatches.length > 1 && priceMatches[1] > firstPrice ? priceMatches[1] : null;
+
+      // Вес/фасовка (например "· 175 г")
+      const weightMatch = textAll.match(/(\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт)(?![а-яa-z]))/i);
+      const amount = weightMatch ? weightMatch[1].trim() : '';
 
       items.push({
         slug,
-        title: title.slice(0, 90),
+        title: title.slice(0, 95),
         qty,
-        price: unitPrice,
-        amount: ''
+        price: firstPrice,
+        oldPrice,
+        amount
       });
     });
 
     const totalPrice = Math.round(items.reduce((acc, i) => acc + i.price * i.qty, 0));
-    return { items, totalPrice };
+    const totalUnits = items.reduce((acc, i) => acc + (Number(i.qty) || 1), 0);
+    return { items, totalUnits, totalPrice };
+  }
+
+  function triggerCartCompetitorAudit(snap, forceNetwork = false) {
+    if (!snap || !Array.isArray(snap.items) || snap.items.length === 0) return;
+    const sig = snap.items.map((i) => `${i.slug}:${i.qty}:${i.price}`).join('|') + `|${detectCurrentAccountLabel()}`;
+    if (!forceNetwork && sig === lastCartAuditSignature && (lastCartCompetitorAudit || isCartAuditLoading)) {
+      return;
+    }
+
+    lastCartAuditSignature = sig;
+    isCartAuditLoading = true;
+    renderCartAuditBanner(snap);
+
+    chrome.runtime.sendMessage(
+      {
+        type: 'LQS_AUDIT_CART_COMPETITORS',
+        accountId: detectCurrentAccountLabel(),
+        items: snap.items,
+        forceNetworkSearch: Boolean(forceNetwork)
+      },
+      (resp) => {
+        isCartAuditLoading = false;
+        if (!chrome.runtime.lastError && resp && resp.ok) {
+          lastCartCompetitorAudit = resp;
+          LQS_RECORDER.updateModule(
+            'cartGuard',
+            'OK',
+            `Аудит корзины: ${snap.items.length} поз. (${snap.totalUnits} шт.) = ${snap.totalPrice} ₽, переплата конкурентам: +${resp.totalOverpayVsCompetitors} ₽`
+          );
+        }
+        renderCartAuditBanner(snap);
+      }
+    );
+
+    chrome.runtime.sendMessage({ type: 'LQS_GET_ACCOUNTS_VAULT' }, (accResp) => {
+      if (!chrome.runtime.lastError && accResp && accResp.ok) {
+        cachedAccountsVault = accResp;
+        renderCartAuditBanner(snap);
+      }
+    });
   }
 
   function scanAndSnapshotCurrentCartDOM() {
@@ -719,6 +950,7 @@
         totalPrice: snap.totalPrice
       });
       renderCartAuditBanner(snap);
+      triggerCartCompetitorAudit(snap, false);
     }
   }
 
@@ -730,8 +962,6 @@
     if (!cartContainer) return;
 
     const tampered = [];
-    const cheaperOtherAcc = [];
-
     snap.items.forEach((it) => {
       const lock = cartLocksMemory[it.slug];
       if (lock && lock.lockedPrice && it.price > lock.lockedPrice) {
@@ -740,15 +970,6 @@
           lockedPrice: lock.lockedPrice,
           cartPrice: it.price,
           diff: it.price - lock.lockedPrice
-        });
-      }
-      const pEntry = priceSummaryBySlug.get(it.slug) || (priceDbMemory && priceDbMemory[it.slug]);
-      if (pEntry && pEntry.minPrice && it.price > pEntry.minPrice + 3) {
-        cheaperOtherAcc.push({
-          title: it.title,
-          current: it.price,
-          minPrice: pEntry.minPrice,
-          diff: (it.price - pEntry.minPrice) * it.qty
         });
       }
     });
@@ -760,29 +981,269 @@
       cartContainer.prepend(banner);
     }
 
-    const hasAlert = tampered.length > 0;
-    const potentialSave = cheaperOtherAcc.reduce((s, x) => s + x.diff, 0);
+    const totalUnits = snap.totalUnits || snap.items.reduce((s, i) => s + (Number(i.qty) || 1), 0);
+    const audit = lastCartCompetitorAudit;
+    const overpayComp = audit ? audit.totalOverpayVsCompetitors : 0;
+    const overpayAlt = audit ? audit.totalOverpayVsAltAccount : 0;
+    const cheaperCompCount = audit ? audit.cheaperAtCompetitorsCount : 0;
+
+    // Формируем сводные бейджи переплаты прямо на главном баннере корзины
+    let compPillHtml = '';
+    if (isCartAuditLoading && !audit) {
+      compPillHtml = `<span class="lqs-cart-pill">⏳ Сверяю цены корзины с другими магазинами и без куки...</span>`;
+    } else if (overpayComp > 0) {
+      compPillHtml = `<span class="lqs-cart-pill overpay-bad">🏪 У конкурентов дешевле (${cheaperCompCount} поз.): переплата +${overpayComp} ₽!</span>`;
+    } else if (audit) {
+      compPillHtml = `<span class="lqs-cart-pill overpay-good">🏪 Цены конкурентов проверены (${snap.items.length} поз.)</span>`;
+    }
+
+    let altAccPillHtml = '';
+    if (overpayAlt > 0) {
+      altAccPillHtml = `<span class="lqs-cart-pill overpay-warn">🕵️ Без куки / на др. акке дешевле на -${overpayAlt} ₽!</span>`;
+    }
+
+    // Выпадающий список 1: Цены конкурентов, переплата и прямые ссылки на другие магазины по каждому товару корзины
+    const auditItems = (audit && Array.isArray(audit.items) && audit.items.length > 0)
+      ? audit.items
+      : snap.items.map((i) => ({
+          ...i,
+          rowTotal: Math.round(i.price * i.qty),
+          competitorOffers: [],
+          storeSearchLinks: [
+            { store: 'Перекрёсток', url: `https://www.perekrestok.ru/cat/search?search=${encodeURIComponent(i.title)}` },
+            { store: 'ВкусВилл', url: `https://vkusvill.ru/search/?q=${encodeURIComponent(i.title)}` },
+            { store: 'Ozon', url: `https://www.ozon.ru/search/?text=${encodeURIComponent(i.title)}` },
+            { store: 'Я.Маркет', url: `https://market.yandex.ru/search?text=${encodeURIComponent(i.title)}` },
+            { store: 'Лента', url: `https://lenta.com/search/?searchText=${encodeURIComponent(i.title)}` }
+          ]
+        }));
+
+    const compDropdownRowsHtml = auditItems
+      .map((it) => {
+        const compBadge =
+          it.overpayVsCompetitorTotal > 0
+            ? `<span class="lqs-cart-pill overpay-bad">Переплата +${it.overpayVsCompetitorTotal} ₽ (в сетях от ~${it.competitorMinPrice} ₽/шт)</span>`
+            : it.competitorMinPrice
+            ? `<span class="lqs-cart-pill overpay-good">В сетях от ~${it.competitorMinPrice} ₽/шт (в Лавке ок)</span>`
+            : `<span class="lqs-cart-pill">Ссылки на магазины ниже 👇</span>`;
+
+        const altBadge =
+          it.overpayVsAltTotal > 0
+            ? `<span class="lqs-cart-pill overpay-warn">🕵️ ${escapeHtml(it.bestAltLabel || 'Без куки')}: ${it.bestAltPrice} ₽/шт (переплата +${it.overpayVsAltTotal} ₽)</span>`
+            : '';
+
+        const foundOffersHtml = Array.isArray(it.competitorOffers)
+          ? it.competitorOffers
+              .filter((o) => o && o.url)
+              .map((o) => {
+                const isCheaper = o.price && o.price < it.price - 2;
+                const priceTag = o.price ? `: ~${o.price} ₽` : '';
+                return `<a href="${escapeHtml(o.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link ${isCheaper ? 'is-cheaper' : ''}" title="${escapeHtml(o.title || o.store)}">🏪 ${escapeHtml(o.store)}${priceTag} ↗</a>`;
+              })
+              .join('')
+          : '';
+
+        const searchLinksHtml = Array.isArray(it.storeSearchLinks)
+          ? it.storeSearchLinks
+              .map(
+                (s) =>
+                  `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" title="Найти «${escapeHtml(it.title)}» в магазине ${escapeHtml(s.store)}">🔍 ${escapeHtml(s.store)} ↗</a>`
+              )
+              .join('')
+          : '';
+
+        return `
+          <div class="lqs-cart-comp-item">
+            <div class="lqs-cart-comp-top">
+              <div>
+                <a href="https://lavka.yandex.ru/good/${encodeURIComponent(it.slug)}" target="_blank" rel="noopener noreferrer" class="lqs-cart-comp-title">
+                  ${escapeHtml(it.title)}
+                </a>
+                <span style="color:#475569;font-size:12px;margin-left:6px;">
+                  <b>${it.qty} шт. × ${it.price} ₽ = ${it.rowTotal} ₽</b>
+                </span>
+              </div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;">
+                ${compBadge}
+                ${altBadge}
+              </div>
+            </div>
+            <div class="lqs-cart-comp-links">
+              ${foundOffersHtml}
+              ${searchLinksHtml}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    // Выпадающий список 2: Быстрое переключение аккаунтов Лавки (куки-сессии + клонирование корзины)
+    const accountsList = cachedAccountsVault && Array.isArray(cachedAccountsVault.accounts)
+      ? cachedAccountsVault.accounts
+      : [];
+    const activeAccLabel = detectCurrentAccountLabel();
+
+    const accDropdownRowsHtml = accountsList
+      .map((a) => {
+        const isCurrent = a.label === activeAccLabel;
+        const cookieTag = a.cookieCount > 0 ? `🍪 ${a.cookieCount} куки` : '⚪ куки не сохранены';
+        const loginTag = a.login || a.yandexLogin ? `• 🔑 ${escapeHtml(a.login || a.yandexLogin)}` : '';
+        return `
+          <div class="lqs-cart-comp-item" style="flex-direction:row;align-items:center;justify-content:space-between;flex-wrap:wrap;">
+            <div>
+              <b>${isCurrent ? '🟢 ' : '👤 '}${escapeHtml(a.label)}</b>
+              <span style="font-size:11.5px;color:#475569;margin-left:6px;">(${cookieTag} ${loginTag})</span>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="lqs-mini-btn lqs-cart-switch-acc-btn" data-acc-id="${escapeHtml(a.accountId)}" data-build="false">
+                ⚡ Переключить вход
+              </button>
+              <button type="button" class="lqs-mini-btn btn-accent lqs-cart-switch-acc-btn" data-acc-id="${escapeHtml(a.accountId)}" data-build="true">
+                🚀 Переключить и собрать эти ${totalUnits} шт.
+              </button>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
 
     banner.innerHTML = `
-      <div class="lqs-cart-audit-head ${hasAlert ? 'is-danger' : 'is-safe'}">
+      <div class="lqs-cart-audit-head">
         <div>
-          <strong>🛡️ Анти-Шулер Аудит Корзины (${escapeHtml(detectCurrentAccountLabel())}):</strong>
-          <span>По калькулятору ${snap.items.length} поз. = <b>${snap.totalPrice} ₽</b></span>
-          ${potentialSave > 0 ? `<span style="color:#b45309;margin-left:6px;">• На другом аккаунте / по базе дешевле на <b>-${potentialSave} ₽</b>!</span>` : ''}
+          <strong>🛡️ Анти-Шулер Аудит Корзины (${escapeHtml(activeAccLabel)}):</strong>
+          <span>По калькулятору <b>${snap.items.length} поз. (${totalUnits} шт.) = ${snap.totalPrice} ₽</b></span>
         </div>
-        <div style="display:flex;gap:6px;">
-          <button type="button" class="lqs-mini-btn" id="lqs-cart-snapshot-btn">🔄 Слепок для другого акка</button>
-          <button type="button" class="lqs-mini-btn" id="lqs-cart-proof-btn">📸 Пруф для поддержки</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" class="lqs-mini-btn btn-accent" id="lqs-cart-comp-toggle-btn">
+            🏪 Магазины и переплата ${overpayComp > 0 ? `(+${overpayComp} ₽)` : ''} ${isCartCompDropdownOpen ? '▴' : '▾'}
+          </button>
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-acc-toggle-btn">
+            👤 Сменить аккаунт ${isCartAccDropdownOpen ? '▴' : '▾'}
+          </button>
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-snapshot-btn">
+            🔄 Слепок (${totalUnits} шт.)
+          </button>
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-proof-btn">
+            📸 Пруф для поддержки
+          </button>
         </div>
       </div>
+
+      <div class="lqs-cart-summary-row">
+        ${compPillHtml}
+        ${altAccPillHtml}
+      </div>
+
       ${
         tampered.length > 0
-          ? `<div class="lqs-cart-tamper-warn">🚨 <b>ВНИМАНИЕ! Лавка тихо подняла цены в корзине:</b><br>${tampered
+          ? `<div class="lqs-cart-tamper-warn">🚨 <b>ВНИМАНИЕ! Лавка тихо подняла цены в корзине относительно витрины:</b><br>${tampered
               .map((t) => `• ${escapeHtml(t.title)}: было <b>${t.lockedPrice} ₽</b> -> стало <b>${t.cartPrice} ₽ (+${t.diff} ₽)</b>`)
               .join('<br>')}</div>`
           : ''
       }
+
+      <!-- ВЫПАДАЮЩИЙ СПИСОК 1: ЦЕНЫ И ССЫЛКИ НА ДРУГИЕ МАГАЗИНЫ ПО КАЖДОМУ ТОВАРУ -->
+      <div class="lqs-cart-dropdown ${isCartCompDropdownOpen ? 'open' : ''}" id="lqs-cart-comp-dropdown">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+          <span style="font-weight:700;font-size:12px;color:#334155;">
+            🏪 Сравнение товаров корзины с ценами в других магазинах и без куки (кликни по магазину для перехода):
+          </span>
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-rescan-comp-btn">
+            🔄 Обновить цены конкурентов
+          </button>
+        </div>
+        ${compDropdownRowsHtml}
+      </div>
+
+      <!-- ВЫПАДАЮЩИЙ СПИСОК 2: БЫСТРОЕ ПЕРЕКЛЮЧЕНИЕ АККАУНТОВ И ПЕРЕНОС КОРЗИНЫ -->
+      <div class="lqs-cart-dropdown ${isCartAccDropdownOpen ? 'open' : ''}" id="lqs-cart-acc-dropdown">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
+          <span style="font-weight:700;font-size:12px;color:#334155;">
+            🔐 Быстрое переключение аккаунтов Яндекс Лавки (сессия куки сохраняется автоматически):
+          </span>
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-save-cur-cookies-btn">
+            💾 Запомнить куки текущего входа (${escapeHtml(activeAccLabel)})
+          </button>
+        </div>
+        ${accDropdownRowsHtml || '<div style="font-size:12px;color:#64748b;">Открой вкладку «💰 Цены и Корзина» в окне расширения, чтобы настроить профили.</div>'}
+      </div>
     `;
+
+    const compToggleBtn = banner.querySelector('#lqs-cart-comp-toggle-btn');
+    if (compToggleBtn) {
+      compToggleBtn.onclick = () => {
+        isCartCompDropdownOpen = !isCartCompDropdownOpen;
+        if (isCartCompDropdownOpen) isCartAccDropdownOpen = false;
+        renderCartAuditBanner(snap);
+      };
+    }
+
+    const accToggleBtn = banner.querySelector('#lqs-cart-acc-toggle-btn');
+    if (accToggleBtn) {
+      accToggleBtn.onclick = () => {
+        isCartAccDropdownOpen = !isCartAccDropdownOpen;
+        if (isCartAccDropdownOpen) isCartCompDropdownOpen = false;
+        chrome.runtime.sendMessage({ type: 'LQS_GET_ACCOUNTS_VAULT' }, (accResp) => {
+          if (!chrome.runtime.lastError && accResp && accResp.ok) {
+            cachedAccountsVault = accResp;
+          }
+          renderCartAuditBanner(snap);
+        });
+      };
+    }
+
+    const rescanBtn = banner.querySelector('#lqs-cart-rescan-comp-btn');
+    if (rescanBtn) {
+      rescanBtn.onclick = () => {
+        rescanBtn.textContent = '⏳ Ищу цены в сетях...';
+        triggerCartCompetitorAudit(snap, true);
+      };
+    }
+
+    const saveCookiesBtn = banner.querySelector('#lqs-cart-save-cur-cookies-btn');
+    if (saveCookiesBtn) {
+      saveCookiesBtn.onclick = () => {
+        saveCookiesBtn.textContent = '⏳ Сохраняю куки...';
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
+            payload: { label: activeAccLabel, captureCookies: true }
+          },
+          (r) => {
+            if (r && r.vaultStatus) cachedAccountsVault = r.vaultStatus;
+            saveCookiesBtn.textContent = '✅ Куки сохранены в сейф!';
+            setTimeout(() => renderCartAuditBanner(snap), 1200);
+          }
+        );
+      };
+    }
+
+    banner.querySelectorAll('.lqs-cart-switch-acc-btn').forEach((btn) => {
+      btn.onclick = () => {
+        const targetAccId = btn.getAttribute('data-acc-id');
+        const shouldBuild = btn.getAttribute('data-build') === 'true';
+        btn.textContent = shouldBuild ? '⏳ Переключаю и собираю...' : '⏳ Переключаю аккаунт...';
+
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_SAVE_CART_SNAPSHOT',
+            accountId: activeAccLabel,
+            items: snap.items,
+            totalPrice: snap.totalPrice
+          },
+          () => {
+            chrome.runtime.sendMessage({
+              type: 'LQS_SWITCH_LAVKA_ACCOUNT',
+              payload: {
+                accountId: targetAccId,
+                autoBackupCurrent: true,
+                buildCartAfterSwitch: shouldBuild
+              }
+            });
+          }
+        );
+      };
+    });
 
     const snapBtn = banner.querySelector('#lqs-cart-snapshot-btn');
     if (snapBtn) {
@@ -790,14 +1251,14 @@
         chrome.runtime.sendMessage(
           {
             type: 'LQS_SAVE_CART_SNAPSHOT',
-            accountId: detectCurrentAccountLabel(),
+            accountId: activeAccLabel,
             items: snap.items,
             totalPrice: snap.totalPrice
           },
           () => {
-            snapBtn.textContent = '✅ Слепок сохранён!';
+            snapBtn.textContent = `✅ Слепок (${snap.items.length} поз. / ${totalUnits} шт.) сохранён!`;
             setTimeout(() => {
-              snapBtn.textContent = '🔄 Слепок для другого акка';
+              snapBtn.textContent = `🔄 Слепок (${totalUnits} шт.)`;
             }, 2000);
           }
         );
@@ -810,17 +1271,21 @@
         const lines = [
           `# ДОКАЗАТЕЛЬСТВО РАСЧЁТА КОРЗИНЫ ЯНДЕКС ЛАВКИ (LAVKA QUALITY SHIELD v${VERSION})`,
           `Дата и время: ${new Date().toLocaleString('ru-RU')}`,
-          `Аккаунт: ${detectCurrentAccountLabel()}`,
+          `Аккаунт: ${activeAccLabel}`,
           `URL: ${window.location.href}`,
           ``,
-          `## Список позиций и пересчёт по калькулятору:`,
-          ...snap.items.map((it, idx) => {
+          `## Список позиций (${snap.items.length} наименований, всего ${totalUnits} шт.) и пересчёт по калькулятору:`,
+          ...auditItems.map((it, idx) => {
             const lock = cartLocksMemory[it.slug];
-            const lockNote = lock ? ` (при нажатии "В корзину" цена была: ${lock.lockedPrice} ₽ в ${lock.lockedAt})` : '';
-            return `${idx + 1}. ${it.title} [${it.slug}] — ${it.qty} шт. × ${it.price} ₽ = ${it.qty * it.price} ₽${lockNote}`;
+            const lockNote = lock ? ` | Обещанная цена на витрине: ${lock.lockedPrice} ₽` : '';
+            const compNote = it.competitorMinPrice ? ` | В других сетях от ~${it.competitorMinPrice} ₽ (переплата +${it.overpayVsCompetitorTotal || 0} ₽)` : '';
+            const guestNote = it.guestPrice ? ` | Цена без куки (Гость): ${it.guestPrice} ₽` : '';
+            return `${idx + 1}. ${it.title} [${it.slug}] — ${it.qty} шт. × ${it.price} ₽ = ${it.qty * it.price} ₽${lockNote}${guestNote}${compNote}`;
           }),
           ``,
-          `ИТОГО ПО КАЛЬКУЛЯТОРУ: ${snap.totalPrice} ₽`
+          `ИТОГО ПО КАЛЬКУЛЯТОРУ: ${snap.totalPrice} ₽ (всего единиц товара: ${totalUnits} шт.)`,
+          `СУММАРНАЯ ПЕРЕПЛАТА ОТНОСИТЕЛЬНО КОНКУРЕНТОВ: +${overpayComp} ₽`,
+          `СУММАРНАЯ ПЕРЕПЛАТА ОТНОСИТЕЛЬНО ГОСТЯ / ДРУГОГО АККАУНТА: +${overpayAlt} ₽`
         ];
         const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
@@ -1130,9 +1595,6 @@
     return result;
   }
 
-  /**
-   * Вычисляет компактный Анти-Шулер бейдж цены (сравнение с без куки, другими аккаунтами, историей и конкурентами)
-   */
   function buildPriceShieldAlertPill(slug, currentPrice) {
     if (!slug || !currentPrice) return '';
     const pIntel = priceSummaryBySlug.get(slug) || (priceDbMemory && priceDbMemory[slug]);
@@ -1140,7 +1602,6 @@
 
     const curAcc = detectCurrentAccountLabel();
 
-    // 1. Проверяем «Штраф за лояльность» (если без куки или на другом твоём аккаунте цена ниже!)
     let cheapestAltPrice = null;
     let cheapestAltLabel = '';
 
@@ -1165,7 +1626,6 @@
       return `<span class="lqs-metric-pill verdict-bad" title="Штраф за лояльность! На профиле «${escapeHtml(cheapestAltLabel)}» этот же товар стоит ${cheapestAltPrice} ₽">🕵️ Тебе +${diff} ₽ (${escapeHtml(cheapestAltLabel)}: ${cheapestAltPrice} ₽)</span>`;
     }
 
-    // 2. Проверяем цены у конкурентов (если в других магазинах заметно дешевле)
     if (pIntel.competitorMinPrice && pIntel.competitorMinPrice < currentPrice - 5) {
       const diffPct = Math.round(((currentPrice - pIntel.competitorMinPrice) / pIntel.competitorMinPrice) * 100);
       if (diffPct >= 8) {
@@ -1173,7 +1633,6 @@
       }
     }
 
-    // 3. Проверяем историю цен в твоей базе (завышено или наоборот минимум)
     if (pIntel.minPrice && currentPrice > pIntel.minPrice + 4) {
       const diff = Math.round(currentPrice - pIntel.minPrice);
       return `<span class="lqs-metric-pill verdict-warn" title="В твоей базе цен этот товар стоил ${pIntel.minPrice} ₽ (средняя: ${pIntel.avgPrice || pIntel.minPrice} ₽)">📈 +${diff} ₽ к мин. (${pIntel.minPrice} ₽)</span>`;
@@ -1446,9 +1905,6 @@
     }
   }
 
-  /**
-   * Запрашивает разведку цены для открытого товара (включая зонд без куки и историю с других аккаунтов)
-   */
   function triggerPriceIntelForProduct(slug, meta, panel) {
     if (!slug || !meta || !meta.price) return;
     if (priceIntelRequestedSlugs.has(slug)) return;
@@ -1735,7 +2191,7 @@
 
           <div class="lqs-ai-box" id="lqs-ai-box">
             <div class="lqs-ai-header">
-              <span>🤖 Сводка отзывов + разбор состава и цен (Zero-Click Автопилот)</span>
+              <span class="lqs-ai-header-title">🤖 ИИ-разбор состава, отзывов и цен</span>
               <button type="button" class="lqs-ai-refresh-btn" id="lqs-ai-refresh" title="Принудительно переспросить ИИ-ревизора">🔄 Обновить</button>
             </div>
             <div class="lqs-ai-content" id="lqs-ai-content"></div>
@@ -1914,6 +2370,8 @@
       if (!addBtn.dataset.lqsGuarded) {
         addBtn.dataset.lqsGuarded = 'true';
         addBtn.addEventListener('click', (e) => {
+          // Не блокируем автоматическую сборку корзины
+          if (window.__lqsAutoBuilding) return;
           if (addBtn.dataset.lqsBad === 'true') {
             const ok = window.confirm(
               `⚠️ Этот товар у тебя в чёрном списке (${addBtn.dataset.lqsRating}★).\nЗаметка: "${addBtn.dataset.lqsNote || 'Не брать'}"\n\nВсё равно добавить в корзину?`
@@ -2078,7 +2536,6 @@
       LQS_RECORDER.counters.catalogBadgesUpdated += 1;
     });
 
-    // Отправляем собранные с витрины цены в единую базу (не чаще раза в 2 сек)
     const now = Date.now();
     if (harvestedPrices.length > 0 && now - lastCatalogHarvestTs > 1800) {
       lastCatalogHarvestTs = now;
@@ -2148,14 +2605,15 @@
         node.classList &&
         (node.classList.contains('lqs-product-panel') ||
          node.classList.contains('lqs-card-badge') ||
-         node.classList.contains('lqs-cart-audit-banner'))
+         node.classList.contains('lqs-cart-audit-banner') ||
+         node.classList.contains('lqs-passport-helper'))
       ) {
         return true;
       }
-      if (node.closest && node.closest('.lqs-product-panel, .lqs-card-badge, .lqs-cart-audit-banner')) {
+      if (node.closest && node.closest('.lqs-product-panel, .lqs-card-badge, .lqs-cart-audit-banner, .lqs-passport-helper')) {
         return true;
       }
-    } else if (node.parentElement && node.parentElement.closest('.lqs-product-panel, .lqs-card-badge, .lqs-cart-audit-banner')) {
+    } else if (node.parentElement && node.parentElement.closest('.lqs-product-panel, .lqs-card-badge, .lqs-cart-audit-banner, .lqs-passport-helper')) {
       return true;
     }
     return false;
@@ -2219,6 +2677,7 @@
         if (changes[SETTINGS_KEY]) {
           cachedSettings = { ...DEFAULT_SETTINGS, ...(changes[SETTINGS_KEY].newValue || {}) };
           renderProductPageWidget();
+          scanAndSnapshotCurrentCartDOM();
         }
       }
     });
