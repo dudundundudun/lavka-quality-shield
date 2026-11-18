@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Рейтинг, КБЖУ-радар и ИИ-ревизор",
-  "version": "2.1.0",
-  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), анти-мусор фильтр каталога, ИИ-агрегатор отзывов и бортовой журнал для ИИ-дебаггинга.",
+  "version": "2.2.0",
+  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), авто-подключение к открытой вкладке Gemini без ключей, ИИ-агрегатор отзывов и бортовой лог.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -11,18 +11,25 @@
   },
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "cookies",
+    "scripting"
   ],
   "host_permissions": [
     "https://lavka.yandex.ru/*",
+    "https://gemini.google.com/*",
+    "https://*.google.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*",
     "http://127.0.0.1:8083/*",
     "http://localhost:8083/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.1.0",
+    "default_title": "Lavka Quality Shield v2.2.0",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

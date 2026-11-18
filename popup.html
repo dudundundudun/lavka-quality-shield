@@ -2,12 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.1.0</title>
+  <title>Lavka Quality Shield v2.2.0</title>
   <style>
     body {
-      width: 390px;
+      width: 405px;
       margin: 0;
-      padding: 14px;
+      padding: 13px;
       background: #f5f4f2;
       color: #21201f;
       font-family: -apple-system, BlinkMacSystemFont, "YS Text", "Segoe UI", Roboto, sans-serif;
@@ -182,8 +182,154 @@
       padding: 10px;
       font-size: 12px;
     }
-    .field {
+
+    /* БЛОК АВТОПИЛОТА GEMINI */
+    .autopilot-card {
+      background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+      border: 1px solid #bae6fd;
+      border-radius: 10px;
+      padding: 9px 10px;
+      margin-bottom: 10px;
+    }
+    .autopilot-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 800;
+      font-size: 12px;
+      color: #0369a1;
+      margin-bottom: 6px;
+    }
+    .radar-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
       margin-bottom: 8px;
+    }
+    .radar-pill {
+      background: rgba(255, 255, 255, 0.85);
+      border: 1px solid #cbd5e1;
+      border-radius: 7px;
+      padding: 4px 6px;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: #475569;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+    }
+    .radar-pill.ok {
+      background: #dcfce7;
+      border-color: #86efac;
+      color: #166534;
+    }
+    .radar-pill.warn {
+      background: #fef9c3;
+      border-color: #fde047;
+      color: #854d0e;
+    }
+    .autopilot-btn-primary {
+      width: 100%;
+      background: #0284c7;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-bottom: 5px;
+      transition: background 0.15s;
+    }
+    .autopilot-btn-primary:hover {
+      background: #0369a1;
+    }
+    .autopilot-btn-secondary {
+      width: 100%;
+      background: #ffffff;
+      color: #0369a1;
+      border: 1px solid #7dd3fc;
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .autopilot-btn-secondary:hover {
+      background: #f0f9ff;
+    }
+    .autopilot-status {
+      font-size: 10.5px;
+      color: #0f172a;
+      margin-top: 5px;
+      line-height: 1.35;
+      display: none;
+    }
+
+    /* ПОШАГОВЫЙ МАСТЕР «ЗА РУЧКУ» */
+    details.wizard-spoiler {
+      margin-bottom: 10px;
+      background: #fafaf9;
+      border: 1px solid #e5e2dd;
+      border-radius: 9px;
+      padding: 6px 8px;
+    }
+    details.wizard-spoiler summary {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #21201f;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    details.wizard-spoiler summary::-webkit-details-marker {
+      display: none;
+    }
+    .wizard-steps {
+      margin-top: 8px;
+      font-size: 11px;
+      line-height: 1.42;
+      color: #3f3e3c;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .wizard-box {
+      background: #ffffff;
+      border: 1px solid #e5e2dd;
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+    .wizard-box-title {
+      font-weight: 800;
+      font-size: 11px;
+      color: #21201f;
+      margin-bottom: 4px;
+    }
+    .mini-copy-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 4px;
+      padding: 4px 7px;
+      font-size: 10.5px;
+      font-weight: 700;
+      background: #f5f4f2;
+      border: 1px solid #d6d3cd;
+      border-radius: 6px;
+      cursor: pointer;
+      color: #21201f;
+    }
+    .mini-copy-btn:hover {
+      background: #e5e2dd;
+    }
+
+    .field {
+      margin-bottom: 7px;
     }
     .field label {
       display: block;
@@ -316,7 +462,7 @@
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;">v2.1.0</span>
+    <span style="font-size:11px;color:#7a7875;">v2.2.0</span>
   </div>
 
   <div class="tabs">
@@ -345,9 +491,60 @@
     </div>
   </div>
 
-  <!-- ВКЛАДКА 2: НАСТРОЙКИ ИИ + СПРЯТАННЫЙ ВНИЗУ БОРТОВОЙ ЛОГ ДЛЯ ДЕБАГГИНГА -->
+  <!-- ВКЛАДКА 2: АВТОПИЛОТ GEMINI + ПОШАГОВЫЙ МАСТЕР + НАСТРОЙКИ ИИ + БОРТОВОЙ ЛОГ -->
   <div class="settings-panel" id="panel-settings">
-    <div style="font-size:11px;color:#5c5a57;margin-bottom:6px;">Быстрый выбор ИИ-провайдера:</div>
+
+    <!-- БЛОК 1: АВТОПИЛОТ GEMINI В 1 КЛИК -->
+    <div class="autopilot-card">
+      <div class="autopilot-header">
+        <span>🤖 Автопилот подключения Gemini</span>
+        <button type="button" id="refresh-radar-btn" style="border:none;background:transparent;color:#0369a1;cursor:pointer;font-size:11px;font-weight:700;" title="Обновить статус">🔄 Статус</button>
+      </div>
+      <div class="radar-grid">
+        <div class="radar-pill" id="pill-gemini-tab"><span>🌐 Вкладка Gemini</span><strong id="val-gemini-tab">...</strong></div>
+        <div class="radar-pill" id="pill-cookies"><span>🍪 Куки Google</span><strong id="val-cookies">...</strong></div>
+        <div class="radar-pill" id="pill-bridge"><span>🚀 Мост :8083</span><strong id="val-bridge">...</strong></div>
+        <div class="radar-pill" id="pill-backend"><span>🐍 Парсер :8765</span><strong id="val-backend">...</strong></div>
+      </div>
+      <button type="button" class="autopilot-btn-primary" id="auto-connect-gemini-btn">
+        ⚡ Авто-подключение через вкладку Gemini (1 клик)
+      </button>
+      <button type="button" class="autopilot-btn-secondary" id="copy-gemini-cookies-btn">
+        🍪 Скопировать куки Gemini (Header String) без F12
+      </button>
+      <div class="autopilot-status" id="autopilot-status-box"></div>
+    </div>
+
+    <!-- БЛОК 2: ПОШАГОВЫЙ ГАЙД «ЗА РУЧКУ» ПРЯМО В РАСШИРЕНИИ -->
+    <details class="wizard-spoiler" id="wizard-spoiler">
+      <summary>
+        <span>🗺️ Пошаговый гайд: как подключить ИИ (2 способа)</span>
+        <span style="font-size:10px;color:#7a7875;">▾ открыть</span>
+      </summary>
+      <div class="wizard-steps">
+        <div class="wizard-box">
+          <div class="wizard-box-title">🟢 Способ 1. Полный автомат через браузер (0 настроек, без Docker)</div>
+          <div>1. Просто войди в свой аккаунт на <b>gemini.google.com</b> в этом браузере.</div>
+          <div>2. Нажми синюю кнопку <b>«⚡ Авто-подключение через вкладку Gemini»</b> выше.</div>
+          <div>3. Всё! Расширение само найдёт вкладку с чатом Gemini, подхватит куки и будет делать разбор состава и КБЖУ прямо через неё. Если дополнительно запустить <code>start_server.bat</code> — оно ещё и подтянет живые отзывы с Отзовика/IRecommend!</div>
+        </div>
+
+        <div class="wizard-box">
+          <div class="wizard-box-title">🚀 Способ 2. Через локальный мост Gemini 4 Argon (:8083 из твоего гайда)</div>
+          <div><b>Шаг 1.</b> Запусти Docker Desktop и выполни в PowerShell команду запуска моста:</div>
+          <button type="button" class="mini-copy-btn" id="copy-docker-cmd-btn">📋 Скопировать команду Docker для PowerShell</button>
+          <div style="margin-top:5px;"><b>Шаг 2.</b> Нажми кнопку <b>«🍪 Скопировать куки Gemini без F12»</b> выше (расширение само достанет <code>Header String</code> из браузера, ставить Cookie-Editor не нужно!).</div>
+          <div style="margin-top:5px;"><b>Шаг 3.</b> Открой админку <a href="http://localhost:8083/admin/" target="_blank" rel="noopener noreferrer" style="color:#0284c7;font-weight:700;">http://localhost:8083/admin/</a>:
+            <br>• В <b>Accounts -> Quick Add Cookie</b> вставь скопированные куки.
+            <br>• В <b>Settings</b> выбери модель <code>gemini-4-argon</code>, включи <b>Auto-follow bl version (ВКЛ)</b> и <b>临时对话 / Временный чат (ВКЛ)</b>, а <b>服务端多轮续接 (ВЫКЛ)</b>.
+            <br>• Скопируй <b>API Key</b> в правом верхнем углу админки, вставь в поле <b>API Key</b> ниже и нажми «Сохранить».
+          </div>
+          <div style="margin-top:5px;"><b>Шаг 4.</b> Запусти <code>start_server.bat</code> в папке расширения для поиска отзывов по Отзовику и кэша SQLite.</div>
+        </div>
+      </div>
+    </details>
+
+    <div style="font-size:11px;color:#5c5a57;margin-bottom:6px;">Быстрый выбор ИИ-провайдера (для моста :8083 или API):</div>
     <div class="preset-row">
       <button type="button" class="preset-btn" id="preset-argon">🚀 Gemini Argon (:8083)</button>
       <button type="button" class="preset-btn" id="preset-deepseek">☁️ DeepSeek API</button>
@@ -363,8 +560,8 @@
       <input type="text" id="inp-ai-url" placeholder="http://localhost:8083/v1">
     </div>
     <div class="field">
-      <label>API Key (из админки :8083/admin/ или DeepSeek):</label>
-      <input type="password" id="inp-ai-key" placeholder="Вставь API Key...">
+      <label>API Key (не нужен для Способа 1 через вкладку Gemini):</label>
+      <input type="password" id="inp-ai-key" placeholder="Оставь пустым для Способа 1 или вставь ключ :8083...">
     </div>
     <div class="field">
       <label>Название модели (Model ID):</label>

@@ -1,10 +1,11 @@
 """
-Lavka Quality Shield v2.1.0 — Локальный FastAPI сервер (127.0.0.1:8765)
+Lavka Quality Shield v2.2.0 — Локальный FastAPI сервер (127.0.0.1:8765)
 1. Принимает название, состав, БЖУ и цену товара из расширения Lavka Quality Shield.
 2. Ищет реальные отзывы о продукте в сети (Отзовик, IRecommend, Роскачество, ВкусВилл, Ozon).
 3. Кэширует результаты в локальной базе SQLite (lavka_ai_cache.db).
 4. Отправляет найденные отзывы + состав в локальный мост Gemini 4 Argon (http://localhost:8083/v1)
-   или любой другой OpenAI-совместимый облачный/локальный ИИ (DeepSeek, Ollama, Unsloth).
+   или отдаёт найденные отзывы расширению, чтобы оно само прогнало их через открытую вкладку gemini.google.com
+   и сохранило вердикт обратно через POST /api/save-cache!
 5. Ведёт кольцевой бортовой журнал запросов (GET /api/logs и GET /api/health) для экспорта в ИИ при отладке.
 """
 
@@ -16,7 +17,7 @@ import time
 import urllib.parse
 from collections import deque
 from datetime import datetime, timezone
-from typing import Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 # Защита от перехвата локальных запросов системным прокси/VPN на Windows
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
@@ -30,7 +31,7 @@ from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.1.0")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,6 +84,13 @@ class AnalyzeRequest(BaseModel):
     forceRefresh: bool = False
 
 
+class SaveCacheRequest(BaseModel):
+    slug: str
+    title: str
+    verdict: str
+    sources: List[Dict[str, Any]] = []
+
+
 @app.get("/api/health")
 async def health_check():
     cached_count = 0
@@ -94,7 +102,7 @@ async def health_check():
         log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "cachedItems": cached_count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -104,9 +112,33 @@ async def health_check():
 async def get_server_logs():
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "logs": list(SERVER_LOGS),
     }
+
+
+@app.post("/api/save-cache")
+async def save_cache_endpoint(req: SaveCacheRequest):
+    cache_key = (req.slug or req.title).strip().lower()
+    if not cache_key or not req.verdict.strip():
+        return {"status": "ignored"}
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO product_ai_cache (slug, title, verdict, sources_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                cache_key,
+                req.title,
+                req.verdict.strip(),
+                json.dumps(req.sources or [], ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    log_event("CACHE_SAVE", f"Saved browser-tab Gemini verdict for '{cache_key}' into SQLite")
+    return {"status": "ok"}
 
 
 async def search_web_reviews(product_title: str) -> List[dict]:
@@ -215,6 +247,7 @@ async def analyze_product(req: AnalyzeRequest):
                 log_event("CACHE_HIT", f"Returned SQLite cached verdict for '{cache_key}'")
                 return {
                     "cached": True,
+                    "aiOk": True,
                     "verdict": row[0],
                     "sources": json.loads(row[1] or "[]"),
                 }
@@ -225,13 +258,12 @@ async def analyze_product(req: AnalyzeRequest):
         verdict = await call_ai_model(req, sources)
     except Exception as exc:
         ai_ok = False
-        log_event("LLM_ERR", f"AI call failed ({req.aiModel} @ {req.aiBaseUrl}): {exc}")
+        log_event("LLM_ERR", f"AI call failed ({req.aiModel} @ {req.aiBaseUrl}): {exc} -> handing off to Browser Gemini Tab")
         verdict = (
             f"⚠️ Ошибка вызова ИИ ({req.aiModel} @ {req.aiBaseUrl}): {exc}\n"
-            f"Проверь, что локальный мост или API запущен и API Key указан в настройках расширения."
+            f"Переключаюсь на автопилот через открытую вкладку gemini.google.com..."
         )
 
-    # Не кэшируем в SQLite сообщение об ошибке соединения, чтобы повторный клик сразу шёл в ИИ
     if ai_ok:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
@@ -251,6 +283,7 @@ async def analyze_product(req: AnalyzeRequest):
 
     return {
         "cached": False,
+        "aiOk": ai_ok,
         "verdict": verdict,
         "sources": sources,
     }

@@ -1,5 +1,5 @@
 /**
- * Lavka Quality Shield v2.1.0 — Content Script
+ * Lavka Quality Shield v2.2.0 — Content Script
  * Архитектура v2.1.0:
  * 1. Чистый интерфейс на странице Лавки: кнопка и панель диагностики полностью убраны из DOM страницы
  *    и перенесены в «⚙️ Настройки -> 🛠️ Бортовой журнал для ИИ» внутри popup-окна расширения.
@@ -22,7 +22,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '2.1.0';
+  const VERSION = '2.2.0';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
@@ -979,7 +979,7 @@
     updateDrawerToggleButton(panel, true, currentReviewCache, smart);
 
     aiBox.classList.add('visible');
-    aiContent.innerHTML = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора...';
+    aiContent.innerHTML = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора (Автопилот)...';
     aiSources.innerHTML = '';
 
     const settings = await getSettings();
@@ -987,7 +987,67 @@
     LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh})`);
     LQS_RECORDER.updateModule('aiReviewer', 'RUNNING', `Запрос ИИ-ревизора для "${meta.title.slice(0, 30)}"...`);
 
-    // 1. Локальный FastAPI сервер (парсинг Отзовик/IRecommend/Роскачество + кэш SQLite)
+    // 1. Обращаемся к фоновому оркестратору background.js (поддерживает :8765 + :8083 + Автопилот через открытую вкладку Gemini!)
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      try {
+        const bgResult = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            {
+              type: 'LQS_ANALYZE_PRODUCT',
+              payload: {
+                slug,
+                title: meta.title,
+                brand: meta.brand,
+                amount: meta.amountText,
+                price: meta.price,
+                ingredients: meta.ingredientsText,
+                traits: meta.traitsText,
+                forceRefresh: Boolean(forceRefresh)
+              }
+            },
+            (resp) => {
+              if (chrome.runtime.lastError) {
+                resolve({ ok: false, error: chrome.runtime.lastError.message });
+              } else {
+                resolve(resp || { ok: false, error: 'Empty response from background service worker' });
+              }
+            }
+          );
+        });
+
+        if (bgResult && bgResult.ok && bgResult.verdict) {
+          const dt = Math.round(performance.now() - t0);
+          const modeLabel = bgResult.mode || 'Автопилот Gemini';
+          LQS_RECORDER.updateModule(
+            'aiReviewer',
+            'OK',
+            `Ответ через [${modeLabel}] за ${dt} мс (источников: ${(bgResult.sources || []).length})`
+          );
+          LQS_RECORDER.record('AI', `Orchestrator success via [${modeLabel}] in ${dt}ms`, {
+            cached: Boolean(bgResult.cached),
+            sourcesCount: (bgResult.sources || []).length
+          });
+
+          aiContent.innerHTML = formatAiTextToHtml(bgResult.verdict);
+          const sourceLinks = Array.isArray(bgResult.sources)
+            ? bgResult.sources
+                .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+                .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
+                .join('')
+            : '';
+
+          const modeBadge = `<span style="color:#0369a1;font-size:11px;font-weight:600;">⚡ Режим: ${escapeHtml(modeLabel)}</span>`;
+          aiSources.innerHTML = sourceLinks ? `${modeBadge} ${sourceLinks}` : modeBadge;
+          return;
+        } else if (bgResult && bgResult.error) {
+          LQS_RECORDER.record('AI', `Background orchestrator reported: ${bgResult.error}`);
+        }
+      } catch (bgErr) {
+        LQS_RECORDER.record('AI', `Background orchestrator exception: ${bgErr.message || bgErr}`);
+      }
+    }
+
+    // 2. Резервный прямой фоллбэк (если background worker перезапускался)
     try {
       const resp = await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/analyze-product`, {
         method: 'POST',
@@ -1009,91 +1069,33 @@
 
       if (resp.ok) {
         const data = await resp.json();
-        const dt = Math.round(performance.now() - t0);
-        const modeStr = data.cached ? 'FastAPI SQLite Cache' : 'FastAPI (:8765)';
-        LQS_RECORDER.updateModule(
-          'aiReviewer',
-          'OK',
-          `Ответ через ${modeStr} за ${dt} мс (источников: ${(data.sources || []).length})`
-        );
-        LQS_RECORDER.record('AI', `FastAPI success in ${dt}ms`, {
-          cached: Boolean(data.cached),
-          sourcesCount: (data.sources || []).length
-        });
-
-        aiContent.innerHTML = formatAiTextToHtml(data.verdict || 'Вердикт получен.');
-        if (Array.isArray(data.sources) && data.sources.length > 0) {
-          aiSources.innerHTML = data.sources
-            .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
-            .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
-            .join('');
+        if (data.verdict && data.aiOk !== false) {
+          const dt = Math.round(performance.now() - t0);
+          LQS_RECORDER.updateModule('aiReviewer', 'OK', `Ответ через FastAPI (:8765) за ${dt} мс`);
+          aiContent.innerHTML = formatAiTextToHtml(data.verdict);
+          if (Array.isArray(data.sources) && data.sources.length > 0) {
+            aiSources.innerHTML = data.sources
+              .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+              .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
+              .join('');
+          }
+          return;
         }
-        return;
-      } else {
-        LQS_RECORDER.record('AI', `FastAPI HTTP error ${resp.status}, falling back to direct AI`);
       }
     } catch (err) {
-      LQS_RECORDER.record('AI', `FastAPI unreachable (${err.message || err}), trying direct AI bridge`);
+      LQS_RECORDER.error('requestAiProductReview', err);
     }
 
-    // 2. Прямой фоллбэк к локальному мосту Gemini 4 Argon (localhost:8083/v1) или облачному API
-    try {
-      const headers = { 'Content-Type': 'application/json' };
-      if (settings.aiApiKey) {
-        headers.Authorization = `Bearer ${settings.aiApiKey}`;
-      }
-      const prompt = [
-        `Сделай ультра-короткий (максимум 3 строчки) разбор продукта из Яндекс Лавки в стиле честного продуктового ревизора:`,
-        `Товар: ${meta.title} (${meta.amountText || 'вес не указан'}, цена: ${meta.price || '?'} ₽)`,
-        `Состав: ${meta.ingredientsText || 'не указан'}`,
-        `КБЖУ: ${meta.traitsText || 'не указано'}`,
-        `Формат: 1) Что по составу/белку и реальной цене, 2) Главный подвох или плюс, 3) Вердикт (Брать или Скипать).`
-      ].join('\n');
-
-      const directResp = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: settings.aiModel || 'gemini-4-argon',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.3
-        })
-      });
-
-      if (directResp.ok) {
-        const json = await directResp.json();
-        const dt = Math.round(performance.now() - t0);
-        const reply = json.choices?.[0]?.message?.content || 'Нет ответа от модели.';
-        LQS_RECORDER.updateModule(
-          'aiReviewer',
-          'OK',
-          `Прямой ответ от ${settings.aiModel} за ${dt} мс (FastAPI :8765 был выключен)`
-        );
-        LQS_RECORDER.record('AI', `Direct LLM response (${settings.aiModel}) in ${dt}ms`);
-
-        aiContent.innerHTML = formatAiTextToHtml(reply);
-        aiSources.innerHTML = `<span style="color:#75736f;font-size:11.5px;">⚡ Напрямую через ${escapeHtml(settings.aiModel)} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
-        return;
-      } else {
-        throw new Error(`HTTP ${directResp.status}`);
-      }
-    } catch (err) {
-      const dt = Math.round(performance.now() - t0);
-      LQS_RECORDER.updateModule(
-        'aiReviewer',
-        'ERROR',
-        `Ошибка связи с :8765 и ${settings.aiBaseUrl} (${err.message || err}) за ${dt} мс`
-      );
-      LQS_RECORDER.error('requestAiProductReview', err, {
-        backendUrl: settings.backendUrl,
-        aiBaseUrl: settings.aiBaseUrl,
-        model: settings.aiModel
-      });
-    }
+    const dt = Math.round(performance.now() - t0);
+    LQS_RECORDER.updateModule(
+      'aiReviewer',
+      'ERROR',
+      `ИИ не подключён (${dt} мс) — открой ⚙️ Настройки и ИИ -> нажми «⚡ Авто-подключение через вкладку Gemini»`
+    );
 
     aiContent.innerHTML =
-      `⚠️ Не удалось подключиться к локальному серверу <code>${escapeHtml(settings.backendUrl)}</code> или ИИ-мосту <code>${escapeHtml(settings.aiBaseUrl)}</code>.<br>` +
-      `Запусти <code>start_server.bat</code> или проверь соединение в окне расширения (⚙️ Настройки).`;
+      `⚠️ <b>ИИ ещё не подключён!</b><br>` +
+      `Нажми на иконку расширения <b>Lavka Quality Shield</b> в панели браузера -> вкладка <b>«⚙️ Настройки и ИИ»</b> -> синяя кнопка <b>«⚡ Авто-подключение через вкладку Gemini (1 клик)»</b>.`;
   }
 
   async function renderProductPageWidget() {

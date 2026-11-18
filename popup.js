@@ -9,6 +9,9 @@ const DEFAULT_SETTINGS = {
   aiModel: 'gemini-4-argon'
 };
 
+const DOCKER_POWERSHELL_CMD =
+  'docker run -d --name gemini-argon --restart unless-stopped -p 8083:8083 ghcr.io/zexadev/gemini-web2api-go:latest; Start-Sleep -Seconds 2; Write-Host "🚀 Сервер запущен! Админка: http://localhost:8083/admin/" -ForegroundColor Green';
+
 let currentFilter = 'all';
 let searchQuery = '';
 let lastBackendPingSummary = null;
@@ -100,6 +103,138 @@ function loadSettings() {
   });
 }
 
+// ==========================================================================
+// ЖИВОЙ РАДАР И АВТОПИЛОТ ПОДКЛЮЧЕНИЯ GEMINI
+// ==========================================================================
+function setRadarPill(pillId, valId, isOk, isWarn, text, title = '') {
+  const pill = document.getElementById(pillId);
+  const val = document.getElementById(valId);
+  if (!pill || !val) return;
+  pill.className = 'radar-pill' + (isOk ? ' ok' : (isWarn ? ' warn' : ''));
+  if (title) pill.title = title;
+  val.textContent = text;
+}
+
+function refreshAiRadar() {
+  if (!chrome.runtime || !chrome.runtime.sendMessage) return;
+  chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      setRadarPill('pill-gemini-tab', 'val-gemini-tab', false, true, 'Ошибка');
+      return;
+    }
+
+    const tabFound = Boolean(resp.geminiTab && resp.geminiTab.found);
+    setRadarPill(
+      'pill-gemini-tab',
+      'val-gemini-tab',
+      tabFound,
+      !tabFound,
+      tabFound ? '✅ Открыта' : '⚪ Нет вкладки',
+      tabFound ? 'Найдена открытая вкладка gemini.google.com' : 'Нажми «Авто-подключение», чтобы открыть вкладку Gemini'
+    );
+
+    const cookiesOk = Boolean(resp.cookies && resp.cookies.ok);
+    setRadarPill(
+      'pill-cookies',
+      'val-cookies',
+      cookiesOk,
+      !cookiesOk,
+      cookiesOk ? `✅ Активны (${resp.cookies.count})` : '⚠️ Не вошёл',
+      cookiesOk ? 'Найдены куки авторизации Google (__Secure-1PSID)' : 'Войди в аккаунт на gemini.google.com'
+    );
+
+    const bridgeOk = Boolean(resp.bridge && resp.bridge.ok);
+    setRadarPill(
+      'pill-bridge',
+      'val-bridge',
+      bridgeOk,
+      false,
+      bridgeOk ? '✅ Подключён' : '⚪ Выкл',
+      resp.bridge ? resp.bridge.msg : ''
+    );
+
+    const backendOk = Boolean(resp.backend && resp.backend.ok);
+    setRadarPill(
+      'pill-backend',
+      'val-backend',
+      backendOk,
+      false,
+      backendOk ? `✅ ОК (${resp.backend.cachedItems})` : '⚪ Выкл',
+      resp.backend ? resp.backend.msg : ''
+    );
+  });
+}
+
+document.getElementById('refresh-radar-btn').addEventListener('click', () => {
+  refreshAiRadar();
+});
+
+document.getElementById('auto-connect-gemini-btn').addEventListener('click', () => {
+  const btn = document.getElementById('auto-connect-gemini-btn');
+  const statusBox = document.getElementById('autopilot-status-box');
+  btn.textContent = '⏳ Ищу вкладку Gemini и проверяю куки...';
+  statusBox.style.display = 'block';
+  statusBox.textContent = 'Проверяем авторизацию на gemini.google.com...';
+
+  chrome.runtime.sendMessage({ type: 'LQS_AUTO_CONNECT_GEMINI_TAB' }, (resp) => {
+    btn.textContent = '⚡ Авто-подключение через вкладку Gemini (1 клик)';
+    refreshAiRadar();
+
+    if (chrome.runtime.lastError || !resp) {
+      statusBox.textContent = '⚠️ Ошибка связи с фоновым воркером расширения. Перезагрузи расширение в chrome://extensions.';
+      return;
+    }
+
+    if (resp.cookiesOk && resp.tabOpened) {
+      statusBox.innerHTML =
+        '✅ <b>Готово! Автопилот подключён.</b> Вкладка <code>gemini.google.com</code> и куки найдены — теперь кнопка «🤖 ИИ-обзор» на странице товара Лавки работает автоматически прямо через браузер!';
+    } else if (!resp.cookiesOk) {
+      statusBox.innerHTML =
+        '⚠️ Я открыл вкладку <code>gemini.google.com</code>, но ты ещё не вошёл в Google-аккаунт. Войди в аккаунт во вкладке Gemini и нажми эту кнопку ещё раз!';
+    } else {
+      statusBox.textContent = '⚠️ Не удалось автоматически открыть вкладку Gemini.';
+    }
+  });
+});
+
+document.getElementById('copy-gemini-cookies-btn').addEventListener('click', () => {
+  const btn = document.getElementById('copy-gemini-cookies-btn');
+  const statusBox = document.getElementById('autopilot-status-box');
+  statusBox.style.display = 'block';
+
+  chrome.runtime.sendMessage({ type: 'LQS_GET_GEMINI_COOKIE_HEADER' }, async (resp) => {
+    if (chrome.runtime.lastError || !resp || !resp.ok || !resp.headerString) {
+      statusBox.innerHTML =
+        '⚠️ Куки Google не найдены! Сначала открой <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">gemini.google.com</a> и войди в аккаунт.';
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(resp.headerString);
+      btn.textContent = `✅ Скопировано (${resp.cookiesCount} куки)! Вставь в :8083/admin/`;
+      statusBox.innerHTML =
+        '✅ <b>Header String скопирован в буфер обмена!</b> Теперь открой <a href="http://localhost:8083/admin/" target="_blank" rel="noopener noreferrer">http://localhost:8083/admin/</a> -> <b>Accounts -> Quick Add Cookie</b> и нажми Ctrl+V.';
+      setTimeout(() => {
+        btn.textContent = '🍪 Скопировать куки Gemini (Header String) без F12';
+      }, 3000);
+    } catch {
+      statusBox.textContent = '⚠️ Не удалось скопировать куки в буфер обмена.';
+    }
+  });
+});
+
+document.getElementById('copy-docker-cmd-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('copy-docker-cmd-btn');
+  try {
+    await navigator.clipboard.writeText(DOCKER_POWERSHELL_CMD);
+    btn.textContent = '✅ Команда скопирована! Вставь в PowerShell';
+    setTimeout(() => {
+      btn.textContent = '📋 Скопировать команду Docker для PowerShell';
+    }, 2500);
+  } catch {
+    btn.textContent = '⚠️ Ошибка копирования';
+  }
+});
+
 function switchTab(activeId) {
   const map = {
     'tab-reviews-btn': 'panel-reviews',
@@ -109,6 +244,9 @@ function switchTab(activeId) {
     document.getElementById(btnId).classList.toggle('active', btnId === activeId);
     document.getElementById(map[btnId]).style.display = btnId === activeId ? 'block' : 'none';
   });
+  if (activeId === 'tab-settings-btn') {
+    refreshAiRadar();
+  }
 }
 
 document.getElementById('tab-reviews-btn').addEventListener('click', () => switchTab('tab-reviews-btn'));
@@ -144,6 +282,7 @@ document.getElementById('save-ai-btn').addEventListener('click', () => {
   chrome.storage.local.set({ [SETTINGS_KEY]: cfg }, () => {
     const st = document.getElementById('ai-save-status');
     st.textContent = '✅ Настройки ИИ сохранены!';
+    refreshAiRadar();
     setTimeout(() => { st.textContent = ''; }, 2000);
   });
 });
@@ -294,44 +433,22 @@ document.getElementById('debug-spoiler').addEventListener('toggle', (e) => {
 document.getElementById('diag-ping-btn').addEventListener('click', async () => {
   const statusEl = document.getElementById('diag-ping-status');
   statusEl.style.display = 'block';
-  statusEl.textContent = '⏳ Проверяю связь с FastAPI (:8765) и ИИ...';
+  statusEl.textContent = '⏳ Проверяю связь со всеми источниками ИИ (Вкладка Gemini, :8765, :8083)...';
 
-  chrome.storage.local.get([SETTINGS_KEY], async (res) => {
-    const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
-    const backendUrl = cfg.backendUrl.replace(/\/$/, '');
-    const aiBaseUrl = cfg.aiBaseUrl.replace(/\/$/, '');
-    const lines = [];
-
-    try {
-      const t0 = performance.now();
-      const r1 = await fetch(`${backendUrl}/api/health`);
-      const dt1 = Math.round(performance.now() - t0);
-      if (r1.ok) {
-        const j = await r1.json().catch(() => ({}));
-        lines.push(`✅ FastAPI (:8765): ОК (${dt1} мс, кэш SQLite: ${j.cachedItems ?? '?'} шт.)`);
-      } else {
-        lines.push(`⚠️ FastAPI (:8765): HTTP ${r1.status}`);
-      }
-    } catch {
-      lines.push(`❌ FastAPI (:8765): выключен (запусти start_server.bat)`);
+  chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      statusEl.textContent = '⚠️ Ошибка проверки статуса через фоновый воркер.';
+      return;
     }
-
-    try {
-      const t1 = performance.now();
-      const headers = cfg.aiApiKey ? { Authorization: `Bearer ${cfg.aiApiKey}` } : {};
-      const r2 = await fetch(`${aiBaseUrl}/models`, { headers });
-      const dt2 = Math.round(performance.now() - t1);
-      if (r2.ok) {
-        lines.push(`✅ ИИ (${cfg.aiModel}): ОК (${dt2} мс)`);
-      } else {
-        lines.push(`⚠️ ИИ: HTTP ${r2.status} (проверь API Key)`);
-      }
-    } catch {
-      lines.push(`❌ ИИ (${aiBaseUrl}): недоступен`);
-    }
-
+    const lines = [
+      `${resp.geminiTab.found ? '✅' : '⚪'} Вкладка Gemini: ${resp.geminiTab.found ? 'Открыта' : 'Не открыта'}`,
+      `${resp.cookies.ok ? '✅' : '⚠️'} Куки Google (__Secure-1PSID): ${resp.cookies.ok ? `Найдены (${resp.cookies.count} шт.)` : 'Не найдены'}`,
+      `${resp.bridge.ok ? '✅' : '⚪'} Мост ИИ (:8083): ${resp.bridge.msg}`,
+      `${resp.backend.ok ? '✅' : '⚪'} FastAPI парсер (:8765): ${resp.backend.msg}`
+    ];
     lastBackendPingSummary = lines.join(' | ');
     statusEl.innerHTML = lines.map(escapeHtml).join('<br>');
+    refreshAiRadar();
     refreshDiagnosticsView();
   });
 });
@@ -379,3 +496,4 @@ document.getElementById('diag-clear-btn').addEventListener('click', () => {
 
 loadReviews();
 loadSettings();
+refreshAiRadar();
