@@ -11,6 +11,16 @@ const DEFAULT_SETTINGS = {
 
 let currentFilter = 'all';
 
+function escapeHtml(raw) {
+  if (raw === null || raw === undefined) return '';
+  return String(raw)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function loadReviews() {
   chrome.storage.local.get([STORAGE_KEY], (res) => {
     const db = res[STORAGE_KEY] || {};
@@ -41,12 +51,15 @@ function loadReviews() {
       const div = document.createElement('div');
       div.className = 'item';
       const badge = item.banned || item.rating <= 2 ? `💀 ${item.rating || 1}★` : `⭐ ${item.rating}★`;
+      const safeSlug = encodeURIComponent(item.slug || '');
+      const safeTitle = escapeHtml(item.title || item.slug || 'Товар');
+      const safeNote = escapeHtml(item.note || (item.tags || []).join(', ') || 'Без комментария');
       div.innerHTML = `
         <div class="item-header">
-          <a href="https://lavka.yandex.ru/good/${item.slug}" target="_blank">${item.title || item.slug}</a>
-          <span>${badge}</span>
+          <a href="https://lavka.yandex.ru/good/${safeSlug}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>
+          <span>${escapeHtml(badge)}</span>
         </div>
-        <div class="item-note">${item.note || (item.tags || []).join(', ') || 'Без комментария'}</div>
+        <div class="item-note">${safeNote}</div>
       `;
       listEl.appendChild(div);
     });
@@ -192,43 +205,7 @@ document.getElementById('diag-refresh-btn').addEventListener('click', refreshDia
 document.getElementById('diag-ping-btn').addEventListener('click', async () => {
   const statusEl = document.getElementById('diag-ping-status');
   statusEl.textContent = '⏳ Пингую локальный FastAPI (:8765) и ИИ-мост (:8083)...';
-
-  chrome.storage.local.get([SETTINGS_KEY], async (res) => {
-    const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
-    const backendUrl = cfg.backendUrl.replace(/\/$/, '');
-    const aiBaseUrl = cfg.aiBaseUrl.replace(/\/$/, '');
-    const lines = [];
-
-    try {
-      const t0 = performance.now();
-      const r1 = await fetch(`${backendUrl}/api/health`);
-      const dt1 = Math.round(performance.now() - t0);
-      if (r1.ok) {
-        const j = await r1.json().catch(() => ({}));
-        lines.push(`✅ FastAPI (:8765): ОК (${dt1} мс, в кэше: ${j.cachedItems ?? '?'} товаров)`);
-      } else {
-        lines.push(`⚠️ FastAPI (:8765): HTTP ${r1.status}`);
-      }
-    } catch {
-      lines.push(`❌ FastAPI (:8765): выключен (запусти start_server.bat)`);
-    }
-
-    try {
-      const t1 = performance.now();
-      const headers = cfg.aiApiKey ? { Authorization: `Bearer ${cfg.aiApiKey}` } : {};
-      const r2 = await fetch(`${aiBaseUrl}/models`, { headers });
-      const dt2 = Math.round(performance.now() - t1);
-      if (r2.ok) {
-        lines.push(`✅ ИИ-мост (${cfg.aiModel}): ОК (${dt2} мс)`);
-      } else {
-        lines.push(`⚠️ ИИ-мост: HTTP ${r2.status} (проверь API Key)`);
-      }
-    } catch {
-      lines.push(`❌ ИИ-мост (${aiBaseUrl}): недоступен`);
-    }
-
-    statusEl.innerHTML = lines.join('<br>');
-  });
+  await autoDiscoverAndConnectAi(false, statusEl);
 });
 
 document.getElementById('diag-copy-btn').addEventListener('click', async () => {
@@ -243,20 +220,8 @@ document.getElementById('diag-copy-btn').addEventListener('click', async () => {
   setTimeout(() => { btn.textContent = '📋 Скопировать диагностический отчёт'; }, 1500);
 });
 
-
-async function probeEndpointWithTimeout(url, options = {}, timeoutMs = 2200) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, { ...options, signal: ctrl.signal });
-    return resp;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function autoDiscoverAndConnectAi(silentIfAlreadyConfigured = false) {
-  const statusEl = document.getElementById('auto-connect-status');
+async function autoDiscoverAndConnectAi(silentIfAlreadyConfigured = false, customStatusEl = null) {
+  const statusEl = customStatusEl || document.getElementById('auto-connect-status');
   if (!statusEl) return;
 
   const currentCfg = await new Promise((resolve) => {
@@ -270,84 +235,34 @@ async function autoDiscoverAndConnectAi(silentIfAlreadyConfigured = false) {
   statusEl.style.display = 'block';
   statusEl.innerHTML = '⏳ Сканирую локальные порты (:8765, :8083, :11434)...';
 
-  const savedKey = document.getElementById('inp-ai-key').value.trim() || (currentCfg && currentCfg.aiApiKey) || '';
-  const detected = {
-    backendUrl: document.getElementById('inp-backend').value.trim() || DEFAULT_SETTINGS.backendUrl,
-    aiBaseUrl: document.getElementById('inp-ai-url').value.trim() || DEFAULT_SETTINGS.aiBaseUrl,
-    aiApiKey: savedKey,
-    aiModel: document.getElementById('inp-ai-model').value.trim() || DEFAULT_SETTINGS.aiModel
-  };
+  const typedKey = document.getElementById('inp-ai-key').value.trim() || (currentCfg && currentCfg.aiApiKey) || '';
 
-  const logLines = [];
-  let aiConnected = false;
-  let needsApiKey = false;
-
-  // 1. Проверяем локальный FastAPI парсер (:8765)
-  for (const bUrl of ['http://127.0.0.1:8765', 'http://localhost:8765']) {
-    try {
-      const r = await probeEndpointWithTimeout(`${bUrl}/api/health`);
-      if (r.ok) {
-        detected.backendUrl = bUrl;
-        logLines.push(`✅ Парсер отзывов найден: <b>${bUrl}</b>`);
-        break;
-      }
-    } catch {}
-  }
-
-  // 2. Проверяем Gemini Argon (:8083)
-  for (const aUrl of ['http://localhost:8083/v1', 'http://127.0.0.1:8083/v1']) {
-    try {
-      const headers = savedKey ? { Authorization: `Bearer ${savedKey}` } : {};
-      const r = await probeEndpointWithTimeout(`${aUrl}/models`, { headers });
-      if (r.ok) {
-        const data = await r.json().catch(() => ({}));
-        const models = Array.isArray(data.data) ? data.data.map((m) => m.id) : [];
-        const preferred = models.find((id) => id.includes('argon')) || models.find((id) => id.includes('gemini')) || models[0] || 'gemini-4-argon';
-        detected.aiBaseUrl = aUrl;
-        detected.aiModel = preferred;
-        aiConnected = true;
-        logLines.push(`✅ Gemini Argon подключён: <b>${aUrl}</b> (модель: <code>${preferred}</code>)`);
-        break;
-      } else if (r.status === 401 || r.status === 403) {
-        detected.aiBaseUrl = aUrl;
-        detected.aiModel = 'gemini-4-argon';
-        needsApiKey = true;
-        logLines.push(`🔑 Мост Gemini Argon найден на <b>${aUrl}</b>, но нужен API Key из <a href="http://localhost:8083/admin/" target="_blank">админки :8083/admin/</a>.`);
-        break;
-      }
-    } catch {}
-  }
-
-  // 3. Если :8083 не откликнулся, проверяем локальную Ollama (:11434)
-  if (!aiConnected && !needsApiKey) {
-    for (const oUrl of ['http://127.0.0.1:11434/v1', 'http://localhost:11434/v1']) {
-      try {
-        const r = await probeEndpointWithTimeout(`${oUrl}/models`);
-        if (r.ok) {
-          const data = await r.json().catch(() => ({}));
-          const models = Array.isArray(data.data) ? data.data.map((m) => m.id) : [];
-          const preferred = models[0] || 'qwen2.5:14b';
-          detected.aiBaseUrl = oUrl;
-          detected.aiModel = preferred;
-          aiConnected = true;
-          logLines.push(`✅ Локальная Ollama подключена: <b>${oUrl}</b> (модель: <code>${preferred}</code>)`);
-          break;
-        }
-      } catch {}
+  chrome.runtime.sendMessage({ type: 'LQS_AUTO_DISCOVER_AI', apiKey: typedKey }, (res) => {
+    if (chrome.runtime.lastError || !res || !res.ok) {
+      statusEl.innerHTML = '⚠️ Не удалось выполнить фоновое сканирование.';
+      return;
     }
-  }
+    const { report, settings } = res;
+    document.getElementById('inp-backend').value = settings.backendUrl;
+    document.getElementById('inp-ai-url').value = settings.aiBaseUrl;
+    document.getElementById('inp-ai-model').value = settings.aiModel;
 
-  if (!aiConnected && !needsApiKey) {
-    logLines.push('❌ Локальный ИИ на :8083 и :11434 не обнаружен. Запусти Docker-контейнер с Gemini Argon или введи DeepSeek API Key.');
-  }
+    const lines = [];
+    if (report.backendOk) {
+      lines.push(`✅ Парсер отзывов (:8765): ОК (кэш: ${report.cachedItems} шт.)`);
+    } else {
+      lines.push(`⚪ Парсер (:8765): выключен (работаем напрямую через ИИ-мост)`);
+    }
 
-  // Обновляем поля и сразу сохраняем
-  document.getElementById('inp-backend').value = detected.backendUrl;
-  document.getElementById('inp-ai-url').value = detected.aiBaseUrl;
-  document.getElementById('inp-ai-model').value = detected.aiModel;
+    if (report.aiOk) {
+      lines.push(`✅ ${escapeHtml(report.aiProviderName)}: подключён (модель: <code>${escapeHtml(report.aiModel)}</code>)`);
+    } else if (report.aiNeedsKey) {
+      lines.push(`🔑 Мост <b>${escapeHtml(report.aiBaseUrl)}</b> найден! Осталось вставить API Key из <a href="http://localhost:8083/admin/" target="_blank">админки :8083/admin/</a>.`);
+    } else {
+      lines.push(`❌ Локальный ИИ на :8083 и :11434 не откликнулся. Проверь Docker-контейнер.`);
+    }
 
-  chrome.storage.local.set({ [SETTINGS_KEY]: detected }, () => {
-    statusEl.innerHTML = logLines.join('<br>');
+    statusEl.innerHTML = lines.join('<br>');
   });
 }
 
