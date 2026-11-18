@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lavka Quality Shield — Рейтинг, КБЖУ-радар и Zero-Click ИИ-ревизор",
-  "version": "2.3.0",
-  "description": "Полный Zero-Click Автопилот: сам запускает ИИ-разбор при открытии товара, кэширует ответы в браузере, считает честную цену за кг/л и 100 г белка, ищет отзывы по 14 сайтам и защищает корзину.",
+  "name": "Lavka Quality Shield — Анти-Шулер Цен, Мульти-Аккаунт Корзина и Zero-Click ИИ",
+  "version": "2.4.0",
+  "description": "Zero-Click ИИ-ревизор, база истории цен, разоблачение персональных наценок (проверка без куки и между аккаунтами), авто-клонирование корзины между аккаунтами, сравнение цен с конкурентами и защита корзины.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -32,7 +32,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.3.0 — Zero-Click Autopilot",
+    "default_title": "Lavka Quality Shield v2.4.0 — Anti-Scam & Multi-Account Autopilot",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

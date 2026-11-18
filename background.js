@@ -1,24 +1,23 @@
 /**
- * Lavka Quality Shield v2.3.0 — Background Service Worker (Zero-Click Full Autopilot)
- * Что нового в v2.3.0 по итогам аудита:
- * 1. Полный Zero-Click Автопилот:
- *    - Авто-прогрев фоновой закреплённой вкладки Gemini при запуске браузера (onStartup/onInstalled)
- *      и при заходе на lavka.yandex.ru (если куки Google есть, а локальный мост :8083 выключен).
- *    - Встроенный постоянный кэш ИИ-обзоров прямо в chrome.storage.local (lqs_ai_cache_v1, до 500 товаров):
- *      теперь вердикты ИИ сохраняются навсегда даже без запущенного локального сервера server.py!
- * 2. Исправления ИИ-пайплайна:
- *    - Добавлена очередь запросов (Mutex geminiTabQueue) и дедупликация inFlightBySlug, чтобы при быстром
- *      открытии нескольких товаров вкладка Gemini не перебивала сама себя.
- *    - Исправлен executePromptInsideGeminiTab: ждёт до 10 секунд появления редактора при холодном старте
- *      SPA-вкладки Gemini и отслеживает кнопку Stop (стриминг), чтобы не обрывать ответ во время Google-поиска.
- *    - Исправлен парсер DuckDuckGo (убран баг раннего закрытия </div></div> до сниппета + добавлен фоллбэк на lite.duckduckgo.com).
+ * Lavka Quality Shield v2.4.0 — Background Service Worker
+ * Полный комбайн:
+ * 1. Zero-Click Автопилот ИИ + вечный кэш ИИ в браузере (lqs_ai_cache_v1) + очередь запросов к Gemini.
+ * 2. Единая база истории цен и мульти-аккаунт матрица (lqs_price_db_v1 + синхронизация с SQLite :8765).
+ * 3. Анонимный зонд цен без куки (Incognito Guest Price Probe: credentials: 'omit') против «штрафа за лояльность».
+ * 4. Парсер цен конкурентов (ВкусВилл, Перекрёсток, Азбука Вкуса, Ozon, Лента) прямо из поисковой выдачи.
+ * 5. Слепок корзины (Cart Snapshot), 2-секундная сверка всей корзины между аккаунтами и Авто-сборщик корзины в 1 клик.
  */
 
 'use strict';
 
 const SETTINGS_KEY = 'lqs_settings_v2';
 const AI_CACHE_KEY = 'lqs_ai_cache_v1';
+const PRICE_DB_KEY = 'lqs_price_db_v1';
+const SAVED_CARTS_KEY = 'lqs_saved_carts_v1';
+const CART_LOCKS_KEY = 'lqs_cart_locks_v1';
+
 const MAX_LOCAL_AI_CACHE_ITEMS = 500;
+const MAX_LOCAL_PRICE_DB_ITEMS = 1500;
 
 const DEFAULT_SETTINGS = {
   backendUrl: 'http://127.0.0.1:8765',
@@ -26,38 +25,35 @@ const DEFAULT_SETTINGS = {
   aiApiKey: '',
   aiModel: 'gemini-4-argon',
   preferBrowserGeminiTab: true,
-  geminiAccountIndex: 'auto', // 'auto' | '0' | '1' | '2' | '3' | '4'
+  geminiAccountIndex: 'auto',
   preferredGeminiTabId: null,
-  autoRunAiOnProductPage: true, // Zero-Click: сам запускает ИИ при открытии страницы товара
-  autoOpenDrawerOnAi: true,     // Zero-Click: сам раскрывает блок с вердиктом ИИ
-  autoWarmupGeminiTab: true     // Zero-Click: сам прогревает фоновую вкладку Gemini при старте Лавки
+  autoRunAiOnProductPage: true,
+  autoOpenDrawerOnAi: true,
+  autoWarmupGeminiTab: true,
+  lavkaAccountLabel: 'Аккаунт #1 (Основной)',
+  enableGuestPriceProbe: true
 };
 
-/**
- * Приоритетный список сайтов для поиска реальных отзывов о продуктах
- */
 const REVIEW_SEARCH_SITES = [
   { domain: 'otzovik.com', name: 'Отзовик' },
   { domain: 'irecommend.ru', name: 'IRecommend' },
   { domain: 'rskrf.ru', name: 'Роскачество' },
   { domain: 'roscontrol.com', name: 'Росконтроль' },
-  { domain: 'ozon.ru', name: 'Ozon' },
   { domain: 'vkusvill.ru', name: 'ВкусВилл' },
-  { domain: 'market.yandex.ru', name: 'Яндекс Маркет' },
   { domain: 'perekrestok.ru', name: 'Перекрёсток' },
   { domain: 'vprok.ru', name: 'Перекрёсток Впрок' },
+  { domain: 'av.ru', name: 'Азбука Вкуса' },
   { domain: 'lenta.com', name: 'Лента' },
+  { domain: 'ozon.ru', name: 'Ozon' },
+  { domain: 'market.yandex.ru', name: 'Яндекс Маркет' },
   { domain: 'wildberries.ru', name: 'Wildberries' },
   { domain: 'kuper.ru', name: 'Купер' },
   { domain: 'sbermarket.ru', name: 'СберМаркет' },
   { domain: 'eda.yandex.ru', name: 'Яндекс Лавка / Еда' }
 ];
 
-// Очередь для последовательного выполнения запросов во вкладке Gemini (защита от гонок)
 let geminiTabMutex = Promise.resolve();
-// Дедупликация активных запросов по ключу товара
 const inFlightRequests = new Map();
-// Защита от частых авто-прогревов
 let lastWarmupCheckTs = 0;
 let isWarmingUp = false;
 
@@ -77,15 +73,28 @@ async function saveSettingsPatch(patch) {
   });
 }
 
-// ============================================================================
-// ВСТРОЕННЫЙ В БРАУЗЕР КЭШ ИИ-ОБЗОРОВ (РАБОТАЕТ ДАЖЕ БЕЗ SERVER.PY!)
-// ============================================================================
+async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(id);
+    return resp;
+  } catch (err) {
+    clearTimeout(id);
+    throw err;
+  }
+}
+
 function normalizeCacheKey(slug, title) {
   return String(slug || title || '')
     .trim()
     .toLowerCase();
 }
 
+// ============================================================================
+// 1. ВСТРОЕННЫЙ КЭШ ИИ-ОБЗОРОВ (lqs_ai_cache_v1)
+// ============================================================================
 async function getLocalAiCacheMap() {
   return new Promise((resolve) => {
     chrome.storage.local.get([AI_CACHE_KEY], (res) => {
@@ -118,7 +127,6 @@ async function saveLocalAiCacheEntry(slug, title, verdict, sources, mode) {
     updatedAt: new Date().toISOString()
   };
 
-  // LRU-очистка при превышении лимита MAX_LOCAL_AI_CACHE_ITEMS
   const keys = Object.keys(map);
   if (keys.length > MAX_LOCAL_AI_CACHE_ITEMS) {
     keys
@@ -138,22 +146,595 @@ async function clearLocalAiCache() {
   });
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return resp;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
+// ============================================================================
+// 2. МУЛЬТИ-АККАУНТ БАЗА ИСТОРИИ ЦЕН И АНОНИМНЫЙ ЗОНД БЕЗ КУКИ
+// ============================================================================
+async function getLocalPriceDb() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([PRICE_DB_KEY], (res) => {
+      resolve(res && res[PRICE_DB_KEY] && typeof res[PRICE_DB_KEY] === 'object' ? res[PRICE_DB_KEY] : {});
+    });
+  });
+}
+
+function mergePriceRecordIntoEntry(existing, item, accountId, nowIso) {
+  const slug = String(item.slug || '').trim().toLowerCase();
+  const acc = String(accountId || 'Аккаунт #1').trim();
+  const price = Number(item.price) || 0;
+  const oldPrice = item.oldPrice ? Number(item.oldPrice) : null;
+  const guestPrice = item.guestPrice ? Number(item.guestPrice) : (existing?.guestPrice || null);
+  const compMin = item.competitorMinPrice ? Number(item.competitorMinPrice) : (existing?.competitorMinPrice || null);
+  const compSum = item.competitorSummary || existing?.competitorSummary || null;
+
+  const entry = existing || {
+    slug,
+    title: item.title || slug,
+    amount: item.amount || '',
+    minPrice: price,
+    maxPrice: price,
+    avgPrice: price,
+    lastPrice: price,
+    guestPrice: null,
+    competitorMinPrice: null,
+    competitorSummary: null,
+    accounts: {},
+    history: [],
+    updatedAt: nowIso
+  };
+
+  if (item.title) entry.title = item.title;
+  if (item.amount) entry.amount = item.amount;
+  if (guestPrice && guestPrice > 0) {
+    entry.guestPrice = Math.round(guestPrice);
+    entry.accounts['Гость (без куки)'] = {
+      price: Math.round(guestPrice),
+      oldPrice: null,
+      updatedAt: nowIso
+    };
   }
+  if (compMin && compMin > 0) entry.competitorMinPrice = Math.round(compMin);
+  if (compSum) entry.competitorSummary = compSum;
+
+  if (price > 0) {
+    const rounded = Math.round(price);
+    entry.lastPrice = rounded;
+    entry.accounts[acc] = {
+      price: rounded,
+      oldPrice: oldPrice ? Math.round(oldPrice) : null,
+      updatedAt: nowIso
+    };
+    const lastHist = entry.history[0];
+    if (!lastHist || lastHist.price !== rounded || lastHist.accountId !== acc) {
+      entry.history.unshift({
+        price: rounded,
+        oldPrice: oldPrice ? Math.round(oldPrice) : null,
+        accountId: acc,
+        ts: nowIso
+      });
+      if (entry.history.length > 20) entry.history.length = 20;
+    }
+  }
+
+  const allPrices = [];
+  entry.history.forEach((h) => {
+    if (h && h.price > 0) allPrices.push(Number(h.price));
+  });
+  Object.values(entry.accounts || {}).forEach((a) => {
+    if (a && a.price > 0) allPrices.push(Number(a.price));
+  });
+
+  if (allPrices.length > 0) {
+    entry.minPrice = Math.round(Math.min(...allPrices));
+    entry.maxPrice = Math.round(Math.max(...allPrices));
+    entry.avgPrice = Math.round(allPrices.reduce((s, v) => s + v, 0) / allPrices.length);
+  }
+  entry.updatedAt = nowIso;
+  return entry;
+}
+
+async function recordPricesBatch(accountId, items) {
+  if (!Array.isArray(items) || items.length === 0) return {};
+  const settings = await getSettings();
+  const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
+  const db = await getLocalPriceDb();
+  const nowIso = new Date().toISOString();
+  const updatedSummaries = {};
+
+  for (const rawItem of items) {
+    if (!rawItem || !rawItem.slug) continue;
+    const slug = String(rawItem.slug).trim().toLowerCase();
+    const merged = mergePriceRecordIntoEntry(db[slug], rawItem, acc, nowIso);
+    db[slug] = merged;
+    updatedSummaries[slug] = merged;
+  }
+
+  // LRU trim
+  const keys = Object.keys(db);
+  if (keys.length > MAX_LOCAL_PRICE_DB_ITEMS) {
+    keys
+      .sort((a, b) => String(db[a]?.updatedAt || '').localeCompare(String(db[b]?.updatedAt || '')))
+      .slice(0, keys.length - MAX_LOCAL_PRICE_DB_ITEMS)
+      .forEach((k) => delete db[k]);
+  }
+
+  await new Promise((resolve) => {
+    chrome.storage.local.set({ [PRICE_DB_KEY]: db }, resolve);
+  });
+
+  // Синхронизируем с локальным FastAPI SQLite (:8765), чтобы другие профили Chrome сразу видели эти цены!
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  if (backendUrl) {
+    try {
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/price/record`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId: acc, items })
+        },
+        2200
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.summaries) {
+          for (const [sKey, sVal] of Object.entries(data.summaries)) {
+            db[sKey] = { ...db[sKey], ...sVal };
+            updatedSummaries[sKey] = db[sKey];
+          }
+          chrome.storage.local.set({ [PRICE_DB_KEY]: db });
+        }
+      }
+    } catch {
+      // backend offline — local storage is already updated
+    }
+  }
+
+  return updatedSummaries;
 }
 
 /**
- * Очищает название товара для поискового запроса (убирает вес в конце и служебные пометки)
+ * Вытаскивает цену товара из HTML-кода страницы Яндекс Лавки
  */
+function parsePriceFromLavkaHtml(html) {
+  if (!html) return null;
+  // 1. data-testid="price-text"
+  const mTestId = html.match(/data-testid="price-text"[^>]*>([\d\s,.]+)</i);
+  if (mTestId) {
+    const val = parseFloat(mTestId[1].replace(/[^\d.,]/g, '').replace(',', '.'));
+    if (val > 0) return Math.round(val);
+  }
+  // 2. JSON-LD Product offers.price
+  const mLd = html.match(/"@type"\s*:\s*"Offer"[\s\S]{0,250}?"price"\s*:\s*"?([\d.]+)"?/i);
+  if (mLd) {
+    const val = parseFloat(mLd[1]);
+    if (val > 0) return Math.round(val);
+  }
+  // 3. SSR state "price":124 or "pricing":{"price":124}
+  const mState = html.match(/"pricing"\s*:\s*\{[^}]*"price"\s*:\s*(\d+(?:\.\d+)?)/i);
+  if (mState) {
+    const val = parseFloat(mState[1]);
+    if (val > 0) return Math.round(val);
+  }
+  return null;
+}
+
+/**
+ * Анонимный зонд цены без куки (credentials: 'omit') — ловит «штраф за лояльность»!
+ */
+async function probeGuestPriceWithoutCookies(slug, title = '', currentPrice = null, accountId = null) {
+  if (!slug) return null;
+  const cleanSlug = String(slug).trim().toLowerCase();
+  try {
+    const url = `https://lavka.yandex.ru/good/${encodeURIComponent(cleanSlug)}`;
+    const resp = await fetchWithTimeout(
+      url,
+      {
+        method: 'GET',
+        credentials: 'omit',
+        cache: 'no-store',
+        headers: {
+          'Accept-Language': 'ru-RU,ru;q=0.9'
+        }
+      },
+      4500
+    );
+    if (!resp.ok) return null;
+    const html = await resp.text();
+    const guestPrice = parsePriceFromLavkaHtml(html);
+    if (guestPrice && guestPrice > 0) {
+      const summaries = await recordPricesBatch(accountId, [
+        {
+          slug: cleanSlug,
+          title: title || cleanSlug,
+          price: currentPrice || guestPrice,
+          guestPrice
+        }
+      ]);
+      return summaries[cleanSlug] || { slug: cleanSlug, guestPrice };
+    }
+  } catch {
+    // ignore network error
+  }
+  return null;
+}
+
+async function getProductPriceIntelligence(slug, title = '', currentPrice = null, oldPrice = null, amount = '', accountId = null) {
+  const cleanSlug = String(slug || '').trim().toLowerCase();
+  if (!cleanSlug) return null;
+  const settings = await getSettings();
+  const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
+
+  // Если передана текущая цена — сразу записываем наблюдение
+  if (currentPrice && currentPrice > 0) {
+    await recordPricesBatch(acc, [
+      {
+        slug: cleanSlug,
+        title,
+        price: currentPrice,
+        oldPrice,
+        amount
+      }
+    ]);
+  }
+
+  const db = await getLocalPriceDb();
+  let summary = db[cleanSlug] || null;
+
+  // Подтягиваем актуальные данные с локального SQLite (:8765), если там есть цены с других профилей Chrome
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  if (backendUrl) {
+    try {
+      const r = await fetchWithTimeout(`${backendUrl}/api/price/product/${encodeURIComponent(cleanSlug)}`, { method: 'GET' }, 1200);
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.status === 'ok' && j.summary) {
+          summary = { ...(summary || {}), ...j.summary, accounts: { ...(summary?.accounts || {}), ...(j.summary.accounts || {}) } };
+          db[cleanSlug] = summary;
+          chrome.storage.local.set({ [PRICE_DB_KEY]: db });
+        }
+      }
+    } catch {
+      // ignore offline backend
+    }
+  }
+
+  // Если гостевая цена без куки ещё не проверялась (или проверялась давно) — запускаем анонимный зонд!
+  if (settings.enableGuestPriceProbe !== false && (!summary || !summary.guestPrice)) {
+    const probed = await probeGuestPriceWithoutCookies(cleanSlug, title, currentPrice, acc);
+    if (probed) {
+      summary = { ...(summary || {}), ...probed };
+    }
+  }
+
+  return summary;
+}
+
+// ============================================================================
+// 3. КЛОНИРОВАНИЕ, СВЕРКА И АВТО-СБОРКА КОРЗИНЫ МЕЖДУ АККАУНТАМИ
+// ============================================================================
+async function getSavedCartsState() {
+  const settings = await getSettings();
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+
+  const localState = await new Promise((resolve) => {
+    chrome.storage.local.get([SAVED_CARTS_KEY], (res) => {
+      resolve(res && res[SAVED_CARTS_KEY] ? res[SAVED_CARTS_KEY] : { latest: null, byAccount: {} });
+    });
+  });
+
+  if (backendUrl) {
+    try {
+      const r = await fetchWithTimeout(`${backendUrl}/api/cart/latest`, { method: 'GET' }, 1400);
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.latest) {
+          const byAcc = { ...(localState.byAccount || {}) };
+          if (Array.isArray(j.cartsByAccount)) {
+            j.cartsByAccount.forEach((c) => {
+              if (c && c.accountId) byAcc[c.accountId] = c;
+            });
+          }
+          const merged = { latest: j.latest, byAccount: byAcc };
+          chrome.storage.local.set({ [SAVED_CARTS_KEY]: merged });
+          return merged;
+        }
+      }
+    } catch {
+      // backend offline
+    }
+  }
+
+  return localState;
+}
+
+async function saveCartSnapshot(accountId, items, totalPrice = 0) {
+  const settings = await getSettings();
+  const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
+  const cleanItems = (Array.isArray(items) ? items : []).filter((i) => i && i.slug);
+  const calcTotal = Math.round(cleanItems.reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.qty) || 1), 0));
+  const finalTotal = totalPrice > 0 ? Math.round(totalPrice) : calcTotal;
+  const nowIso = new Date().toISOString();
+
+  const snapshot = {
+    accountId: acc,
+    items: cleanItems,
+    totalPrice: finalTotal,
+    updatedAt: nowIso
+  };
+
+  const state = await getSavedCartsState();
+  state.latest = snapshot;
+  state.byAccount = state.byAccount || {};
+  state.byAccount[acc] = snapshot;
+
+  await new Promise((resolve) => {
+    chrome.storage.local.set({ [SAVED_CARTS_KEY]: state }, resolve);
+  });
+
+  // Записываем цены товаров корзины в базу цен
+  await recordPricesBatch(
+    acc,
+    cleanItems.map((i) => ({
+      slug: i.slug,
+      title: i.title,
+      price: i.price,
+      oldPrice: i.oldPrice,
+      amount: i.amount
+    }))
+  );
+
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  if (backendUrl) {
+    try {
+      await fetchWithTimeout(
+        `${backendUrl}/api/cart/save`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            accountId: acc,
+            items: cleanItems,
+            totalPrice: finalTotal
+          })
+        },
+        2000
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return snapshot;
+}
+
+/**
+ * Мгновенная сверка сохранённой корзины на текущем аккаунте (проверяет живые цены каждого товара на текущем аккаунте и без куки)
+ */
+async function compareSavedCartOnCurrentAccount(targetAccountId) {
+  const settings = await getSettings();
+  const currentAcc = targetAccountId || settings.lavkaAccountLabel || 'Текущий аккаунт';
+  const cartsState = await getSavedCartsState();
+  const latest = cartsState.latest;
+
+  if (!latest || !Array.isArray(latest.items) || latest.items.length === 0) {
+    return {
+      ok: false,
+      error: 'Слепок корзины пока пуст! Добавь товары в корзину Лавки или нажми «📸 Снять слепок корзины».'
+    };
+  }
+
+  const priceDb = await getLocalPriceDb();
+  const comparedItems = [];
+  let sourceTotal = 0;
+  let currentTotal = 0;
+  let guestTotal = 0;
+  const batchToRecord = [];
+
+  for (const item of latest.items) {
+    const slug = String(item.slug || '').trim().toLowerCase();
+    const qty = Number(item.qty) || 1;
+    const sourcePrice = Number(item.price) || 0;
+
+    let currentPrice = null;
+    let guestPrice = priceDb[slug]?.guestPrice || null;
+
+    // 1. Пробуем запросить страницу товара с куками ТЕКУЩЕГО аккаунта (credentials: 'include')
+    try {
+      const url = `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}`;
+      const resp = await fetchWithTimeout(url, { method: 'GET', credentials: 'include', cache: 'no-store' }, 4000);
+      if (resp.ok) {
+        const html = await resp.text();
+        currentPrice = parsePriceFromLavkaHtml(html);
+      }
+    } catch {
+      // fallback to priceDb
+    }
+
+    if (!currentPrice) {
+      currentPrice = priceDb[slug]?.accounts?.[currentAcc]?.price || sourcePrice;
+    }
+
+    // 2. Пробуем узнать цену без куки (Гость), если ещё не известна
+    if (!guestPrice) {
+      try {
+        const url = `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}`;
+        const respG = await fetchWithTimeout(url, { method: 'GET', credentials: 'omit', cache: 'no-store' }, 3500);
+        if (respG.ok) {
+          const htmlG = await respG.text();
+          guestPrice = parsePriceFromLavkaHtml(htmlG);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const effCurrent = currentPrice || sourcePrice;
+    const effGuest = guestPrice || effCurrent;
+
+    sourceTotal += sourcePrice * qty;
+    currentTotal += effCurrent * qty;
+    guestTotal += effGuest * qty;
+
+    if (currentPrice) {
+      batchToRecord.push({
+        slug,
+        title: item.title || slug,
+        price: currentPrice,
+        guestPrice: guestPrice || null,
+        amount: item.amount || ''
+      });
+    }
+
+    comparedItems.push({
+      slug,
+      title: item.title || slug,
+      qty,
+      sourcePrice,
+      currentPrice: effCurrent,
+      guestPrice: guestPrice || null,
+      diffPerUnit: effCurrent - sourcePrice,
+      diffTotal: (effCurrent - sourcePrice) * qty,
+      accounts: priceDb[slug]?.accounts || {}
+    });
+  }
+
+  if (batchToRecord.length > 0) {
+    await recordPricesBatch(currentAcc, batchToRecord);
+  }
+
+  return {
+    ok: true,
+    sourceAccount: latest.accountId || 'Аккаунт #1',
+    currentAccount: currentAcc,
+    sourceTotal: Math.round(sourceTotal),
+    currentTotal: Math.round(currentTotal),
+    guestTotal: Math.round(guestTotal),
+    diffTotal: Math.round(currentTotal - sourceTotal),
+    items: comparedItems,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+/**
+ * Авто-сборщик корзины в 1 клик: проходит по всем товарам из слепка корзины и добавляет их в корзину текущего аккаунта!
+ */
+async function autoBuildCartInBrowser(customItems = null) {
+  const cartsState = await getSavedCartsState();
+  const items = Array.isArray(customItems) && customItems.length > 0
+    ? customItems
+    : (cartsState.latest && Array.isArray(cartsState.latest.items) ? cartsState.latest.items : []);
+
+  if (items.length === 0) {
+    return {
+      ok: false,
+      error: 'Нет сохранённых товаров в слепке корзины! Сначала собери корзину на первом аккаунте.'
+    };
+  }
+
+  // Находим открытую вкладку Лавки или создаём новую
+  const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
+  let targetTab = lavkaTabs && lavkaTabs.length > 0 ? lavkaTabs[0] : null;
+  if (!targetTab) {
+    targetTab = await chrome.tabs.create({ url: 'https://lavka.yandex.ru/', active: true });
+  } else {
+    await chrome.tabs.update(targetTab.id, { active: true });
+  }
+
+  let addedCount = 0;
+  const resultsLog = [];
+
+  for (const item of items) {
+    if (!item || !item.slug) continue;
+    const targetUrl = `https://lavka.yandex.ru/good/${encodeURIComponent(item.slug)}`;
+    const desiredQty = Math.max(1, Math.min(20, Number(item.qty) || 1));
+
+    await chrome.tabs.update(targetTab.id, { url: targetUrl });
+
+    // Ждём загрузки карточки товара
+    await new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          resolve();
+        }
+      }, 5500);
+      const listener = (tabId, info) => {
+        if (tabId === targetTab.id && info.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          if (!done) {
+            done = true;
+            clearTimeout(timer);
+            setTimeout(resolve, 900);
+          }
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+
+    try {
+      const execRes = await chrome.scripting.executeScript({
+        target: { tabId: targetTab.id },
+        args: [desiredQty],
+        func: async (qtyToSet) => {
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          let addBtn = null;
+          for (let i = 0; i < 15; i++) {
+            addBtn =
+              document.querySelector('main[data-testid="good-page-desktop"] button[data-testid="snippet-control"]') ||
+              document.querySelector('button[data-testid="snippet-control"]');
+            if (addBtn) break;
+            await wait(250);
+          }
+          if (!addBtn) return { ok: false, reason: 'Кнопка В корзину не найдена (возможно, нет в наличии)' };
+
+          // Первый клик добавляет 1 шт.
+          addBtn.click();
+          await wait(380);
+
+          // Если нужно больше 1 шт., ищем кнопку "+"
+          for (let q = 1; q < qtyToSet; q++) {
+            const plusBtn =
+              document.querySelector('main[data-testid="good-page-desktop"] button[aria-label*="Увеличить"]') ||
+              document.querySelector('main[data-testid="good-page-desktop"] button[data-testid*="plus"]') ||
+              Array.from(document.querySelectorAll('main[data-testid="good-page-desktop"] button')).find(
+                (b) => (b.textContent || '').trim() === '+'
+              );
+            if (plusBtn) {
+              plusBtn.click();
+              await wait(280);
+            }
+          }
+
+          const priceEl = document.querySelector('span[data-testid="price-text"]');
+          const priceVal = priceEl ? parseFloat(priceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.')) : null;
+          return { ok: true, price: priceVal };
+        }
+      });
+
+      const r = execRes && execRes[0] ? execRes[0].result : null;
+      if (r && r.ok) {
+        addedCount += 1;
+        resultsLog.push({ slug: item.slug, title: item.title, qty: desiredQty, ok: true, price: r.price });
+      } else {
+        resultsLog.push({ slug: item.slug, title: item.title, qty: desiredQty, ok: false, reason: r?.reason || 'Ошибка' });
+      }
+    } catch (err) {
+      resultsLog.push({ slug: item.slug, title: item.title, qty: desiredQty, ok: false, reason: err.message });
+    }
+  }
+
+  return {
+    ok: true,
+    addedCount,
+    totalRequested: items.length,
+    results: resultsLog
+  };
+}
+
+// ============================================================================
+// 4. ПОИСК ОТЗЫВОВ И ЦЕН КОНКУРЕНТОВ В DUCKDUCKGO
+// ============================================================================
 function cleanProductQueryForSearch(title, brand) {
   let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
   q = q.replace(
@@ -213,9 +794,38 @@ function unwrapDdgUrl(rawHref) {
   return /^https?:\/\//i.test(href) ? href : '';
 }
 
-/**
- * Исправленный парсер DuckDuckGo HTML (разбивает по заголовкам результатов, не обрезая сниппеты на вложенных div)
- */
+function extractCompetitorPricesFromSources(sources, lavkaPrice = null) {
+  if (!Array.isArray(sources) || sources.length === 0) {
+    return { competitorMinPrice: null, competitorSummary: '' };
+  }
+  const found = [];
+  const priceRegex = /(?:от\s+|цена\s+|за\s+)?(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])/gi;
+  for (const s of sources) {
+    const text = `${s.title || ''} ${s.snippet || ''}`;
+    const storeName = s.source || 'Магазин';
+    for (const m of text.matchAll(priceRegex)) {
+      const val = parseFloat(m[1].replace(',', '.'));
+      if (val >= 20 && val <= 9500) {
+        if (lavkaPrice && (val < lavkaPrice * 0.22 || val > lavkaPrice * 3.5)) continue;
+        found.push({ store: storeName, price: Math.round(val) });
+      }
+    }
+  }
+  if (found.length === 0) return { competitorMinPrice: null, competitorSummary: '' };
+  found.sort((a, b) => a.price - b.price);
+  const minP = found[0].price;
+  const seen = new Set();
+  const parts = [];
+  for (const item of found) {
+    if (!seen.has(item.store)) {
+      seen.add(item.store);
+      parts.push(`${item.store}: ~${item.price} ₽`);
+    }
+    if (parts.length >= 3) break;
+  }
+  return { competitorMinPrice: minP, competitorSummary: parts.join(', ') };
+}
+
 async function parseDdgHtmlSearch(query) {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   try {
@@ -232,7 +842,6 @@ async function parseDdgHtmlSearch(query) {
     if (resp.ok) {
       const html = await resp.text();
       const results = [];
-      // Разбиваем по началу каждого блока результата, чтобы вложенные </div> не обрезали result__snippet
       const chunks = html.split(/<h2[^>]+class="[^"]*result__title[^"]*"[^>]*>/i).slice(1, 10);
       for (const chunk of chunks) {
         const aMatch = chunk.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
@@ -261,7 +870,6 @@ async function parseDdgHtmlSearch(query) {
     // fallback to lite below
   }
 
-  // Резервный парсер через lite.duckduckgo.com
   try {
     const liteUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
     const respLite = await fetchWithTimeout(
@@ -305,15 +913,12 @@ async function parseDdgHtmlSearch(query) {
   }
 }
 
-/**
- * Автономный поиск реальных отзывов напрямую из фонового воркера расширения (если локальный server.py выключен)
- */
 async function searchWebReviewsDirect(title, brand) {
   const cleanQ = cleanProductQueryForSearch(title, brand);
   if (!cleanQ) return [];
 
-  const qPrimary = `${cleanQ} отзывы (site:otzovik.com OR site:irecommend.ru OR site:ozon.ru OR site:vkusvill.ru OR site:rskrf.ru OR site:market.yandex.ru)`;
-  const qFallback = `${cleanQ} отзывы покупателей`;
+  const qPrimary = `${cleanQ} отзывы цена (site:otzovik.com OR site:irecommend.ru OR site:vkusvill.ru OR site:perekrestok.ru OR site:ozon.ru OR site:rskrf.ru)`;
+  const qFallback = `${cleanQ} отзывы покупателей цена`;
 
   const collected = [];
   const seen = new Set();
@@ -338,16 +943,13 @@ async function searchWebReviewsDirect(title, brand) {
       }
     }
   } catch {
-    // ignore network errors in direct DDG search
+    // ignore network errors
   }
 
   return collected.slice(0, 6);
 }
 
-/**
- * Строит умный контекст цены: за 1 кг/л, за 1 шт/упаковку или без пересчёта (если вес не указан)
- */
-function buildPricingContext(payload) {
+function buildPricingContext(payload, priceIntel = null) {
   let pricePerKg = payload.pricePerKg || null;
   let unitLabel = payload.unitLabel || 'кг';
   let pricePerPiece = payload.pricePerPiece || null;
@@ -389,41 +991,52 @@ function buildPricingContext(payload) {
     }
   }
 
+  const radarNotes = [];
+  if (priceIntel) {
+    if (priceIntel.guestPrice && price && priceIntel.guestPrice < price - 2) {
+      radarNotes.push(`ВНИМАНИЕ: цена без куки (для гостя) ниже на ${Math.round(price - priceIntel.guestPrice)} ₽ (${priceIntel.guestPrice} ₽)`);
+    }
+    if (priceIntel.minPrice && price && priceIntel.minPrice < price - 2) {
+      radarNotes.push(`минимальная цена в твоей базе была ${priceIntel.minPrice} ₽`);
+    }
+    if (priceIntel.competitorSummary) {
+      radarNotes.push(`цены у конкурентов: ${priceIntel.competitorSummary}`);
+    }
+  }
+  const radarSuffix = radarNotes.length ? ` | Радар цен: ${radarNotes.join('; ')}` : '';
+
   if (pricePerKg) {
     if (proteinCost && protein !== null && protein >= 3) {
       return {
-        calcLine: `в пересчёте ~${pricePerKg} ₽/${unitLabel}; стоимость 100 г белка ~${proteinCost} ₽ (белка ${protein} г на 100 г)`,
-        evalHint: `в пересчёте на 1 ${unitLabel} (~${pricePerKg} ₽/${unitLabel}) и с учётом цены белка (~${proteinCost} ₽ за 100 г)`,
+        calcLine: `в пересчёте ~${pricePerKg} ₽/${unitLabel}; стоимость 100 г белка ~${proteinCost} ₽ (белка ${protein} г на 100 г)${radarSuffix}`,
+        evalHint: `в пересчёте на 1 ${unitLabel} (~${pricePerKg} ₽/${unitLabel}), с учётом цены белка (~${proteinCost} ₽ за 100 г) и данных радара цен`,
         ruleLine: `Для этого товара рассчитана точная цена за 1 ${unitLabel} (~${pricePerKg} ₽/${unitLabel}) и за 100 г белка (~${proteinCost} ₽) — опирайся на эти цифры.`
       };
     }
     return {
-      calcLine: `в пересчёте ~${pricePerKg} ₽/${unitLabel}`,
-      evalHint: `в пересчёте на 1 ${unitLabel} (~${pricePerKg} ₽/${unitLabel})`,
+      calcLine: `в пересчёте ~${pricePerKg} ₽/${unitLabel}${radarSuffix}`,
+      evalHint: `в пересчёте на 1 ${unitLabel} (~${pricePerKg} ₽/${unitLabel}) и по данным радара цен`,
       ruleLine: `Для этого товара рассчитана точная цена за 1 ${unitLabel} (~${pricePerKg} ₽/${unitLabel}). Стоимость белка отдельно не оценивай, если это не белковый продукт.`
     };
   }
 
   if (pricePerPiece && piecesCount && piecesCount > 1) {
     return {
-      calcLine: `поштучная фасовка (${piecesCount} ${pieceUnitLabel}) — ~${pricePerPiece} ₽ за 1 ${pieceUnitLabel}, вес в граммах не указан`,
+      calcLine: `поштучная фасовка (${piecesCount} ${pieceUnitLabel}) — ~${pricePerPiece} ₽ за 1 ${pieceUnitLabel}, вес в граммах не указан${radarSuffix}`,
       evalHint: `за 1 ${pieceUnitLabel} (~${pricePerPiece} ₽/${pieceUnitLabel}) и за упаковку`,
       ruleLine: `Товар продаётся поштучно (${piecesCount} ${pieceUnitLabel}, ~${pricePerPiece} ₽/${pieceUnitLabel}) без указания веса в граммах — НЕ пытайся считать цену за килограмм, оценивай выгоду за штуку/упаковку.`
     };
   }
 
   return {
-    calcLine: 'вес в граммах не указан (оценка за упаковку / 1 шт.)',
+    calcLine: `вес в граммах не указан (оценка за упаковку / 1 шт.)${radarSuffix}`,
     evalHint: 'за саму упаковку / штуку (без пересчёта за килограмм)',
     ruleLine: 'На карточке этого товара не указан вес в граммах или миллилитрах — НЕ пытайся выдумывать или требовать цену за килограмм, оценивай адекватность цены за саму штуку/упаковку.'
   };
 }
 
-/**
- * Формирует честный промпт на нормальном разговорном русском языке (без сленга и без галлюцинаций)
- */
-function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = false) {
-  const sitesListStr = REVIEW_SEARCH_SITES.slice(0, 11)
+function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = false, priceIntel = null) {
+  const sitesListStr = REVIEW_SEARCH_SITES.slice(0, 12)
     .map((s) => `${s.name} (${s.domain})`)
     .join(', ');
 
@@ -434,13 +1047,13 @@ function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = fals
       .join('\n');
   } else if (isBrowserGeminiTab) {
     snippetsText =
-      'Предварительный парсер не нашёл прямых сниппетов — пожалуйста, проверь наличие реальных отзывов об этом товаре через поиск Google по площадкам выше. Если отзывов именно на этот товар нет — честно напиши об этом и оценивай строго по составу, КБЖУ и цене.';
+      'Предварительный парсер не нашёл прямых сниппетов — пожалуйста, проверь наличие реальных отзывов и цен об этом товаре через поиск Google по площадкам выше. Если отзывов именно на этот товар нет — честно напиши об этом и оценивай строго по составу, КБЖУ и цене.';
   } else {
     snippetsText =
       'Прямых отзывов именно на этот товар в поисковой выдаче не найдено — честно сообщи об этом в 1-м пункте и оценивай товар строго по составу, КБЖУ и цене.';
   }
 
-  const pricing = buildPricingContext(payload);
+  const pricing = buildPricingContext(payload, priceIntel);
   const brandSuffix = payload.brand ? ` (Бренд: ${payload.brand})` : '';
 
   return [
@@ -452,8 +1065,8 @@ function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = fals
     `• Состав: ${payload.ingredients || 'не указан на странице'}`,
     `• КБЖУ на 100 г: ${payload.traits || 'не указано на странице'}`,
     ``,
-    `Площадки для проверки отзывов: ${sitesListStr}.`,
-    `Найденные отзывы в интернете:\n${snippetsText}`,
+    `Площадки для проверки отзывов и цен: ${sitesListStr}.`,
+    `Найденные отзывы и цены в интернете:\n${snippetsText}`,
     ``,
     `СТРОГИЕ ПРАВИЛА ЧЕСТНОСТИ (ТОЛЬКО ФАКТЫ, БЕЗ ПРИДУМОК):`,
     `- Пиши ТОЛЬКО подтверждённые факты из реальных отзывов, состава, КБЖУ и цены.`,
@@ -462,7 +1075,7 @@ function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = fals
     ``,
     `Ответь ровно в 3 коротких пунктах (по 1–2 предложения в каждом), обычным живым русским языком без сленга:`,
     `1. **Отзывы и репутация**: что реально пишут покупатели на отзовиках и в магазинах (укажи площадки, если отзывы найдены), либо честно отметь, что отзывов в сети не найдено, и скажи, что сразу видно по характеристикам продукта.`,
-    `2. **Состав, КБЖУ и цена**: фактический разбор состава (есть ли скрытый сахар, крахмал, ММО, заменители молочного жира, дешёвые наполнители или состав чистый) и насколько адекватна цена (${pricing.evalHint}).`,
+    `2. **Состав, КБЖУ и честность цены**: фактический разбор состава (есть ли скрытый сахар, крахмал, ММО, заменители молочного жира, дешёвые наполнители или состав чистый) и насколько адекватна цена (${pricing.evalHint}).`,
     `3. **Вердикт**: выбери ОДНУ оценку на нормальном русском языке и кратко поясни вывод:`,
     `   • ✅ **Отличный выбор — стоит брать**`,
     `   • 👍 **Хороший вариант на каждый день (есть мелкие нюансы)**`,
@@ -471,6 +1084,9 @@ function buildProductReviewPrompt(payload, webSources, isBrowserGeminiTab = fals
   ].join('\n');
 }
 
+// ============================================================================
+// 5. РАБОТА С ВКЛАДКОЙ GEMINI И КУКАМИ
+// ============================================================================
 async function inspectGeminiCookies() {
   try {
     const cookiesGemini = await chrome.cookies.getAll({ url: 'https://gemini.google.com/' });
@@ -504,9 +1120,6 @@ async function inspectGeminiCookies() {
   }
 }
 
-/**
- * Определяет email/имя аккаунта Google внутри открытой вкладки Gemini
- */
 async function detectTabAccountEmail(tabId) {
   try {
     const results = await chrome.scripting.executeScript({
@@ -547,9 +1160,6 @@ function buildGeminiUrlForAccount(accountIndex) {
   return `https://gemini.google.com/u/${accountIndex}/app`;
 }
 
-/**
- * Возвращает список всех открытых вкладок Gemini с их tabId, URL, индексом /u/N и email аккаунта
- */
 async function listOpenGeminiTabsWithAccounts() {
   const tabs = await chrome.tabs.query({ url: ['https://gemini.google.com/*'] });
   const enriched = [];
@@ -569,9 +1179,6 @@ async function listOpenGeminiTabsWithAccounts() {
   return enriched;
 }
 
-/**
- * Находит подходящую вкладку Gemini с учётом выбранного пользователем аккаунта
- */
 async function findOpenGeminiTab(autoCreateIfMissing = false, makeActive = false) {
   const settings = await getSettings();
   const targetIdx = String(settings.geminiAccountIndex ?? 'auto');
@@ -613,7 +1220,7 @@ async function createGeminiTab(targetUrl, makeActive = false) {
   const created = await chrome.tabs.create({
     url: targetUrl,
     active: makeActive,
-    pinned: !makeActive // Закрепляем компактной иконкой в фоне, чтобы не мешала вкладкам пользователя!
+    pinned: !makeActive
   });
   await new Promise((resolve) => {
     let done = false;
@@ -638,12 +1245,6 @@ async function createGeminiTab(targetUrl, makeActive = false) {
   return created;
 }
 
-/**
- * АВТО-ПРОГРЕВ ZERO-CLICK:
- * Когда пользователь запускает браузер или открывает Яндекс Лавку, расширение САМО тихо проверяет:
- * если мост :8083 не запущен, но есть куки Google — заранее открывает компактную закреплённую вкладку Gemini в фоне,
- * чтобы при открытии любого товара ИИ-обзор срабатывал мгновенно и без единого клика!
- */
 async function ensureAutopilotWarmup(reason = 'auto') {
   const now = Date.now();
   if (isWarmingUp || now - lastWarmupCheckTs < 15000) return;
@@ -654,11 +1255,9 @@ async function ensureAutopilotWarmup(reason = 'auto') {
     const settings = await getSettings();
     if (settings.autoWarmupGeminiTab === false) return;
 
-    // 1. Если уже открыта вкладка Gemini — ничего открывать не нужно
     const existingTab = await findOpenGeminiTab(false, false);
     if (existingTab) return;
 
-    // 2. Если работает локальный мост :8083 — вкладка не нужна
     const aiBaseUrl = (settings.aiBaseUrl || '').replace(/\/$/, '');
     if (aiBaseUrl) {
       try {
@@ -666,15 +1265,13 @@ async function ensureAutopilotWarmup(reason = 'auto') {
         const bridgeResp = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 1000);
         if (bridgeResp.ok) return;
       } catch {
-        // мост выключен
+        // bridge offline
       }
     }
 
-    // 3. Проверяем наличие авторизованных куки Google, чтобы не открывать пустую страницу логина
     const cookies = await inspectGeminiCookies();
     if (!cookies.ok) return;
 
-    // 4. Тихо создаём закреплённую фоновую вкладку Gemini (pinned: true, active: false)
     await findOpenGeminiTab(true, false);
     console.log(`[LQS Zero-Click Autopilot] Warmed up background Gemini tab (${reason})`);
   } catch {
@@ -684,11 +1281,6 @@ async function ensureAutopilotWarmup(reason = 'auto') {
   }
 }
 
-/**
- * Устойчивый инжектор промпта во вкладку Gemini:
- * - Ждёт появления поля ввода до 10 секунд (если вкладка только что открылась в фоне)
- * - Контролирует индикатор генерации (кнопку Stop), чтобы не возвращать оборванный текст во время Google-поиска
- */
 async function executePromptInsideGeminiTab(tabId, promptText) {
   try {
     const results = await chrome.scripting.executeScript({
@@ -758,7 +1350,7 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
               'button[aria-label*="Stop"], button[aria-label*="Остановить"], button[aria-label*="Прервать"], .stop-icon, mat-icon[data-mat-icon-name="stop"]'
             );
             if (stopBtn && stopBtn.offsetParent !== null) return true;
-            const busyModels = document.querySelectorAll('model-response[ aria-busy="true" ], .response-streaming');
+            const busyModels = document.querySelectorAll('model-response[aria-busy="true"], .response-streaming');
             return busyModels.length > 0;
           };
 
@@ -820,9 +1412,6 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
   }
 }
 
-/**
- * Обёртка с очередью (Mutex), чтобы параллельные запросы не печатали во вкладку Gemini одновременно
- */
 function enqueueGeminiTabExecution(taskFn) {
   const next = geminiTabMutex.then(() => taskFn(), () => taskFn());
   geminiTabMutex = next.catch(() => {});
@@ -836,18 +1425,25 @@ async function checkAllConnections() {
   const selectedTab = await findOpenGeminiTab(false, false);
   const localCacheMap = await getLocalAiCacheMap();
   const localCacheCount = Object.keys(localCacheMap).length;
+  const priceDb = await getLocalPriceDb();
+  const trackedPricesCount = Object.keys(priceDb).length;
 
   const backendUrl = settings.backendUrl.replace(/\/$/, '');
   const aiBaseUrl = settings.aiBaseUrl.replace(/\/$/, '');
 
-  let backendStatus = { ok: false, cachedItems: 0, msg: 'Выкл' };
+  let backendStatus = { ok: false, cachedItems: 0, trackedPrices: trackedPricesCount, msg: 'Выкл (локальная БД)' };
   try {
     const r1 = await fetchWithTimeout(`${backendUrl}/api/health`, { method: 'GET' }, 1200);
     if (r1.ok) {
       const j = await r1.json().catch(() => ({}));
-      backendStatus = { ok: true, cachedItems: j.cachedItems ?? 0, msg: `ОК (кэш: ${j.cachedItems ?? 0})` };
+      backendStatus = {
+        ok: true,
+        cachedItems: j.cachedItems ?? 0,
+        trackedPrices: j.trackedPrices ?? trackedPricesCount,
+        msg: `ОК (кэш: ${j.cachedItems ?? 0}, цен: ${j.trackedPrices ?? 0})`
+      };
     } else {
-      backendStatus = { ok: false, cachedItems: 0, msg: `HTTP ${r1.status}` };
+      backendStatus = { ok: false, cachedItems: 0, trackedPrices: trackedPricesCount, msg: `HTTP ${r1.status}` };
     }
   } catch {
     // offline
@@ -894,6 +1490,7 @@ async function checkAllConnections() {
     backend: backendStatus,
     bridge: bridgeStatus,
     localAiCacheCount: localCacheCount,
+    trackedPricesCount,
     settings
   };
 }
@@ -923,8 +1520,19 @@ async function orchestrateProductAnalysisInternal(payload) {
   const settings = await getSettings();
   const backendUrl = settings.backendUrl.replace(/\/$/, '');
   const aiBaseUrl = settings.aiBaseUrl.replace(/\/$/, '');
+  const acc = payload.accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
 
-  // 0. МГНОВЕННАЯ ПРОВЕРКА ВСТРОЕННОГО БРАУЗЕРНОГО КЭША (0 мс, работает без server.py!)
+  // Сначала получаем разведку по ценам (включая проверку без куки и историю)
+  let priceIntel = await getProductPriceIntelligence(
+    payload.slug,
+    payload.title,
+    payload.price,
+    payload.oldPrice,
+    payload.amount,
+    acc
+  );
+
+  // 0. Проверяем встроенный браузерный кэш ИИ
   if (!payload.forceRefresh) {
     const localCached = await getLocalAiCacheEntry(payload.slug, payload.title);
     if (localCached && localCached.verdict) {
@@ -933,7 +1541,8 @@ async function orchestrateProductAnalysisInternal(payload) {
         cached: true,
         mode: `Кэш браузера (${localCached.mode || 'ИИ'})`,
         verdict: localCached.verdict,
-        sources: localCached.sources || []
+        sources: localCached.sources || [],
+        priceSummary: priceIntel
       };
     }
   }
@@ -941,7 +1550,7 @@ async function orchestrateProductAnalysisInternal(payload) {
   let webSources = [];
   let backendOnline = false;
 
-  // 1. Запрашиваем локальный FastAPI (:8765) для проверки SQLite-кэша и поиска отзывов в интернете
+  // 1. Запрашиваем локальный FastAPI (:8765)
   try {
     const resp = await fetchWithTimeout(
       `${backendUrl}/api/analyze-product`,
@@ -950,6 +1559,8 @@ async function orchestrateProductAnalysisInternal(payload) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...payload,
+          accountId: acc,
+          guestPrice: priceIntel?.guestPrice || null,
           aiBaseUrl: settings.aiBaseUrl,
           aiApiKey: settings.aiApiKey,
           aiModel: settings.aiModel
@@ -964,6 +1575,9 @@ async function orchestrateProductAnalysisInternal(payload) {
       if (Array.isArray(data.sources)) {
         webSources = data.sources;
       }
+      if (data.priceSummary) {
+        priceIntel = { ...(priceIntel || {}), ...data.priceSummary };
+      }
       if (data.verdict && data.aiOk !== false && !data.verdict.startsWith('⚠️')) {
         const modeLabel = data.cached ? 'FastAPI SQLite Cache (:8765)' : `FastAPI (:8765) + ${settings.aiModel}`;
         await saveLocalAiCacheEntry(payload.slug, payload.title, data.verdict, webSources, modeLabel);
@@ -972,22 +1586,42 @@ async function orchestrateProductAnalysisInternal(payload) {
           cached: Boolean(data.cached),
           mode: modeLabel,
           verdict: data.verdict,
-          sources: webSources
+          sources: webSources,
+          priceSummary: priceIntel
         };
       }
     }
   } catch {
-    // FastAPI (:8765) выключен или не ответил — продолжаем автономно
+    // FastAPI (:8765) выключен — работаем автономно
   }
 
-  // 1b. Если локальный сервер выключен или не вернул отзывы — ищем отзывы напрямую из Service Worker по списку сайтов!
+  // 1b. Автономный поиск отзывов и цен конкурентов в DuckDuckGo
   if (!webSources || webSources.length === 0) {
     webSources = await searchWebReviewsDirect(payload.title, payload.brand);
   }
 
-  // 2. Пробуем прямой запрос в OpenAI-совместимый мост (:8083 / DeepSeek / Ollama), если он запущен
+  const comp = extractCompetitorPricesFromSources(webSources, payload.price);
+  if (comp.competitorMinPrice || comp.competitorSummary) {
+    const updatedMap = await recordPricesBatch(acc, [
+      {
+        slug: payload.slug,
+        title: payload.title,
+        price: payload.price || 0,
+        oldPrice: payload.oldPrice || null,
+        amount: payload.amount || '',
+        competitorMinPrice: comp.competitorMinPrice,
+        competitorSummary: comp.competitorSummary
+      }
+    ]);
+    const cleanSlug = String(payload.slug || '').trim().toLowerCase();
+    if (updatedMap[cleanSlug]) {
+      priceIntel = updatedMap[cleanSlug];
+    }
+  }
+
+  // 2. Пробуем прямой запрос в мост (:8083 / DeepSeek / Ollama)
   try {
-    const promptForBridge = buildProductReviewPrompt(payload, webSources, false);
+    const promptForBridge = buildProductReviewPrompt(payload, webSources, false, priceIntel);
     const headers = { 'Content-Type': 'application/json' };
     if (settings.aiApiKey) {
       headers.Authorization = `Bearer ${settings.aiApiKey}`;
@@ -1021,21 +1655,22 @@ async function orchestrateProductAnalysisInternal(payload) {
           cached: false,
           mode: modeLabel,
           verdict: cleanReply,
-          sources: webSources
+          sources: webSources,
+          priceSummary: priceIntel
         };
       }
     }
   } catch {
-    // Мост :8083 выключен — переходим к Автопилоту через выбранный аккаунт Gemini
+    // мост :8083 выключен
   }
 
-  // 3. АВТОПИЛОТ ЧЕРЕЗ ВЫБРАННЫЙ АККАУНТ / ВКЛАДКУ GEMINI В БРАУЗЕРЕ (ЧЕРЕЗ ОЧЕРЕДЬ БЕЗ ГОНОК)
+  // 3. Автопилот через вкладку Gemini
   return await enqueueGeminiTabExecution(async () => {
     const geminiTab = await findOpenGeminiTab(true, false);
     if (geminiTab && geminiTab.id) {
       const email = await detectTabAccountEmail(geminiTab.id);
       const accIdx = extractAccountIndexFromUrl(geminiTab.url);
-      const promptForTab = buildProductReviewPrompt(payload, webSources, true);
+      const promptForTab = buildProductReviewPrompt(payload, webSources, true, priceIntel);
       const tabResult = await executePromptInsideGeminiTab(geminiTab.id, promptForTab);
       if (tabResult && tabResult.ok && tabResult.text) {
         const accLabel = email ? `${email} (/u/${accIdx})` : `/u/${accIdx}`;
@@ -1049,7 +1684,8 @@ async function orchestrateProductAnalysisInternal(payload) {
           cached: false,
           mode: modeLabel,
           verdict: tabResult.text,
-          sources: webSources
+          sources: webSources,
+          priceSummary: priceIntel
         };
       }
       return {
@@ -1059,7 +1695,8 @@ async function orchestrateProductAnalysisInternal(payload) {
           tabResult && tabResult.error
             ? tabResult.error
             : 'Не удалось получить ответ от вкладки gemini.google.com.',
-        sources: webSources
+        sources: webSources,
+        priceSummary: priceIntel
       };
     }
 
@@ -1067,7 +1704,8 @@ async function orchestrateProductAnalysisInternal(payload) {
       ok: false,
       mode: 'All AI methods unreachable',
       error: 'Не удалось найти или открыть вкладку gemini.google.com и локальный мост :8083 выключен.',
-      sources: webSources
+      sources: webSources,
+      priceSummary: priceIntel
     };
   });
 }
@@ -1087,7 +1725,7 @@ async function orchestrateProductAnalysis(payload) {
 }
 
 // ============================================================================
-// ЖИЗНЕННЫЙ ЦИКЛ SERVICE WORKER: ZERO-CLICK АВТОЗАПУСК И ПРОГРЕВ
+// 6. СОБЫТИЯ ЖИЗНЕННОГО ЦИКЛА И ОБРАБОТЧИК СООБЩЕНИЙ
 // ============================================================================
 chrome.runtime.onInstalled.addListener(() => {
   ensureAutopilotWarmup('onInstalled');
@@ -1108,6 +1746,48 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'LQS_ANALYZE_PRODUCT') {
     orchestrateProductAnalysis(msg.payload || {})
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_RECORD_PRICES') {
+    recordPricesBatch(msg.accountId, msg.items || [])
+      .then((summaries) => sendResponse({ ok: true, summaries }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_PRICE_INTEL') {
+    getProductPriceIntelligence(msg.slug, msg.title, msg.price, msg.oldPrice, msg.amount, msg.accountId)
+      .then((summary) => sendResponse({ ok: Boolean(summary), summary }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_SAVE_CART_SNAPSHOT') {
+    saveCartSnapshot(msg.accountId, msg.items || [], msg.totalPrice || 0)
+      .then((snapshot) => sendResponse({ ok: true, snapshot }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_SAVED_CARTS') {
+    getSavedCartsState()
+      .then((state) => sendResponse({ ok: true, ...state }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_COMPARE_CART_PRICES') {
+    compareSavedCartOnCurrentAccount(msg.accountId)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_AUTO_BUILD_CART') {
+    autoBuildCartInBrowser(msg.items || null)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;

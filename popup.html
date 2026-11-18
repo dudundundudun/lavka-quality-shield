@@ -2,12 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.3.0</title>
+  <title>Lavka Quality Shield v2.4.0</title>
   <style>
     body {
-      width: 405px;
+      width: 420px;
       margin: 0;
-      padding: 13px;
+      padding: 12px;
       background: #f5f4f2;
       color: #21201f;
       font-family: -apple-system, BlinkMacSystemFont, "YS Text", "Segoe UI", Roboto, sans-serif;
@@ -16,11 +16,11 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 10px;
+      margin-bottom: 9px;
     }
     h2 {
       margin: 0;
-      font-size: 15px;
+      font-size: 14.5px;
       font-weight: 800;
     }
     .tabs {
@@ -35,12 +35,13 @@
       flex: 1;
       border: none;
       background: transparent;
-      padding: 6px 8px;
+      padding: 6px 6px;
       border-radius: 8px;
-      font-size: 12px;
-      font-weight: 600;
+      font-size: 11.5px;
+      font-weight: 700;
       cursor: pointer;
       color: #5c5a57;
+      white-space: nowrap;
     }
     .tab-btn.active {
       background: #ffffff;
@@ -56,14 +57,14 @@
       flex: 1;
       background: #ffffff;
       border: 1px solid #e5e2dd;
-      border-radius: 12px;
-      padding: 7px;
+      border-radius: 11px;
+      padding: 6px;
       text-align: center;
-      font-size: 11px;
+      font-size: 10.5px;
     }
     .stat-box strong {
       display: block;
-      font-size: 15px;
+      font-size: 14px;
     }
     .search-input {
       width: 100%;
@@ -101,7 +102,7 @@
       color: #21201f;
     }
     .list {
-      max-height: 230px;
+      max-height: 220px;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
@@ -111,8 +112,8 @@
       background: #ffffff;
       border: 1px solid #e5e2dd;
       border-radius: 10px;
-      padding: 8px 10px;
-      font-size: 12px;
+      padding: 7px 9px;
+      font-size: 11.5px;
     }
     .item-header {
       display: flex;
@@ -151,14 +152,15 @@
       background: #fee2e2;
     }
     .item-note {
-      color: #7a7875;
+      color: #6b6966;
       font-size: 11px;
       word-break: break-word;
+      line-height: 1.35;
     }
     .actions {
       display: flex;
       gap: 6px;
-      margin-top: 10px;
+      margin-top: 9px;
     }
     .action-btn {
       flex: 1;
@@ -181,6 +183,64 @@
       border-radius: 12px;
       padding: 10px;
       font-size: 12px;
+    }
+
+    /* КАРТОЧКА КЛОНЕРА КОРЗИНЫ И МУЛЬТИ-АККАУНТА */
+    .cart-cloner-card {
+      background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+      border: 1px solid #fde68a;
+      border-radius: 10px;
+      padding: 9px 10px;
+      margin-bottom: 9px;
+    }
+    .cart-cloner-title {
+      font-weight: 800;
+      font-size: 12px;
+      color: #92400e;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .btn-gold {
+      width: 100%;
+      background: #f59e0b;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 7px 8px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-bottom: 5px;
+    }
+    .btn-gold:hover {
+      background: #d97706;
+    }
+    .btn-outline-gold {
+      flex: 1;
+      background: #ffffff;
+      color: #92400e;
+      border: 1px solid #fcd34d;
+      border-radius: 8px;
+      padding: 6px 6px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn-outline-gold:hover {
+      background: #fffbeb;
+    }
+    .compare-box {
+      background: #ffffff;
+      border: 1px solid #e5e2dd;
+      border-radius: 8px;
+      padding: 7px 8px;
+      margin-top: 6px;
+      font-size: 11px;
+      max-height: 155px;
+      overflow-y: auto;
+      display: none;
     }
 
     /* БЛОК ZERO-CLICK ПОЛНОГО АВТОПИЛОТА */
@@ -210,12 +270,7 @@
       cursor: pointer;
       user-select: none;
     }
-    .zero-click-row input {
-      margin: 0;
-      cursor: pointer;
-    }
 
-    /* БЛОК АВТОПИЛОТА GEMINI */
     .autopilot-card {
       background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
       border: 1px solid #bae6fd;
@@ -272,10 +327,6 @@
       font-weight: 700;
       cursor: pointer;
       margin-bottom: 5px;
-      transition: background 0.15s;
-    }
-    .autopilot-btn-primary:hover {
-      background: #0369a1;
     }
     .autopilot-btn-secondary {
       width: 100%;
@@ -288,76 +339,12 @@
       font-weight: 700;
       cursor: pointer;
     }
-    .autopilot-btn-secondary:hover {
-      background: #f0f9ff;
-    }
     .autopilot-status {
       font-size: 10.5px;
       color: #0f172a;
       margin-top: 5px;
       line-height: 1.35;
       display: none;
-    }
-
-    /* ПОШАГОВЫЙ МАСТЕР «ЗА РУЧКУ» */
-    details.wizard-spoiler {
-      margin-bottom: 10px;
-      background: #fafaf9;
-      border: 1px solid #e5e2dd;
-      border-radius: 9px;
-      padding: 6px 8px;
-    }
-    details.wizard-spoiler summary {
-      font-size: 11.5px;
-      font-weight: 700;
-      color: #21201f;
-      cursor: pointer;
-      user-select: none;
-      list-style: none;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    details.wizard-spoiler summary::-webkit-details-marker {
-      display: none;
-    }
-    .wizard-steps {
-      margin-top: 8px;
-      font-size: 11px;
-      line-height: 1.42;
-      color: #3f3e3c;
-      display: flex;
-      flex-direction: column;
-      gap: 7px;
-    }
-    .wizard-box {
-      background: #ffffff;
-      border: 1px solid #e5e2dd;
-      border-radius: 8px;
-      padding: 7px 8px;
-    }
-    .wizard-box-title {
-      font-weight: 800;
-      font-size: 11px;
-      color: #21201f;
-      margin-bottom: 4px;
-    }
-    .mini-copy-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin-top: 4px;
-      padding: 4px 7px;
-      font-size: 10.5px;
-      font-weight: 700;
-      background: #f5f4f2;
-      border: 1px solid #d6d3cd;
-      border-radius: 6px;
-      cursor: pointer;
-      color: #21201f;
-    }
-    .mini-copy-btn:hover {
-      background: #e5e2dd;
     }
 
     .field {
@@ -370,13 +357,14 @@
       color: #5c5a57;
       margin-bottom: 3px;
     }
-    .field input {
+    .field input, .field select {
       width: 100%;
       box-sizing: border-box;
       padding: 6px 8px;
       border: 1px solid #d6d3cd;
       border-radius: 8px;
       font-size: 12px;
+      background: #ffffff;
     }
     .preset-row {
       display: flex;
@@ -393,9 +381,6 @@
       cursor: pointer;
       font-weight: 600;
     }
-    .preset-btn:hover {
-      background: #e5e2dd;
-    }
     .save-settings-btn {
       width: 100%;
       background: #fce000;
@@ -407,44 +392,27 @@
       cursor: pointer;
       font-size: 12px;
     }
-    .save-settings-btn:hover {
-      background: #f2d600;
-    }
 
-    /* Спрятанный в самом низу настроек спойлер бортового самописца для ИИ */
     details.debug-spoiler {
-      margin-top: 12px;
+      margin-top: 10px;
       border-top: 1px dashed #d6d3cd;
-      padding-top: 10px;
+      padding-top: 8px;
     }
     details.debug-spoiler summary {
       font-size: 11.5px;
       font-weight: 700;
       color: #5c5a57;
       cursor: pointer;
-      user-select: none;
       list-style: none;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 4px 2px;
-    }
-    details.debug-spoiler summary::-webkit-details-marker {
-      display: none;
-    }
-    details.debug-spoiler summary:hover {
-      color: #21201f;
     }
     .debug-body {
       margin-top: 8px;
       display: flex;
       flex-direction: column;
       gap: 6px;
-    }
-    .debug-hint {
-      font-size: 10.5px;
-      color: #75736f;
-      line-height: 1.35;
     }
     .module-pills {
       display: flex;
@@ -460,21 +428,9 @@
       border: 1px solid #e5e2dd;
       color: #5c5a57;
     }
-    .mod-pill.ok {
-      background: #dcfce7;
-      border-color: #86efac;
-      color: #166534;
-    }
-    .mod-pill.warn {
-      background: #fef9c3;
-      border-color: #fde047;
-      color: #854d0e;
-    }
-    .mod-pill.err {
-      background: #fee2e2;
-      border-color: #fca5a5;
-      color: #991b1b;
-    }
+    .mod-pill.ok { background: #dcfce7; border-color: #86efac; color: #166534; }
+    .mod-pill.warn { background: #fef9c3; border-color: #fde047; color: #854d0e; }
+    .mod-pill.err { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
     .diag-pre {
       background: #18181b;
       color: #d4d4d8;
@@ -483,7 +439,7 @@
       font-family: Consolas, Monaco, monospace;
       font-size: 10px;
       line-height: 1.35;
-      max-height: 165px;
+      max-height: 150px;
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -494,19 +450,20 @@
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;">v2.3.0 Zero-Click</span>
+    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.4.0 Anti-Scam</span>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" id="tab-reviews-btn">⭐ Мои отзывы</button>
-    <button class="tab-btn" id="tab-settings-btn">⚙️ Настройки и ИИ</button>
+    <button class="tab-btn active" id="tab-reviews-btn">⭐ Отзывы</button>
+    <button class="tab-btn" id="tab-prices-btn">💰 Цены и Корзина</button>
+    <button class="tab-btn" id="tab-settings-btn">⚙️ ИИ и Автопилот</button>
   </div>
 
   <!-- ВКЛАДКА 1: ОТЗЫВЫ И БАЗА -->
   <div id="panel-reviews">
     <div class="stats">
-      <div class="stat-box"><strong id="count-all">0</strong>Всего</div>
-      <div class="stat-box" style="color:#15803d"><strong id="count-god">0</strong>Отличные</div>
+      <div class="stat-box"><strong id="count-all">0</strong>Оценок</div>
+      <div class="stat-box" style="color:#15803d"><strong id="count-god">0</strong>Топ</div>
       <div class="stat-box" style="color:#dc2626"><strong id="count-trash">0</strong>В бане</div>
     </div>
     <input type="text" class="search-input" id="search-input" placeholder="🔍 Быстрый поиск по названию или заметке...">
@@ -523,10 +480,50 @@
     </div>
   </div>
 
-  <!-- ВКЛАДКА 2: ZERO-CLICK АВТОПИЛОТ + НАСТРОЙКИ ИИ + БОРТОВОЙ ЛОГ -->
-  <div class="settings-panel" id="panel-settings">
+  <!-- ВКЛАДКА 2: МУЛЬТИ-АККАУНТ КЛОНЕР КОРЗИНЫ И БАЗА ЦЕН -->
+  <div class="settings-panel" id="panel-prices">
+    <div class="field" style="margin-bottom:8px;">
+      <label>👤 Текущий профиль Яндекс Лавки (для записи цен и корзины):</label>
+      <select id="lavka-account-select">
+        <option value="Аккаунт #1 (Основной)">Аккаунт #1 (Основной)</option>
+        <option value="Аккаунт #2 (Новичок / Семья)">Аккаунт #2 (Новичок / Семья)</option>
+        <option value="Аккаунт #3 (Запасной)">Аккаунт #3 (Запасной)</option>
+      </select>
+    </div>
 
-    <!-- БЛОК 0: РЕЖИМ ZERO-CLICK «СЕЛ И ПОЕХАЛ» (ВКЛЮЧЕН ПО УМОЛЧАНИЮ) -->
+    <div class="cart-cloner-card">
+      <div class="cart-cloner-title">
+        <span>🛒 Мульти-Аккаунт Клонер Корзины</span>
+        <span id="saved-cart-badge" style="font-size:10.5px;">Нет слепка</span>
+      </div>
+      <div id="saved-cart-summary" style="font-size:11px;color:#78350f;margin-bottom:6px;">
+        Открой корзину в Лавке — слепок сохранится автоматически (или нажми кнопку ниже).
+      </div>
+      <div style="display:flex;gap:5px;margin-bottom:5px;">
+        <button type="button" class="btn-outline-gold" id="capture-cart-btn">📸 Снять слепок корзины</button>
+        <button type="button" class="btn-outline-gold" id="compare-cart-btn">⚖️ Сверить цены здесь</button>
+      </div>
+      <button type="button" class="btn-gold" id="autobuild-cart-btn">
+        🚀 Авто-собрать сохранённую корзину на этом аккаунте (1 клик)
+      </button>
+      <div class="compare-box" id="cart-compare-output"></div>
+    </div>
+
+    <div class="stats" style="margin-bottom:6px;">
+      <div class="stat-box"><strong id="price-count-total">0</strong>Товаров в БД цен</div>
+      <div class="stat-box" style="color:#b91c1c"><strong id="price-count-over">0</strong>С разницей цен</div>
+    </div>
+
+    <input type="text" class="search-input" id="price-search-input" placeholder="🔍 Поиск товара в базе истории цен...">
+    <div class="filter-row">
+      <button class="filter-btn active" data-pfilter="all">Все цены</button>
+      <button class="filter-btn" data-pfilter="diff">🕵️ Разные цены / Штраф</button>
+    </div>
+    <div class="list" id="prices-list" style="max-height:165px;"></div>
+  </div>
+
+  <!-- ВКЛАДКА 3: ZERO-CLICK АВТОПИЛОТ И НАСТРОЙКИ ИИ -->
+  <div class="settings-panel" id="panel-settings">
     <div class="zero-click-card">
       <div class="zero-click-title">
         <span>🚀 Полный Автопилот (Zero-Click)</span>
@@ -534,7 +531,7 @@
       </div>
       <label class="zero-click-row">
         <input type="checkbox" id="chk-auto-run-ai" checked>
-        <span><b>Сам запускать ИИ-разбор</b> при открытии любого товара (0 кликов)</span>
+        <span><b>Сам запускать ИИ-разбор</b> при открытии товара (0 кликов)</span>
       </label>
       <label class="zero-click-row">
         <input type="checkbox" id="chk-auto-open-drawer" checked>
@@ -542,24 +539,27 @@
       </label>
       <label class="zero-click-row">
         <input type="checkbox" id="chk-auto-warmup" checked>
-        <span><b>Сам прогревать вкладку Gemini</b> при старте браузера и Лавки</span>
+        <span><b>Сам прогревать вкладку Gemini</b> при старте браузера</span>
+      </label>
+      <label class="zero-click-row">
+        <input type="checkbox" id="chk-guest-probe" checked>
+        <span><b>Анонимный зонд без куки</b> (ловить «штраф за лояльность»)</span>
       </label>
       <div style="display:flex;justify-content:flex-end;margin-top:3px;">
-        <button type="button" id="clear-ai-cache-btn" style="border:1px solid #86efac;background:#ffffff;color:#166534;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;">🗑️ Очистить кэш ИИ в браузере</button>
+        <button type="button" id="clear-ai-cache-btn" style="border:1px solid #86efac;background:#ffffff;color:#166534;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;">🗑️ Очистить кэш ИИ</button>
       </div>
     </div>
 
-    <!-- БЛОК 1: АВТОПИЛОТ GEMINI В 1 КЛИК -->
     <div class="autopilot-card">
       <div class="autopilot-header">
         <span>🤖 Статус подключения Gemini</span>
-        <button type="button" id="refresh-radar-btn" style="border:none;background:transparent;color:#0369a1;cursor:pointer;font-size:11px;font-weight:700;" title="Обновить статус">🔄 Статус</button>
+        <button type="button" id="refresh-radar-btn" style="border:none;background:transparent;color:#0369a1;cursor:pointer;font-size:11px;font-weight:700;">🔄 Статус</button>
       </div>
       <div class="radar-grid">
         <div class="radar-pill" id="pill-gemini-tab"><span>🌐 Вкладка Gemini</span><strong id="val-gemini-tab">...</strong></div>
         <div class="radar-pill" id="pill-cookies"><span>🍪 Куки Google</span><strong id="val-cookies">...</strong></div>
         <div class="radar-pill" id="pill-bridge"><span>🚀 Мост :8083</span><strong id="val-bridge">...</strong></div>
-        <div class="radar-pill" id="pill-backend"><span>🐍 Парсер :8765</span><strong id="val-backend">...</strong></div>
+        <div class="radar-pill" id="pill-backend"><span>🐍 База :8765</span><strong id="val-backend">...</strong></div>
       </div>
       <div style="margin-bottom:6px;">
         <label style="display:block;font-size:10.5px;font-weight:700;color:#0369a1;margin-bottom:3px;">👤 Целевой аккаунт / вкладка Gemini:</label>
@@ -572,7 +572,7 @@
             <option value="3">Аккаунт #3 — Четвёртый (/u/3/app)</option>
             <option value="4">Аккаунт #4 — Пятый (/u/4/app)</option>
           </select>
-          <button type="button" id="open-selected-gemini-btn" title="Открыть или переключиться на выбранный аккаунт Gemini" style="padding:5px 8px;border-radius:7px;border:1px solid #7dd3fc;background:#ffffff;color:#0369a1;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;">🌐 Открыть</button>
+          <button type="button" id="open-selected-gemini-btn" style="padding:5px 8px;border-radius:7px;border:1px solid #7dd3fc;background:#ffffff;color:#0369a1;font-size:11px;font-weight:700;cursor:pointer;">🌐 Открыть</button>
         </div>
       </div>
       <button type="button" class="autopilot-btn-primary" id="auto-connect-gemini-btn">
@@ -584,28 +584,6 @@
       <div class="autopilot-status" id="autopilot-status-box"></div>
     </div>
 
-    <!-- БЛОК 2: ПОШАГОВЫЙ ГАЙД «ЗА РУЧКУ» ПРЯМО В РАСШИРЕНИИ -->
-    <details class="wizard-spoiler" id="wizard-spoiler">
-      <summary>
-        <span>🗺️ Пошаговый гайд: как работает Zero-Click ИИ</span>
-        <span style="font-size:10px;color:#7a7875;">▾ открыть</span>
-      </summary>
-      <div class="wizard-steps">
-        <div class="wizard-box">
-          <div class="wizard-box-title">🟢 Способ 1. Полный Zero-Click Автомат через браузер (0 кликов!)</div>
-          <div>1. Один раз войди в свой аккаунт на <b>gemini.google.com</b> в этом браузере.</div>
-          <div>2. Больше ничего нажимать не нужно! При запуске браузера и открытии Лавки расширение <b>само тихо прогреет фоновую вкладку Gemini</b>, само спарсит отзывы с 14 площадок и <b>само запустит ИИ-разбор</b> при открытии любого товара, сохранив ответ в кэш браузера.</div>
-        </div>
-
-        <div class="wizard-box">
-          <div class="wizard-box-title">🚀 Способ 2. Автозапуск локального сервера (:8765) и Docker (:8083) вместе с Windows</div>
-          <div>Если хочешь, чтобы фоновый сервер Python и Docker-мост запускались сами при включении ПК без чёрных окон консоли — просто один раз запусти файл <code>enable_windows_autostart.bat</code> в папке расширения!</div>
-          <button type="button" class="mini-copy-btn" id="copy-docker-cmd-btn">📋 Скопировать команду Docker для PowerShell</button>
-        </div>
-      </div>
-    </details>
-
-    <div style="font-size:11px;color:#5c5a57;margin-bottom:6px;">Быстрый выбор ИИ-провайдера (для моста :8083 или API):</div>
     <div class="preset-row">
       <button type="button" class="preset-btn" id="preset-argon">🚀 Gemini Argon (:8083)</button>
       <button type="button" class="preset-btn" id="preset-deepseek">☁️ DeepSeek API</button>
@@ -613,49 +591,41 @@
     </div>
 
     <div class="field">
-      <label>Локальный парсер отзывов (FastAPI):</label>
+      <label>Локальный сервер базы цен и отзывов (FastAPI):</label>
       <input type="text" id="inp-backend" placeholder="http://127.0.0.1:8765">
     </div>
     <div class="field">
-      <label>Base URL ИИ (OpenAI-совместимый или мост :8083):</label>
+      <label>Base URL ИИ (мост :8083 или OpenAI API):</label>
       <input type="text" id="inp-ai-url" placeholder="http://localhost:8083/v1">
     </div>
     <div class="field">
-      <label>API Key (не нужен для Способа 1 через вкладку Gemini):</label>
-      <input type="password" id="inp-ai-key" placeholder="Оставь пустым для Способа 1 или вставь ключ :8083...">
+      <label>API Key (оставь пустым для работы через вкладку Gemini):</label>
+      <input type="password" id="inp-ai-key" placeholder="Ключ для :8083 или DeepSeek...">
     </div>
     <div class="field">
       <label>Название модели (Model ID):</label>
       <input type="text" id="inp-ai-model" placeholder="gemini-4-argon">
     </div>
-    <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки ИИ</button>
+    <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки</button>
     <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:5px;"></div>
 
-    <!-- ГЛУБОКО В НАСТРОЙКАХ: БОРТОВОЙ ЖУРНАЛ ДЛЯ ИИ-ДЕБАГГИНГА -->
     <details class="debug-spoiler" id="debug-spoiler">
       <summary>
         <span>🛠️ Бортовой журнал для ИИ (Дебаггинг)</span>
         <span style="font-size:10px;color:#7a7875;">▾ развернуть</span>
       </summary>
       <div class="debug-body">
-        <div class="debug-hint">
-          Записывает как работают все 8 модулей расширения (парсер, КБЖУ, виджет, каталог, защита корзины, Zero-Click ИИ). Скопируй этот отчёт и отправь любому ИИ для мгновенного поиска багов.
-        </div>
-
         <div class="module-pills" id="diag-module-pills"></div>
-
         <button type="button" class="save-settings-btn" id="diag-copy-btn">
           📋 Скопировать полный лог для ИИ (Markdown)
         </button>
-
         <div class="actions" style="margin-top:0;">
           <button type="button" class="action-btn" id="diag-ping-btn">🔌 Тест :8765 / ИИ</button>
           <button type="button" class="action-btn" id="diag-download-btn">💾 Скачать .log</button>
           <button type="button" class="action-btn" id="diag-clear-btn">🗑️ Очистить</button>
         </div>
-
         <div id="diag-ping-status" style="display:none;font-size:10.5px;color:#21201f;background:#f5f4f2;padding:5px 8px;border-radius:7px;"></div>
-        <pre class="diag-pre" id="diag-report-box">Разверни спойлер на открытой вкладке Лавки для чтения бортового журнала...</pre>
+        <pre class="diag-pre" id="diag-report-box">Разверни спойлер на открытой вкладке Лавки...</pre>
       </div>
     </details>
   </div>

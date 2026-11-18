@@ -1,24 +1,30 @@
 /**
- * Lavka Quality Shield v2.3.0 — Content Script (Zero-Click Full Autopilot Edition)
- * Что нового в v2.3.0:
- * 1. Полный Zero-Click Автопилот на странице товара:
- *    - При открытии любой карточки товара (/good/...) расширение САМО проверяет встроенный кэш ИИ-обзоров
- *      в браузере (lqs_ai_cache_v1) и мгновенно показывает готовый вердикт.
- *    - Если товар открыт впервые и включён режим Zero-Click (по умолчанию ВКЛ) — расширение САМО через 550 мс
- *      запускает ИИ-разбор состава, КБЖУ, цены и отзывов без единого клика со стороны пользователя!
- *    - На главной однострочной панели отображается компактный живой индикатор вердикта ИИ
- *      («🤖 ⏳ ИИ-разбор...» -> «🤖 ✅ Стоит брать» / «🤖 👍 Хороший» / «🤖 ⚠️ На любителя» / «🤖 ❌ Не брать»).
- * 2. Надёжный детектор SPA-переходов (таймер URL + popstate + MutationObserver) и авто-прогрев Gemini при старте.
+ * Lavka Quality Shield v2.4.0 — Content Script
+ * Что нового в v2.4.0:
+ * 1. Анти-Шулер Радар на карточке товара и в каталоге:
+ *    - Автоматически проверяет цену без куки (Гость) и сравнивает с ценами на других твоих аккаунтах Лавки!
+ *    - Если для твоего аккаунта цена завышена («штраф за лояльность») — выводит компактный бейдж:
+ *      «🕵️ Наценка +135 ₽ (без входа / Акк2: 124 ₽)».
+ *    - Сравнивает текущую цену с твоей базой истории цен (выводит «📉 Минимум!» или «📈 Выше обычной на +X ₽»)
+ *      и показывает цены конкурентов (ВкусВилл, Перекрёсток, Ozon, Азбука Вкуса).
+ * 2. Авто-сборщик базы цен со всего каталога:
+ *    - При скролле любой категории или главной страницы автоматически собирает цены всех видимых карточек в общую БД.
+ * 3. Фиксатор цен корзины (Cart Price Lock) + Слепок корзины между аккаунтами:
+ *    - Запоминает обещанную цену в момент добавления товара в корзину.
+ *    - На странице корзины пересчитывает честную сумму по калькулятору, ловит тихую подмену цен,
+ *      позволяет в 1 клик сохранить слепок корзины для другого аккаунта или скачать пруф-отчёт для поддержки!
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.3.0';
+  const VERSION = '2.4.0';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
   const AI_CACHE_KEY = 'lqs_ai_cache_v1';
+  const PRICE_DB_KEY = 'lqs_price_db_v1';
+  const CART_LOCKS_KEY = 'lqs_cart_locks_v1';
 
   const DEFAULT_SETTINGS = {
     backendUrl: 'http://127.0.0.1:8765',
@@ -28,7 +34,9 @@
     useDirectBrowserAiFallback: true,
     autoRunAiOnProductPage: true,
     autoOpenDrawerOnAi: true,
-    autoWarmupGeminiTab: true
+    autoWarmupGeminiTab: true,
+    lavkaAccountLabel: 'Аккаунт #1 (Основной)',
+    enableGuestPriceProbe: true
   };
 
   const PRESET_TAGS = [
@@ -41,20 +49,23 @@
     '💀 Не брать'
   ];
 
-  // Память открытых спойлеров по slug товара, чтобы React-ререндер Лавки не захлопывал меню
   const drawerOpenBySlug = new Map();
-  // Память уже запущенных авто-разборов ИИ в текущей сессии по slug, чтобы не спамить повторно
   const autoAiTriggeredSlugs = new Set();
+  const priceIntelRequestedSlugs = new Set();
   const lastAiResultBySlug = new Map();
+  const priceSummaryBySlug = new Map();
   let autoAiDebounceTimer = null;
 
-  // Синхронный кэш базы отзывов в памяти для мгновенной отрисовки каталога
   let reviewsDbCache = null;
   let aiCacheMemory = null;
+  let priceDbMemory = null;
+  let cartLocksMemory = {};
+  let cachedSettings = { ...DEFAULT_SETTINGS };
   let isRenderingProduct = false;
   let pendingProductRender = false;
   let currentReviewCache = null;
   let lastObservedUrl = window.location.href;
+  let lastCatalogHarvestTs = 0;
 
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
@@ -66,9 +77,6 @@
       .replace(/'/g, '&#39;');
   }
 
-  /**
-   * Извлекает короткий бейдж вердикта из текста ответа ИИ для показа на главной панели в 1 строку
-   */
   function extractVerdictBadgeFromText(verdictText) {
     if (!verdictText) return null;
     const t = String(verdictText);
@@ -87,8 +95,29 @@
     return { cls: 'verdict-ok', text: '🤖 ИИ-вердикт готов', shortCatalog: '🤖' };
   }
 
+  /**
+   * Определяет имя/логин текущего аккаунта Яндекса на странице Лавки (или берёт имя из настроек)
+   */
+  function detectCurrentAccountLabel() {
+    try {
+      const avatarEl =
+        document.querySelector('[data-testid="user-profile"] img[alt]') ||
+        document.querySelector('header img[alt*="@"]') ||
+        document.querySelector('header [aria-label*="Аккаунт"]');
+      if (avatarEl) {
+        const alt = (avatarEl.getAttribute('alt') || avatarEl.getAttribute('aria-label') || '').trim();
+        if (alt && alt.length > 1 && alt.length < 35 && !/аватар|профиль|user/i.test(alt)) {
+          return alt;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return cachedSettings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
+  }
+
   // ==========================================================================
-  // БОРТОВОЙ САМОПИСЕЦ (LQS FLIGHT RECORDER) — ЛОГ ДЛЯ ДЕБАГГИНГА ЧЕРЕЗ ИИ
+  // БОРТОВОЙ САМОПИСЕЦ (LQS FLIGHT RECORDER)
   // ==========================================================================
   const LQS_RECORDER = {
     version: VERSION,
@@ -105,6 +134,7 @@
       catalogPasses: 0,
       catalogBadgesUpdated: 0,
       catalogBadgesSkipped: 0,
+      pricesHarvested: 0,
       clicksTotal: 0,
       drawerToggles: 0,
       missedClicksRecovered: 0,
@@ -118,8 +148,8 @@
       calculator: { status: 'IDLE', lastRun: null, summary: 'Расчёт КБЖУ и цены ещё не выполнялся', data: null },
       widget: { status: 'IDLE', lastRun: null, summary: 'Виджет не смонтирован' },
       catalog: { status: 'IDLE', lastRun: null, summary: 'Каталог ещё не сканировался' },
-      cartGuard: { status: 'IDLE', lastRun: null, summary: 'Перехватчик корзины в режиме ожидания' },
-      storage: { status: 'INIT', lastRun: null, summary: 'Загрузка базы отзывов...' },
+      cartGuard: { status: 'IDLE', lastRun: null, summary: 'Аудитор корзины и защита от бана готовы' },
+      storage: { status: 'INIT', lastRun: null, summary: 'Загрузка базы отзывов и цен...' },
       aiReviewer: { status: 'IDLE', lastRun: null, summary: 'Готов к Zero-Click Автопилоту', lastCall: null }
     },
     events: [],
@@ -265,21 +295,21 @@
 
       const lines = [
         `# 🛠️ LAVKA QUALITY SHIELD v${this.version} — AI DIAGNOSTIC & FLIGHT RECORDER LOG`,
-        `> **Инструкция для ИИ-ассистента**: Ниже представлена полная телеметрия работы расширения Lavka Quality Shield (Manifest V3) на сайте Яндекс Лавки. Изучи матрицу состояния всех 8 функций, распарсенные метаданные, аудит селекторов DOM и хронологический стек событий, чтобы точно локализовать любую проблему.`,
+        `> **Инструкция для ИИ-ассистента**: Ниже представлена полная телеметрия работы расширения Lavka Quality Shield (Manifest V3) на сайте Яндекс Лавки.`,
         ``,
         `## 1. СВОДКА ОКРУЖЕНИЯ И СТРАНИЦЫ`,
         `- **Timestamp**: ${new Date().toISOString()} (сессия с ${this.sessionStartedAt})`,
-        `- **URL**: ${dom.url}`,
+        `- **URL**: ${dom.url} | **Аккаунт**: ${detectCurrentAccountLabel()}`,
         `- **Тип страницы**: ${dom.pageType} (Slug: \`${dom.slug || 'нет'}\`, Карточек в каталоге: ${dom.catalogCardsCount})`,
-        `- **База отзывов в памяти**: ${reviewsDbCache ? Object.keys(reviewsDbCache).length : 0} записей | **Кэш ИИ в памяти**: ${aiCacheMemory ? Object.keys(aiCacheMemory).length : 0} товаров`,
+        `- **База в памяти**: ${reviewsDbCache ? Object.keys(reviewsDbCache).length : 0} оценок | ${aiCacheMemory ? Object.keys(aiCacheMemory).length : 0} ИИ-обзоров | ${priceDbMemory ? Object.keys(priceDbMemory).length : 0} цен`,
         ``,
         `## 2. МАТРИЦА ФУНКЦИОНИРОВАНИЯ МОДУЛЕЙ (FUNCTION HEALTH MATRIX)`,
         `1. **[ROUTER] SPA-навигация и гидратация**: \`${m.router.status}\` (${m.router.lastRun || '—'}) — ${m.router.summary}`,
         `2. **[PARSER] Парсер метаданных и JSON-LD**: \`${m.parser.status}\` (${m.parser.lastRun || '—'}) — ${m.parser.summary}`,
         `3. **[CALCULATOR] Расчёт цены/кг, белка и КБЖУ**: \`${m.calculator.status}\` (${m.calculator.lastRun || '—'}) — ${m.calculator.summary}`,
-        `4. **[WIDGET] Панель товара и спойлер**: \`${m.widget.status}\` (${m.widget.lastRun || '—'}) — ${m.widget.summary}`,
-        `5. **[CATALOG] Разметка карточек каталога**: \`${m.catalog.status}\` (${m.catalog.lastRun || '—'}) — ${m.catalog.summary}`,
-        `6. **[CART_GUARD] Защита от покупки бана**: \`${m.cartGuard.status}\` (${m.cartGuard.lastRun || '—'}) — ${m.cartGuard.summary}`,
+        `4. **[WIDGET] Панель товара и Анти-Шулер Радар**: \`${m.widget.status}\` (${m.widget.lastRun || '—'}) — ${m.widget.summary}`,
+        `5. **[CATALOG] Разметка карточек и сбор цен**: \`${m.catalog.status}\` (${m.catalog.lastRun || '—'}) — ${m.catalog.summary}`,
+        `6. **[CART_GUARD] Защита корзины и фиксатор цен**: \`${m.cartGuard.status}\` (${m.cartGuard.lastRun || '—'}) — ${m.cartGuard.summary}`,
         `7. **[STORAGE] Хранилище chrome.storage.local**: \`${m.storage.status}\` (${m.storage.lastRun || '—'}) — ${m.storage.summary}`,
         `8. **[AI_REVIEWER] Zero-Click ИИ Автопилот**: \`${m.aiReviewer.status}\` (${m.aiReviewer.lastRun || '—'}) — ${m.aiReviewer.summary}`
       ];
@@ -300,45 +330,11 @@
         `- \`section[data-testid="ingredients-block"]\`: ${flag(s.ingredientsEl)}`,
         `- \`section[data-testid="traits-block"]\`: ${flag(s.traitsEl)}`,
         `- \`button[data-testid="snippet-control"]\`: ${flag(s.addBtnEl)}`,
-        `- **Статус нашего виджета (.lqs-product-panel)**: ${s.panelMounted ? '✅ Смонтирован' : '⚪ Не смонтирован'} (Спойлер: ${s.drawerOpen ? 'ОТКРЫТ' : 'ЗАКРЫТ'})`
-      );
-
-      if (dom.discoveredTestIds && dom.discoveredTestIds.length > 0) {
-        lines.push(
-          `- **⚠️ ВНИМАНИЕ (Подсказка для ИИ — обнаруженные data-testid на странице)**:`,
-          `  \`${dom.discoveredTestIds.join('`, `')}\``
-        );
-      }
-
-      if (m.parser.data) {
-        const pd = m.parser.data;
-        lines.push(
-          ``,
-          `## 4. ПОСЛЕДНИЕ РАСПАРСЕННЫЕ ДАННЫЕ ТОВАРА (PARSER & CALCULATOR DUMP)`,
-          `- **Title**: "${pd.title || ''}" (clean: "${pd.cleanTitle || ''}")`,
-          `- **Цена / Старая цена / Вес**: ${pd.price ?? 'null'} ₽ / ${pd.oldPrice ?? 'null'} ₽ / "${pd.amountText || ''}"`,
-          `- **ProductId / ImageKey / Brand**: \`${pd.productId || 'null'}\` / \`${pd.imageKey || 'null'}\` / "${pd.brand || ''}"`,
-          `- **Текст КБЖУ (traitsText)**: "${(pd.traitsText || '').replace(/\s+/g, ' ').slice(0, 180)}"`,
-          `- **Текст состава (ingredientsText)**: "${(pd.ingredientsText || '').replace(/\s+/g, ' ').slice(0, 220)}"`
-        );
-      }
-
-      if (m.calculator.data) {
-        const cd = m.calculator.data;
-        lines.push(
-          `- **Результат калькулятора**: Вес=${cd.weightGrams ?? 'null'}г (${cd.unitLabel}), Цена/кг=${cd.pricePerKg ?? 'null'}₽, Белки=${cd.proteinPer100g ?? 'null'}г, Жиры=${cd.fatPer100g ?? 'null'}г, Угли=${cd.carbsPer100g ?? 'null'}г, Ккал=${cd.kcalPer100g ?? 'null'}, Цена/100г белка=${cd.pricePer100gProtein ?? 'null'}₽`,
-          `- **Флаги состава**: ${cd.flags && cd.flags.length ? cd.flags.map((f) => `[${f.type.toUpperCase()}] ${f.text}`).join(', ') : 'нет'}`
-        );
-      }
-
-      lines.push(
+        `- **Статус нашего виджета (.lqs-product-panel)**: ${s.panelMounted ? '✅ Смонтирован' : '⚪ Не смонтирован'} (Спойлер: ${s.drawerOpen ? 'ОТКРЫТ' : 'ЗАКРЫТ'})`,
         ``,
         `## 5. СЧЁТЧИКИ ПРОИЗВОДИТЕЛЬНОСТИ И СТАБИЛЬНОСТИ DOM`,
-        `- **SPA переходов**: ${c.spaTransitions} | **Маунтов панели**: ${c.panelMounts} | **Синхронизаций UI**: ${c.panelSyncs} | **Zero-Click ИИ-запусков**: ${c.autoAiRuns}`,
+        `- **SPA переходов**: ${c.spaTransitions} | **Маунтов панели**: ${c.panelMounts} | **Синхронизаций UI**: ${c.panelSyncs} | **Zero-Click ИИ-запусков**: ${c.autoAiRuns} | **Цен собрано**: ${c.pricesHarvested}`,
         `- **Записей в DOM выполнено**: ${c.domWritesExecuted} | **Пропущено дублей (кэш хеша)**: ${c.domWritesSkipped}`,
-        `- **Мутаций Лавки обработано**: ${c.extMutations} | **Собственных мутаций .lqs-* отсечено**: ${c.selfMutationsIgnored}`,
-        `- **Проходов каталога**: ${c.catalogPasses} (обновлено бейджей: ${c.catalogBadgesUpdated}, пропущено без изменений: ${c.catalogBadgesSkipped})`,
-        `- **Кликов по виджету**: ${c.clicksTotal} | **Переключений спойлера**: ${c.drawerToggles} | **Задержка клика**: ${this.lastClickLatencyMs !== null ? this.lastClickLatencyMs + ' мс' : '—'} | **Авто-восстановлений сорванных кликов**: ${c.missedClicksRecovered}`,
         `- **Перехвачено ошибок (Errors)**: ${c.errors}`,
         ``,
         `## 6. ХРОНОЛОГИЧЕСКИЙ БОРТОВОЙ ЖУРНАЛ (ПОСЛЕДНИЕ ${Math.min(this.events.length, 60)} СОБЫТИЙ)`,
@@ -373,7 +369,6 @@
 
   LQS_RECORDER.init();
 
-  // Сигнализируем фоновому воркеру прогреть Автопилот сразу при заходе на Лавку
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
     chrome.runtime.sendMessage({ type: 'LQS_WARMUP_AUTOPILOT' }, () => {
       if (chrome.runtime.lastError) {
@@ -383,46 +378,31 @@
   }
 
   window.addEventListener('error', (ev) => {
-    if (ev && ev.error) {
-      LQS_RECORDER.error('window.onerror', ev.error);
-    }
+    if (ev && ev.error) LQS_RECORDER.error('window.onerror', ev.error);
   });
 
   window.addEventListener('unhandledrejection', (ev) => {
-    if (ev && ev.reason) {
-      LQS_RECORDER.error('unhandledrejection', ev.reason);
-    }
+    if (ev && ev.reason) LQS_RECORDER.error('unhandledrejection', ev.reason);
   });
 
-  let pendingPointerDown = null;
-  document.addEventListener('pointerdown', (e) => {
-    const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
-    if (!btn) return;
-    const role = btn.id || btn.className;
-    const t0 = performance.now();
-    if (pendingPointerDown && pendingPointerDown.timer) {
-      clearTimeout(pendingPointerDown.timer);
-    }
-    const timer = setTimeout(() => {
-      LQS_RECORDER.counters.missedClicksRecovered += 1;
-      LQS_RECORDER.record('WIDGET', `Orphaned pointerdown on [${role}], running click recovery`);
-      if (btn.id === 'lqs-drawer-toggle') {
-        toggleDrawerState(btn.closest('.lqs-product-panel'), 'auto-recovery');
-      }
-      pendingPointerDown = null;
-    }, 420);
-    pendingPointerDown = { role, t0, timer };
-  }, true);
-
+  // Перехват добавления товара в корзину для фиксации обещанной цены (Cart Price Lock)
   document.addEventListener('click', (e) => {
-    const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
-    if (!btn) return;
-    LQS_RECORDER.counters.clicksTotal += 1;
-    if (pendingPointerDown) {
-      clearTimeout(pendingPointerDown.timer);
-      const dt = Math.round(performance.now() - pendingPointerDown.t0);
-      LQS_RECORDER.lastClickLatencyMs = dt;
-      pendingPointerDown = null;
+    const target = e.target;
+    if (!target || !target.closest) return;
+
+    const lqsBtn = target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip');
+    if (lqsBtn) {
+      LQS_RECORDER.counters.clicksTotal += 1;
+      return;
+    }
+
+    // Если кликнули по кнопке добавления товара в корзину на странице товара или в каталоге
+    const snippetBtn = target.closest('button[data-testid="snippet-control"], button[aria-label*="В корзину"], button[aria-label*="Увеличить"]');
+    if (snippetBtn) {
+      setTimeout(() => {
+        lockProductPriceOnCartAdd(snippetBtn);
+        setTimeout(scanAndSnapshotCurrentCartDOM, 450);
+      }, 60);
     }
   }, true);
 
@@ -456,12 +436,17 @@
         });
         return true;
       }
+      if (msg.type === 'LQS_EXTRACT_CURRENT_CART_FROM_PAGE') {
+        const snap = extractCartItemsFromDOM();
+        sendResponse({ ok: true, accountId: detectCurrentAccountLabel(), items: snap.items, totalPrice: snap.totalPrice });
+        return true;
+      }
       return false;
     });
   }
 
   // ==========================================================================
-  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ И КЭШЕМ ИИ
+  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ, ИИ И ЦЕН
   // ==========================================================================
   function setHtmlIfChanged(el, nextHtml, tagKey = '') {
     if (!el) return false;
@@ -521,19 +506,24 @@
     }
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([STORAGE_KEY, AI_CACHE_KEY], (res) => {
+        chrome.storage.local.get([STORAGE_KEY, AI_CACHE_KEY, PRICE_DB_KEY, CART_LOCKS_KEY, SETTINGS_KEY], (res) => {
           reviewsDbCache = (res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : {};
           aiCacheMemory = (res && res[AI_CACHE_KEY]) ? res[AI_CACHE_KEY] : {};
+          priceDbMemory = (res && res[PRICE_DB_KEY]) ? res[PRICE_DB_KEY] : {};
+          cartLocksMemory = (res && res[CART_LOCKS_KEY]) ? res[CART_LOCKS_KEY] : {};
+          if (res && res[SETTINGS_KEY]) {
+            cachedSettings = { ...DEFAULT_SETTINGS, ...res[SETTINGS_KEY] };
+          }
           const count = Object.keys(reviewsDbCache).length;
-          LQS_RECORDER.updateModule('storage', 'OK', `База загружена в память (${count} оценок, ${Object.keys(aiCacheMemory).length} ИИ-обзоров)`);
+          LQS_RECORDER.updateModule(
+            'storage',
+            'OK',
+            `База в памяти: ${count} оценок, ${Object.keys(aiCacheMemory).length} ИИ, ${Object.keys(priceDbMemory).length} цен`
+          );
           resolve(reviewsDbCache);
         });
       } else {
-        try {
-          reviewsDbCache = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-        } catch {
-          reviewsDbCache = {};
-        }
+        reviewsDbCache = {};
         resolve(reviewsDbCache);
       }
     });
@@ -543,7 +533,8 @@
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
         chrome.storage.local.get([SETTINGS_KEY], (res) => {
-          resolve({ ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) });
+          cachedSettings = { ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) };
+          resolve(cachedSettings);
         });
       } else {
         resolve(DEFAULT_SETTINGS);
@@ -584,15 +575,8 @@
     if (isEmpty) {
       delete db[canonicalKey];
       reviewsDbCache = db;
-      LQS_RECORDER.record('STORAGE', `Deleted empty review for ${canonicalKey}`);
-      LQS_RECORDER.updateModule('storage', 'OK', `Удалён сброшенный отзыв ${canonicalKey} (всего: ${Object.keys(db).length})`);
       return new Promise((resolve) => {
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          chrome.storage.local.set({ [STORAGE_KEY]: db }, () => resolve(null));
-        } else {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-          resolve(null);
-        }
+        chrome.storage.local.set({ [STORAGE_KEY]: db }, () => resolve(null));
       });
     }
 
@@ -604,30 +588,252 @@
     };
     reviewsDbCache = db;
 
-    LQS_RECORDER.record('STORAGE', `Saved review for ${canonicalKey}`, {
-      rating: data.rating,
-      banned: data.banned,
-      tags: data.tags,
-      noteLen: (data.note || '').length
-    });
-    LQS_RECORDER.updateModule(
-      'storage',
-      'OK',
-      `Сохранён ${canonicalKey}: ${data.rating}★, бан=${Boolean(data.banned)} (всего: ${Object.keys(db).length})`
-    );
-
     return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ [STORAGE_KEY]: db }, () => resolve(db[canonicalKey]));
-      } else {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-        resolve(db[canonicalKey]);
-      }
+      chrome.storage.local.set({ [STORAGE_KEY]: db }, () => resolve(db[canonicalKey]));
     });
   }
 
   // ==========================================================================
-  // ПАРСЕР СТРАНИЦЫ ТОВАРА И ТОЧНЫЙ КАЛЬКУЛЯТОР КБЖУ / ЦЕНЫ ЗА КГ
+  // ФИКСАТОР ЦЕН КОРЗИНЫ (CART PRICE LOCK) И СЛЕПОК КОРЗИНЫ
+  // ==========================================================================
+  function lockProductPriceOnCartAdd(btnEl) {
+    try {
+      const card = btnEl.closest('div[data-testid="product-card"]');
+      const mainPage = btnEl.closest('main[data-testid="good-page-desktop"]');
+      let slug = null;
+      let title = '';
+      let price = null;
+      let amount = '';
+
+      if (mainPage) {
+        slug = extractSlugFromUrl(window.location.href);
+        const meta = extractProductPageMetadata();
+        title = meta.title;
+        price = meta.price;
+        amount = meta.amountText;
+      } else if (card) {
+        const link = card.querySelector('a[href*="/good/"]') || card.closest('a[href*="/good/"]');
+        slug = link ? extractSlugFromUrl(link.getAttribute('href')) : null;
+        const img = card.querySelector('img');
+        title = (img && img.getAttribute('alt')) || (card.innerText || '').split('\n')[0] || slug;
+        const pInfo = extractPriceFromCardDOM(card);
+        price = pInfo.price;
+        amount = pInfo.amount;
+      }
+
+      if (slug && price && price > 0) {
+        cartLocksMemory[slug] = {
+          slug,
+          title,
+          lockedPrice: price,
+          amount,
+          accountId: detectCurrentAccountLabel(),
+          lockedAt: new Date().toISOString()
+        };
+        chrome.storage.local.set({ [CART_LOCKS_KEY]: cartLocksMemory });
+        LQS_RECORDER.record('CART_LOCK', `Locked price for ${slug}: ${price} ₽`);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function extractCartItemsFromDOM() {
+    const items = [];
+    const seen = new Set();
+    // Ищем товары в корзине (как на странице /cart, так и в боковом/модальном дровере корзины)
+    const cartHolders = document.querySelectorAll(
+      '[data-testid^="cart_item_"], [data-testid="cart-item"], div[class*="CartItem"], li[class*="CartItem"], a[href*="/good/"]'
+    );
+
+    cartHolders.forEach((node) => {
+      const container = node.closest('[data-testid^="cart_item_"], [data-testid="cart-item"], li, div[class*="Item"]') || node.parentElement;
+      if (!container) return;
+      // Пропускаем обычные карточки каталога, если они не внутри корзины
+      if (container.getAttribute('data-testid') === 'product-card') return;
+      const inCartRegion =
+        window.location.pathname.includes('/cart') ||
+        Boolean(container.closest('[data-testid*="cart"], aside, [role="dialog"]'));
+      if (!inCartRegion) return;
+
+      const linkEl = container.querySelector('a[href*="/good/"]') || (node.tagName === 'A' ? node : null);
+      if (!linkEl) return;
+      const slug = extractSlugFromUrl(linkEl.getAttribute('href'));
+      if (!slug || seen.has(slug)) return;
+
+      const textAll = (container.innerText || '').replace(/\s+/g, ' ').trim();
+      const priceMatches = Array.from(textAll.matchAll(/(\d[\d\s]*)\s*₽/g)).map((m) =>
+        parseFloat(m[1].replace(/\s/g, ''))
+      );
+      if (priceMatches.length === 0) return;
+
+      seen.add(slug);
+      const imgEl = container.querySelector('img');
+      const title =
+        (imgEl && imgEl.getAttribute('alt')) ||
+        (linkEl.textContent || '').trim() ||
+        slug;
+
+      let qty = 1;
+      const qtyMatch = textAll.match(/(?:^|\s)(\d{1,2})\s*шт/i);
+      if (qtyMatch) {
+        qty = parseInt(qtyMatch[1], 10) || 1;
+      } else {
+        // Проверяем счётчик между кнопками - и +
+        const spans = container.querySelectorAll('span, div');
+        for (const sp of spans) {
+          const t = (sp.textContent || '').trim();
+          if (/^\d{1,2}$/.test(t)) {
+            const v = parseInt(t, 10);
+            if (v >= 1 && v <= 30) {
+              qty = v;
+              break;
+            }
+          }
+        }
+      }
+
+      const itemTotalOrUnit = priceMatches[0];
+      const unitPrice = qty > 1 && priceMatches.length === 1 ? Math.round(itemTotalOrUnit / qty) : itemTotalOrUnit;
+
+      items.push({
+        slug,
+        title: title.slice(0, 90),
+        qty,
+        price: unitPrice,
+        amount: ''
+      });
+    });
+
+    const totalPrice = Math.round(items.reduce((acc, i) => acc + i.price * i.qty, 0));
+    return { items, totalPrice };
+  }
+
+  function scanAndSnapshotCurrentCartDOM() {
+    const snap = extractCartItemsFromDOM();
+    if (snap.items.length > 0 && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({
+        type: 'LQS_SAVE_CART_SNAPSHOT',
+        accountId: detectCurrentAccountLabel(),
+        items: snap.items,
+        totalPrice: snap.totalPrice
+      });
+      renderCartAuditBanner(snap);
+    }
+  }
+
+  function renderCartAuditBanner(snap) {
+    if (!snap || snap.items.length === 0) return;
+    const cartContainer =
+      document.querySelector('[data-testid="cart-view"], [data-testid="cart-page"], main[data-testid*="cart"]') ||
+      (window.location.pathname.includes('/cart') ? document.querySelector('main') : null);
+    if (!cartContainer) return;
+
+    const tampered = [];
+    const cheaperOtherAcc = [];
+
+    snap.items.forEach((it) => {
+      const lock = cartLocksMemory[it.slug];
+      if (lock && lock.lockedPrice && it.price > lock.lockedPrice) {
+        tampered.push({
+          title: it.title,
+          lockedPrice: lock.lockedPrice,
+          cartPrice: it.price,
+          diff: it.price - lock.lockedPrice
+        });
+      }
+      const pEntry = priceSummaryBySlug.get(it.slug) || (priceDbMemory && priceDbMemory[it.slug]);
+      if (pEntry && pEntry.minPrice && it.price > pEntry.minPrice + 3) {
+        cheaperOtherAcc.push({
+          title: it.title,
+          current: it.price,
+          minPrice: pEntry.minPrice,
+          diff: (it.price - pEntry.minPrice) * it.qty
+        });
+      }
+    });
+
+    let banner = cartContainer.querySelector('.lqs-cart-audit-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = 'lqs-cart-audit-banner';
+      cartContainer.prepend(banner);
+    }
+
+    const hasAlert = tampered.length > 0;
+    const potentialSave = cheaperOtherAcc.reduce((s, x) => s + x.diff, 0);
+
+    banner.innerHTML = `
+      <div class="lqs-cart-audit-head ${hasAlert ? 'is-danger' : 'is-safe'}">
+        <div>
+          <strong>🛡️ Анти-Шулер Аудит Корзины (${escapeHtml(detectCurrentAccountLabel())}):</strong>
+          <span>По калькулятору ${snap.items.length} поз. = <b>${snap.totalPrice} ₽</b></span>
+          ${potentialSave > 0 ? `<span style="color:#b45309;margin-left:6px;">• На другом аккаунте / по базе дешевле на <b>-${potentialSave} ₽</b>!</span>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-snapshot-btn">🔄 Слепок для другого акка</button>
+          <button type="button" class="lqs-mini-btn" id="lqs-cart-proof-btn">📸 Пруф для поддержки</button>
+        </div>
+      </div>
+      ${
+        tampered.length > 0
+          ? `<div class="lqs-cart-tamper-warn">🚨 <b>ВНИМАНИЕ! Лавка тихо подняла цены в корзине:</b><br>${tampered
+              .map((t) => `• ${escapeHtml(t.title)}: было <b>${t.lockedPrice} ₽</b> -> стало <b>${t.cartPrice} ₽ (+${t.diff} ₽)</b>`)
+              .join('<br>')}</div>`
+          : ''
+      }
+    `;
+
+    const snapBtn = banner.querySelector('#lqs-cart-snapshot-btn');
+    if (snapBtn) {
+      snapBtn.onclick = () => {
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_SAVE_CART_SNAPSHOT',
+            accountId: detectCurrentAccountLabel(),
+            items: snap.items,
+            totalPrice: snap.totalPrice
+          },
+          () => {
+            snapBtn.textContent = '✅ Слепок сохранён!';
+            setTimeout(() => {
+              snapBtn.textContent = '🔄 Слепок для другого акка';
+            }, 2000);
+          }
+        );
+      };
+    }
+
+    const proofBtn = banner.querySelector('#lqs-cart-proof-btn');
+    if (proofBtn) {
+      proofBtn.onclick = () => {
+        const lines = [
+          `# ДОКАЗАТЕЛЬСТВО РАСЧЁТА КОРЗИНЫ ЯНДЕКС ЛАВКИ (LAVKA QUALITY SHIELD v${VERSION})`,
+          `Дата и время: ${new Date().toLocaleString('ru-RU')}`,
+          `Аккаунт: ${detectCurrentAccountLabel()}`,
+          `URL: ${window.location.href}`,
+          ``,
+          `## Список позиций и пересчёт по калькулятору:`,
+          ...snap.items.map((it, idx) => {
+            const lock = cartLocksMemory[it.slug];
+            const lockNote = lock ? ` (при нажатии "В корзину" цена была: ${lock.lockedPrice} ₽ в ${lock.lockedAt})` : '';
+            return `${idx + 1}. ${it.title} [${it.slug}] — ${it.qty} шт. × ${it.price} ₽ = ${it.qty * it.price} ₽${lockNote}`;
+          }),
+          ``,
+          `ИТОГО ПО КАЛЬКУЛЯТОРУ: ${snap.totalPrice} ₽`
+        ];
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `lavka-cart-proof-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-')}.txt`;
+        a.click();
+      };
+    }
+  }
+
+  // ==========================================================================
+  // ПАРСЕР СТРАНИЦЫ ТОВАРА И КАЛЬКУЛЯТОР КБЖУ / ЦЕНЫ ЗА КГ
   // ==========================================================================
   function extractProductPageMetadata() {
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
@@ -658,7 +864,7 @@
           };
         }
       } catch {
-        // ignore malformed JSON-LD
+        // ignore
       }
     });
 
@@ -829,7 +1035,7 @@
       unitLabel = fromAmount.unitLabel;
     } else if (fromTitle.weightGrams) {
       weightGrams = fromTitle.weightGrams;
-      unitLabel = fromTitle.pieceUnitLabel && !fromTitle.weightGrams ? 'кг' : fromTitle.unitLabel;
+      unitLabel = fromTitle.unitLabel;
     }
 
     if (fromAmount.piecesCount) {
@@ -924,6 +1130,90 @@
     return result;
   }
 
+  /**
+   * Вычисляет компактный Анти-Шулер бейдж цены (сравнение с без куки, другими аккаунтами, историей и конкурентами)
+   */
+  function buildPriceShieldAlertPill(slug, currentPrice) {
+    if (!slug || !currentPrice) return '';
+    const pIntel = priceSummaryBySlug.get(slug) || (priceDbMemory && priceDbMemory[slug]);
+    if (!pIntel) return '';
+
+    const curAcc = detectCurrentAccountLabel();
+
+    // 1. Проверяем «Штраф за лояльность» (если без куки или на другом твоём аккаунте цена ниже!)
+    let cheapestAltPrice = null;
+    let cheapestAltLabel = '';
+
+    if (pIntel.guestPrice && pIntel.guestPrice < currentPrice - 2) {
+      cheapestAltPrice = pIntel.guestPrice;
+      cheapestAltLabel = 'без куки';
+    }
+
+    if (pIntel.accounts && typeof pIntel.accounts === 'object') {
+      for (const [accName, accObj] of Object.entries(pIntel.accounts)) {
+        if (accName !== curAcc && accObj && accObj.price && accObj.price < currentPrice - 2) {
+          if (!cheapestAltPrice || accObj.price < cheapestAltPrice) {
+            cheapestAltPrice = accObj.price;
+            cheapestAltLabel = accName;
+          }
+        }
+      }
+    }
+
+    if (cheapestAltPrice && cheapestAltPrice < currentPrice - 2) {
+      const diff = Math.round(currentPrice - cheapestAltPrice);
+      return `<span class="lqs-metric-pill verdict-bad" title="Штраф за лояльность! На профиле «${escapeHtml(cheapestAltLabel)}» этот же товар стоит ${cheapestAltPrice} ₽">🕵️ Тебе +${diff} ₽ (${escapeHtml(cheapestAltLabel)}: ${cheapestAltPrice} ₽)</span>`;
+    }
+
+    // 2. Проверяем цены у конкурентов (если в других магазинах заметно дешевле)
+    if (pIntel.competitorMinPrice && pIntel.competitorMinPrice < currentPrice - 5) {
+      const diffPct = Math.round(((currentPrice - pIntel.competitorMinPrice) / pIntel.competitorMinPrice) * 100);
+      if (diffPct >= 8) {
+        return `<span class="lqs-metric-pill verdict-warn" title="Цены в других сетях: ${escapeHtml(pIntel.competitorSummary || '')}">🏪 В сетях от ~${pIntel.competitorMinPrice} ₽ (тут +${diffPct}%)</span>`;
+      }
+    }
+
+    // 3. Проверяем историю цен в твоей базе (завышено или наоборот минимум)
+    if (pIntel.minPrice && currentPrice > pIntel.minPrice + 4) {
+      const diff = Math.round(currentPrice - pIntel.minPrice);
+      return `<span class="lqs-metric-pill verdict-warn" title="В твоей базе цен этот товар стоил ${pIntel.minPrice} ₽ (средняя: ${pIntel.avgPrice || pIntel.minPrice} ₽)">📈 +${diff} ₽ к мин. (${pIntel.minPrice} ₽)</span>`;
+    }
+
+    if (pIntel.maxPrice && currentPrice < pIntel.maxPrice - 4) {
+      const saved = Math.round(pIntel.maxPrice - currentPrice);
+      return `<span class="lqs-metric-pill verdict-good" title="Выгодная цена! Раньше стоил до ${pIntel.maxPrice} ₽">📉 Выгодно (-${saved} ₽)</span>`;
+    }
+
+    return '';
+  }
+
+  function buildPriceRadarDrawerBarHtml(slug, currentPrice) {
+    const pIntel = (slug && priceSummaryBySlug.get(slug)) || (slug && priceDbMemory && priceDbMemory[slug]);
+    if (!pIntel) {
+      return `<span>💰 <b>Радар цен:</b> собираю данные по гостевой цене (без куки), истории и другим магазинам...</span>`;
+    }
+    const parts = [];
+    if (currentPrice) parts.push(`Сейчас (${escapeHtml(detectCurrentAccountLabel())}): <b>${Math.round(currentPrice)} ₽</b>`);
+    if (pIntel.guestPrice) {
+      const diff = currentPrice ? Math.round(currentPrice - pIntel.guestPrice) : 0;
+      const tag = diff > 2 ? `<b style="color:#b91c1c;">${pIntel.guestPrice} ₽ (тебе +${diff} ₽!)</b>` : `<b>${pIntel.guestPrice} ₽</b>`;
+      parts.push(`Без куки (Гость): ${tag}`);
+    }
+    if (pIntel.minPrice && pIntel.maxPrice) {
+      parts.push(`История БД: мин <b>${pIntel.minPrice} ₽</b> / макс <b>${pIntel.maxPrice} ₽</b>`);
+    }
+    if (pIntel.accounts && Object.keys(pIntel.accounts).length > 1) {
+      const accStr = Object.entries(pIntel.accounts)
+        .map(([k, v]) => `${escapeHtml(k)}: <b>${v.price} ₽</b>`)
+        .join(', ');
+      parts.push(`По аккаунтам: ${accStr}`);
+    }
+    if (pIntel.competitorSummary) {
+      parts.push(`Конкуренты: <b>${escapeHtml(pIntel.competitorSummary)}</b>`);
+    }
+    return `<span>💰 ${parts.join(' • ')}</span>`;
+  }
+
   function buildMetricsInlineHtml(smart, meta, slug) {
     if (!smart) return '';
     let primaryPill = '';
@@ -944,6 +1234,8 @@
       ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>`
       : '';
 
+    const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null);
+
     let aiVerdictPill = '';
     const cachedAi = (slug && lastAiResultBySlug.get(slug)) || (slug && aiCacheMemory && aiCacheMemory[slug]);
     if (cachedAi && cachedAi.loading) {
@@ -951,11 +1243,11 @@
     } else if (cachedAi && cachedAi.verdict) {
       const vBadge = extractVerdictBadgeFromText(cachedAi.verdict);
       if (vBadge) {
-        aiVerdictPill = `<span class="lqs-metric-pill ${vBadge.cls}" title="Вердикт ИИ-ревизора (нажми Подробнее)">${escapeHtml(vBadge.text)}</span>`;
+        aiVerdictPill = `<span class="lqs-metric-pill ${vBadge.cls}" title="Вердикт ИИ-ревизора">${escapeHtml(vBadge.text)}</span>`;
       }
     }
 
-    return `${primaryPill} ${proteinPill} ${aiVerdictPill}`.trim();
+    return `${primaryPill} ${proteinPill} ${priceShieldPill} ${aiVerdictPill}`.trim();
   }
 
   // ==========================================================================
@@ -1029,6 +1321,10 @@
     const aiSources = panel.querySelector('#lqs-ai-sources');
     if (!aiBox || !aiContent || !aiSources) return;
 
+    if (resultObj.priceSummary && slug) {
+      priceSummaryBySlug.set(slug, resultObj.priceSummary);
+    }
+
     lastAiResultBySlug.set(slug, {
       verdict: resultObj.verdict,
       sources: resultObj.sources || [],
@@ -1047,6 +1343,11 @@
     const metricsBox = panel.querySelector('#lqs-metrics-inline');
     if (metricsBox) {
       setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-ai');
+    }
+
+    const radarBar = panel.querySelector('#lqs-price-radar-bar');
+    if (radarBar) {
+      setHtmlIfChanged(radarBar, buildPriceRadarDrawerBarHtml(slug, meta ? meta.price : null), 'price-radar-bar');
     }
 
     aiBox.classList.add('visible');
@@ -1099,6 +1400,11 @@
       setHtmlIfChanged(metricsBox, nextMetricsHtml, 'metrics-inline');
     }
 
+    const radarBar = panel.querySelector('#lqs-price-radar-bar');
+    if (radarBar) {
+      setHtmlIfChanged(radarBar, buildPriceRadarDrawerBarHtml(slug, meta ? meta.price : null), 'price-radar-bar');
+    }
+
     const flagsBox = panel.querySelector('#lqs-drawer-flags');
     if (flagsBox && smart) {
       const nextFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
@@ -1140,6 +1446,39 @@
     }
   }
 
+  /**
+   * Запрашивает разведку цены для открытого товара (включая зонд без куки и историю с других аккаунтов)
+   */
+  function triggerPriceIntelForProduct(slug, meta, panel) {
+    if (!slug || !meta || !meta.price) return;
+    if (priceIntelRequestedSlugs.has(slug)) return;
+    priceIntelRequestedSlugs.add(slug);
+
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage(
+        {
+          type: 'LQS_GET_PRICE_INTEL',
+          slug,
+          title: meta.title,
+          price: meta.price,
+          oldPrice: meta.oldPrice,
+          amount: meta.amountText,
+          accountId: detectCurrentAccountLabel()
+        },
+        (resp) => {
+          if (chrome.runtime.lastError || !resp || !resp.summary) return;
+          priceSummaryBySlug.set(slug, resp.summary);
+          if (priceDbMemory) priceDbMemory[slug] = resp.summary;
+          const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(slug)}"]`) || panel;
+          if (activePanel) {
+            const latestMeta = extractProductPageMetadata();
+            syncExistingPanelUI(activePanel, currentReviewCache, latestMeta);
+          }
+        }
+      );
+    }
+  }
+
   async function requestAiProductReview(meta, panel, forceRefresh = false, isZeroClickAuto = false) {
     const drawer = panel.querySelector('#lqs-drawer');
     const aiBox = panel.querySelector('#lqs-ai-box');
@@ -1165,8 +1504,8 @@
 
     aiBox.classList.add('visible');
     aiContent.innerHTML = isZeroClickAuto
-      ? '⏳ <b>Zero-Click Автопилот:</b> автоматически проверяю отзывы по 14 площадкам и запускаю ИИ-разбор состава...'
-      : '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора (Автопилот)...';
+      ? '⏳ <b>Zero-Click Автопилот:</b> сверяю цену без куки, цены в других сетях, отзывы по 14 площадкам и состав...'
+      : '⏳ Ищу отзывы, цены конкурентов и спрашиваю ИИ-ревизора...';
     aiSources.innerHTML = '';
 
     const t0 = performance.now();
@@ -1188,6 +1527,8 @@
                 brand: meta.brand,
                 amount: meta.amountText,
                 price: meta.price,
+                oldPrice: meta.oldPrice,
+                accountId: detectCurrentAccountLabel(),
                 ingredients: meta.ingredientsText,
                 traits: meta.traitsText,
                 pricePerKg: smart.pricePerKg,
@@ -1218,11 +1559,6 @@
             'OK',
             `Ответ через [${modeLabel}] за ${dt} мс (источников: ${(bgResult.sources || []).length})`
           );
-          LQS_RECORDER.record('AI', `Orchestrator success via [${modeLabel}] in ${dt}ms`, {
-            cached: Boolean(bgResult.cached),
-            sourcesCount: (bgResult.sources || []).length
-          });
-
           renderAiVerdictIntoPanel(panel, slug, meta, bgResult, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
           return;
         } else if (bgResult && bgResult.error) {
@@ -1230,7 +1566,6 @@
           if (metricsBox) {
             setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-err');
           }
-          LQS_RECORDER.record('AI', `Background orchestrator reported: ${bgResult.error}`);
           const dt = Math.round(performance.now() - t0);
           LQS_RECORDER.updateModule('aiReviewer', 'WARN', `Ответ оркестратора (${dt} мс): ${bgResult.error}`);
           aiContent.innerHTML = `⚠️ <b>${escapeHtml(bgResult.error)}</b>`;
@@ -1252,24 +1587,13 @@
       setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-fallback');
     }
 
-    const dt = Math.round(performance.now() - t0);
-    LQS_RECORDER.updateModule(
-      'aiReviewer',
-      'ERROR',
-      `ИИ не подключён (${dt} мс) — войди в аккаунт на gemini.google.com`
-    );
-
     aiContent.innerHTML =
       `⚠️ <b>Для запуска Автопилота ИИ нужно один раз войти в аккаунт Google на <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">gemini.google.com</a>!</b>`;
   }
 
-  /**
-   * Планирует автоматический Zero-Click запуск ИИ при открытии карточки товара
-   */
   function scheduleZeroClickAiForProduct(slug, panel) {
     if (!slug || !panel) return;
 
-    // 1. Если для этого slug уже есть вердикт в памяти или в локальном кэше браузера — рендерим мгновенно (0 мс)!
     const cachedEntry = lastAiResultBySlug.get(slug) || (aiCacheMemory && aiCacheMemory[slug]);
     if (cachedEntry && cachedEntry.verdict) {
       const latestMeta = extractProductPageMetadata();
@@ -1307,16 +1631,12 @@
     const slug = extractSlugFromUrl(window.location.href);
     const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
     if (!slug || !mainPage) {
-      if (slug && !mainPage) {
-        LQS_RECORDER.updateModule('widget', 'WARN', `URL товара (${slug}), но main[data-testid="good-page-desktop"] ещё не найден в DOM`);
-      }
       return;
     }
 
     const infoBlock = mainPage.querySelector('div[data-testid="product-info"]') ||
                       mainPage.querySelector('div[data-testid="product-card-header"]');
     if (!infoBlock) {
-      LQS_RECORDER.updateModule('widget', 'WARN', `Не найден контейнер product-info / product-card-header для ${slug}`);
       return;
     }
 
@@ -1345,12 +1665,8 @@
       let existing = mainPage.querySelector('.lqs-product-panel');
       if (existing && existing.dataset.slug === slug) {
         syncExistingPanelUI(existing, current, meta);
+        triggerPriceIntelForProduct(slug, meta, existing);
         scheduleZeroClickAiForProduct(slug, existing);
-        LQS_RECORDER.updateModule(
-          'widget',
-          'OK',
-          `Виджет синхронизирован для ${slug} (${current.rating}★, match=${match ? match.matchedBy : 'new'})`
-        );
         return;
       }
       if (existing) existing.remove();
@@ -1365,9 +1681,10 @@
 
       const initialMetricsHtml = buildMetricsInlineHtml(smart, meta, slug);
       const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
+      const initialRadarHtml = buildPriceRadarDrawerBarHtml(slug, meta.price);
 
       panel.innerHTML = `
-        <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + Живой статус ИИ + кнопка «▾ Подробнее» -->
+        <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + Анти-Шулер Бейдж + ИИ + кнопка «▾ Подробнее» -->
         <div class="lqs-main-bar">
           <div class="lqs-core-left">
             <div class="lqs-stars-inline" id="lqs-stars-box">
@@ -1379,14 +1696,16 @@
             <div class="lqs-metrics-inline" id="lqs-metrics-inline">${initialMetricsHtml}</div>
           </div>
 
-          <button type="button" class="lqs-drawer-toggle-btn" id="lqs-drawer-toggle" title="Открыть заметку, состав и ИИ-обзор">
+          <button type="button" class="lqs-drawer-toggle-btn" id="lqs-drawer-toggle" title="Открыть заметку, радар цен, состав и ИИ-обзор">
             <span class="lqs-dot-indicator is-hidden" id="lqs-drawer-dot"></span>
             <span class="lqs-toggle-label" id="lqs-drawer-label">${isDrawerInitiallyOpen ? '▴ Скрыть' : '▾ Подробнее'}</span>
           </button>
         </div>
 
-        <!-- ВЫПАДАЮЩЕЕ МЕНЮ ПОД КАПОТОМ (открывается автоматически при Zero-Click ИИ или по клику на «▾ Подробнее») -->
+        <!-- ВЫПАДАЮЩЕЕ МЕНЮ ПОД КАПОТОМ -->
         <div class="lqs-drawer ${isDrawerInitiallyOpen ? 'open' : ''}" id="lqs-drawer">
+          <div class="lqs-price-radar-bar" id="lqs-price-radar-bar">${initialRadarHtml}</div>
+
           <div class="lqs-drawer-toolbar">
             <div class="lqs-drawer-actions">
               <button type="button" class="lqs-mini-btn ai-btn" id="lqs-ai-btn" title="Найти отзывы в сети и спросить ИИ">
@@ -1416,7 +1735,7 @@
 
           <div class="lqs-ai-box" id="lqs-ai-box">
             <div class="lqs-ai-header">
-              <span>🤖 Сводка отзывов + разбор состава (Zero-Click Автопилот)</span>
+              <span>🤖 Сводка отзывов + разбор состава и цен (Zero-Click Автопилот)</span>
               <button type="button" class="lqs-ai-refresh-btn" id="lqs-ai-refresh" title="Принудительно переспросить ИИ-ревизора">🔄 Обновить</button>
             </div>
             <div class="lqs-ai-content" id="lqs-ai-content"></div>
@@ -1433,7 +1752,6 @@
       updateDrawerToggleButton(panel, isDrawerInitiallyOpen, current, smart);
 
       const barContainer = infoBlock.querySelector('div[data-testid="bar-container"]');
-      const mountPlace = (barContainer && barContainer.parentNode) ? 'after:bar-container' : 'prepend:infoBlock';
       if (barContainer && barContainer.parentNode) {
         barContainer.parentNode.insertBefore(panel, barContainer.nextSibling);
       } else {
@@ -1441,17 +1759,7 @@
       }
 
       LQS_RECORDER.counters.panelMounts += 1;
-      LQS_RECORDER.updateModule(
-        'widget',
-        'OK',
-        `Смонтирован (${mountPlace}) для ${slug}, match=${match ? match.matchedBy : 'none'}`
-      );
-      LQS_RECORDER.record('WIDGET', `Mounted panel for ${slug} at ${mountPlace}`, {
-        rating: current.rating,
-        banned: current.banned,
-        pricePerKg: smart.pricePerKg,
-        pricePer100gProtein: smart.pricePer100gProtein
-      });
+      LQS_RECORDER.updateModule('widget', 'OK', `Смонтирован для ${slug}`);
 
       const noteArea = panel.querySelector('#lqs-note-area');
       noteArea.value = current.note;
@@ -1488,7 +1796,6 @@
           } else if (current.rating >= 4) {
             current.banned = false;
           }
-          LQS_RECORDER.record('USER_ACTION', `Star rating set to ${current.rating}★ on ${slug}`);
           persistState();
         });
       });
@@ -1498,7 +1805,6 @@
         e.stopPropagation();
         current.banned = !current.banned;
         if (current.banned && current.rating === 0) current.rating = 1;
-        LQS_RECORDER.record('USER_ACTION', `Ban toggled to ${current.banned} on ${slug}`);
         persistState();
       });
 
@@ -1510,7 +1816,6 @@
         current.tags = [];
         current.note = '';
         noteArea.value = '';
-        LQS_RECORDER.record('USER_ACTION', `Reset review for ${slug}`);
         persistState();
       });
 
@@ -1544,7 +1849,6 @@
           } else {
             current.tags.push(tag);
           }
-          LQS_RECORDER.record('USER_ACTION', `Toggled tag "${tag}" on ${slug}`);
           persistState();
         });
       });
@@ -1560,14 +1864,13 @@
         e.preventDefault();
         e.stopPropagation();
         clearTimeout(noteTimeout);
-        LQS_RECORDER.record('USER_ACTION', `Saved note on ${slug} (${noteArea.value.length} chars)`);
         persistState();
         const saveBtn = e.currentTarget;
         saveBtn.textContent = '✅ Ок';
         setTimeout(() => { saveBtn.textContent = '💾 Ок'; }, 1200);
       });
 
-      // ЗАПУСКАЕМ ZERO-CLICK АВТОПИЛОТ ИИ ПРИ ОТКРЫТИИ ТОВАРА!
+      triggerPriceIntelForProduct(slug, meta, panel);
       scheduleZeroClickAiForProduct(slug, panel);
     } catch (err) {
       LQS_RECORDER.updateModule('widget', 'ERROR', `Ошибка рендера: ${err.message || err}`);
@@ -1586,21 +1889,12 @@
   // ==========================================================================
   function guardAddToCartButton(review) {
     const addBtn = document.querySelector('main[data-testid="good-page-desktop"] button[data-testid="snippet-control"]');
-    if (!addBtn) {
-      LQS_RECORDER.updateModule('cartGuard', 'IDLE', 'Кнопка snippet-control не отображена (товар уже в корзине или нет в наличии)');
-      return;
-    }
+    if (!addBtn) return;
 
     const isBad = Boolean(review && (review.banned || (review.rating > 0 && review.rating <= 2)));
     const nextBadStr = isBad ? 'true' : 'false';
     const nextNoteStr = (review && review.note) ? review.note : '';
     const nextRatingStr = (review && review.rating) ? String(review.rating) : '1';
-
-    LQS_RECORDER.updateModule(
-      'cartGuard',
-      'OK',
-      isBad ? `Активна блокировка корзины (${nextRatingStr}★)` : 'Кнопка корзины проверена (товар не в бане)'
-    );
 
     if (
       addBtn.dataset.lqsBad === nextBadStr &&
@@ -1621,16 +1915,12 @@
         addBtn.dataset.lqsGuarded = 'true';
         addBtn.addEventListener('click', (e) => {
           if (addBtn.dataset.lqsBad === 'true') {
-            LQS_RECORDER.record('CART_GUARD', 'Intercepted Add-to-Cart click on banned item');
             const ok = window.confirm(
               `⚠️ Этот товар у тебя в чёрном списке (${addBtn.dataset.lqsRating}★).\nЗаметка: "${addBtn.dataset.lqsNote || 'Не брать'}"\n\nВсё равно добавить в корзину?`
             );
             if (!ok) {
               e.stopPropagation();
               e.preventDefault();
-              LQS_RECORDER.record('CART_GUARD', 'User cancelled adding banned item to cart');
-            } else {
-              LQS_RECORDER.record('CART_GUARD', 'User confirmed adding banned item despite warning');
             }
           }
         }, true);
@@ -1642,7 +1932,7 @@
   }
 
   // ==========================================================================
-  // РАЗМЕТКА КАРТОЧЕК В КАТАЛОГЕ, ПОИСКЕ И «ВЫ ПОКУПАЛИ»
+  // РАЗМЕТКА КАРТОЧЕК В КАТАЛОГЕ + АВТО-СБОР ЦЕН СО ВСЕХ КАРТОЧЕК В БАЗУ
   // ==========================================================================
   function extractCardIdentifiers(card) {
     const linkEl = card.querySelector('a[href*="/good/"]') || card.closest('a[href*="/good/"]');
@@ -1661,7 +1951,23 @@
     const imgAlt = imgEl ? imgEl.getAttribute('alt') : '';
     const cleanTitle = normalizeTitle(imgAlt);
 
-    return { slug, productId, imageKey, cleanTitle };
+    return { slug, productId, imageKey, cleanTitle, rawTitle: imgAlt || '' };
+  }
+
+  function extractPriceFromCardDOM(card) {
+    const priceEl = card.querySelector('[data-testid="price-text"]');
+    let price = null;
+    if (priceEl) {
+      price = parseFloat(priceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.')) || null;
+    } else {
+      const m = (card.innerText || '').match(/(\d[\d\s]*)\s*₽/);
+      if (m) price = parseFloat(m[1].replace(/\s/g, '')) || null;
+    }
+    const oldEl = card.querySelector('[data-testid="price-old-text"]');
+    const oldPrice = oldEl ? (parseFloat(oldEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.')) || null) : null;
+    const amtEl = card.querySelector('[data-testid="product-amount"]');
+    const amount = amtEl ? amtEl.textContent.trim() : '';
+    return { price, oldPrice, amount };
   }
 
   async function decorateCatalogCards() {
@@ -1671,20 +1977,44 @@
 
     let badgedCount = 0;
     let bannedCount = 0;
+    const harvestedPrices = [];
 
     cards.forEach((card) => {
       const ids = extractCardIdentifiers(card);
+      const pInfo = extractPriceFromCardDOM(card);
+
+      if (ids.slug && pInfo.price && pInfo.price > 0) {
+        if (card.dataset.lqsHarvestedPrice !== String(pInfo.price)) {
+          card.dataset.lqsHarvestedPrice = String(pInfo.price);
+          harvestedPrices.push({
+            slug: ids.slug,
+            title: ids.rawTitle || ids.slug,
+            price: pInfo.price,
+            oldPrice: pInfo.oldPrice,
+            amount: pInfo.amount
+          });
+        }
+      }
+
       const match = findReviewInDB(db, ids);
       const review = match ? match.item : null;
       const aiCached = ids.slug && aiCacheMemory ? aiCacheMemory[ids.slug] : null;
+      const priceEntry = ids.slug && priceDbMemory ? priceDbMemory[ids.slug] : null;
 
-      const oldNote = card.querySelector('.lqs-card-note-preview');
-      if (oldNote) oldNote.remove();
+      let priceDiffTag = '';
+      if (priceEntry && pInfo.price) {
+        if (priceEntry.minPrice && pInfo.price > priceEntry.minPrice + 4) {
+          priceDiffTag = ` 📈+${Math.round(pInfo.price - priceEntry.minPrice)}₽`;
+        } else if (priceEntry.maxPrice && pInfo.price < priceEntry.maxPrice - 4) {
+          priceDiffTag = ` 📉-${Math.round(priceEntry.maxPrice - pInfo.price)}₽`;
+        }
+      }
 
       const hasReview = Boolean(review && (review.rating > 0 || review.banned));
       const hasAiVerdict = Boolean(!hasReview && aiCached && aiCached.verdict);
+      const hasPriceSignal = Boolean(!hasReview && !hasAiVerdict && priceDiffTag);
 
-      if (!hasReview && !hasAiVerdict) {
+      if (!hasReview && !hasAiVerdict && !hasPriceSignal) {
         if (card.dataset.lqsBadgeKey) {
           delete card.dataset.lqsBadgeKey;
           const oldBadge = card.querySelector('.lqs-card-badge');
@@ -1707,15 +2037,19 @@
         isBad = Boolean(review.banned || (review.rating > 0 && review.rating <= 2));
         if (isBad) bannedCount += 1;
         tier = isBad ? 'trash' : (review.rating >= 4 ? 'god' : 'ok');
-        text = isBad ? `💀 ${review.rating ? review.rating + '★' : 'БАН'}` : `★ ${review.rating}`;
+        text = (isBad ? `💀 ${review.rating ? review.rating + '★' : 'БАН'}` : `★ ${review.rating}`) + priceDiffTag;
         titleText = (review.note && review.note.trim())
           ? review.note.trim()
           : ((review.tags && review.tags.length) ? review.tags.join(', ') : '');
       } else if (hasAiVerdict) {
         const vBadge = extractVerdictBadgeFromText(aiCached.verdict);
-        text = vBadge ? vBadge.shortCatalog : '🤖';
+        text = (vBadge ? vBadge.shortCatalog : '🤖') + priceDiffTag;
         tier = vBadge && vBadge.cls === 'verdict-good' ? 'god' : (vBadge && vBadge.cls === 'verdict-bad' ? 'trash' : 'ok');
         titleText = aiCached.verdict.replace(/\*\*/g, '').slice(0, 220);
+      } else if (hasPriceSignal) {
+        text = priceDiffTag.trim();
+        tier = priceDiffTag.includes('📉') ? 'god' : 'ok';
+        titleText = `По базе цен: мин ${priceEntry.minPrice} ₽ / макс ${priceEntry.maxPrice} ₽`;
       }
 
       const badgeKey = `${tier}|${text}|${titleText}`;
@@ -1744,10 +2078,24 @@
       LQS_RECORDER.counters.catalogBadgesUpdated += 1;
     });
 
+    // Отправляем собранные с витрины цены в единую базу (не чаще раза в 2 сек)
+    const now = Date.now();
+    if (harvestedPrices.length > 0 && now - lastCatalogHarvestTs > 1800) {
+      lastCatalogHarvestTs = now;
+      LQS_RECORDER.counters.pricesHarvested += harvestedPrices.length;
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          type: 'LQS_RECORD_PRICES',
+          accountId: detectCurrentAccountLabel(),
+          items: harvestedPrices
+        });
+      }
+    }
+
     LQS_RECORDER.updateModule(
       'catalog',
       'OK',
-      `Просканировано карточек: ${cards.length} (с бейджем: ${badgedCount}, затемнено в бане: ${bannedCount})`
+      `Карточек: ${cards.length} (с бейджем: ${badgedCount}, в бане: ${bannedCount}, цен собрано: ${LQS_RECORDER.counters.pricesHarvested})`
     );
   }
 
@@ -1762,25 +2110,19 @@
       checkUrlTransition();
       renderProductPageWidget();
       decorateCatalogCards();
+      scanAndSnapshotCurrentCartDOM();
     }, 120);
   }
 
   function checkUrlTransition() {
     const currentUrl = window.location.href;
     if (currentUrl !== lastObservedUrl) {
-      const prevUrl = lastObservedUrl;
       lastObservedUrl = currentUrl;
       LQS_RECORDER.counters.spaTransitions += 1;
-      try {
-        LQS_RECORDER.record('ROUTER', `SPA transition: ${new URL(prevUrl).pathname} -> ${window.location.pathname}`);
-      } catch {
-        LQS_RECORDER.record('ROUTER', `SPA transition -> ${window.location.pathname}`);
-      }
       runHydrationResyncWave('spa-url-change');
     }
   }
 
-  // Надёжный легковесный поллер URL каждые 350 мс на случай тихих history.pushState в React Router
   setInterval(checkUrlTransition, 350);
 
   function runHydrationResyncWave(reason = 'init') {
@@ -1790,11 +2132,11 @@
       'OK',
       `Маршрут: ${window.location.pathname} (${slug ? 'Товар: ' + slug : 'Каталог'}), причина: ${reason}`
     );
-    LQS_RECORDER.record('ROUTER', `Hydration resync wave (${reason}) on ${window.location.pathname}`);
     [0, 180, 500, 1200, 2500].forEach((delay) => {
       setTimeout(() => {
         renderProductPageWidget();
         decorateCatalogCards();
+        scanAndSnapshotCurrentCartDOM();
       }, delay);
     });
   }
@@ -1806,14 +2148,14 @@
         node.classList &&
         (node.classList.contains('lqs-product-panel') ||
          node.classList.contains('lqs-card-badge') ||
-         node.classList.contains('lqs-card-note-preview'))
+         node.classList.contains('lqs-cart-audit-banner'))
       ) {
         return true;
       }
-      if (node.closest && node.closest('.lqs-product-panel, .lqs-card-badge')) {
+      if (node.closest && node.closest('.lqs-product-panel, .lqs-card-badge, .lqs-cart-audit-banner')) {
         return true;
       }
-    } else if (node.parentElement && node.parentElement.closest('.lqs-product-panel, .lqs-card-badge')) {
+    } else if (node.parentElement && node.parentElement.closest('.lqs-product-panel, .lqs-card-badge, .lqs-cart-audit-banner')) {
       return true;
     }
     return false;
@@ -1822,9 +2164,7 @@
   function hasExternalMutation(mutations) {
     for (let i = 0; i < mutations.length; i++) {
       const m = mutations[i];
-      if (isOwnLqsNode(m.target)) {
-        continue;
-      }
+      if (isOwnLqsNode(m.target)) continue;
       let hasNonLqsChild = false;
       for (let j = 0; j < m.addedNodes.length; j++) {
         if (!isOwnLqsNode(m.addedNodes[j])) {
@@ -1840,9 +2180,7 @@
           }
         }
       }
-      if (hasNonLqsChild) {
-        return true;
-      }
+      if (hasNonLqsChild) return true;
     }
     return false;
   }
@@ -1866,11 +2204,6 @@
       if (area === 'local') {
         if (changes[STORAGE_KEY]) {
           reviewsDbCache = changes[STORAGE_KEY].newValue || {};
-          LQS_RECORDER.updateModule(
-            'storage',
-            'OK',
-            `База синхронизирована из storage.onChanged (${Object.keys(reviewsDbCache).length} товаров)`
-          );
           renderProductPageWidget();
           decorateCatalogCards();
         }
@@ -1878,7 +2211,13 @@
           aiCacheMemory = changes[AI_CACHE_KEY].newValue || {};
           decorateCatalogCards();
         }
+        if (changes[PRICE_DB_KEY]) {
+          priceDbMemory = changes[PRICE_DB_KEY].newValue || {};
+          renderProductPageWidget();
+          decorateCatalogCards();
+        }
         if (changes[SETTINGS_KEY]) {
+          cachedSettings = { ...DEFAULT_SETTINGS, ...(changes[SETTINGS_KEY].newValue || {}) };
           renderProductPageWidget();
         }
       }

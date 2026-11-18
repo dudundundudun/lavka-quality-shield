@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'lqs_reviews_v1';
 const SETTINGS_KEY = 'lqs_settings_v2';
 const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
+const PRICE_DB_KEY = 'lqs_price_db_v1';
 
 const DEFAULT_SETTINGS = {
   backendUrl: 'http://127.0.0.1:8765',
@@ -12,14 +13,15 @@ const DEFAULT_SETTINGS = {
   preferredGeminiTabId: null,
   autoRunAiOnProductPage: true,
   autoOpenDrawerOnAi: true,
-  autoWarmupGeminiTab: true
+  autoWarmupGeminiTab: true,
+  lavkaAccountLabel: 'Аккаунт #1 (Основной)',
+  enableGuestPriceProbe: true
 };
-
-const DOCKER_POWERSHELL_CMD =
-  'docker run -d --name gemini-argon --restart unless-stopped -p 8083:8083 ghcr.io/zexadev/gemini-web2api-go:latest; Start-Sleep -Seconds 2; Write-Host "🚀 Сервер запущен! Админка: http://localhost:8083/admin/" -ForegroundColor Green';
 
 let currentFilter = 'all';
 let searchQuery = '';
+let currentPriceFilter = 'all';
+let priceSearchQuery = '';
 let lastBackendPingSummary = null;
 
 function escapeHtml(str) {
@@ -55,6 +57,9 @@ function saveSettingsPatch(patch, callback) {
   });
 }
 
+// ==========================================================================
+// ВКЛАДКА 1: ОТЗЫВЫ
+// ==========================================================================
 function loadReviews() {
   chrome.storage.local.get([STORAGE_KEY], (res) => {
     const db = res[STORAGE_KEY] || {};
@@ -122,6 +127,225 @@ function loadReviews() {
   });
 }
 
+// ==========================================================================
+// ВКЛАДКА 2: МУЛЬТИ-АККАУНТ КЛОНЕР КОРЗИНЫ И БАЗА ЦЕН
+// ==========================================================================
+function hasPriceDiscrepancy(entry) {
+  if (!entry) return false;
+  if (entry.minPrice && entry.maxPrice && entry.maxPrice - entry.minPrice >= 3) return true;
+  if (entry.guestPrice && entry.lastPrice && Math.abs(entry.lastPrice - entry.guestPrice) >= 3) return true;
+  return false;
+}
+
+function loadPricesAndCartTab() {
+  // 1. Загружаем сохранённый слепок корзины
+  chrome.runtime.sendMessage({ type: 'LQS_GET_SAVED_CARTS' }, (resp) => {
+    const badgeEl = document.getElementById('saved-cart-badge');
+    const sumEl = document.getElementById('saved-cart-summary');
+    if (resp && resp.latest && Array.isArray(resp.latest.items) && resp.latest.items.length > 0) {
+      const lat = resp.latest;
+      badgeEl.textContent = `✅ ${lat.items.length} поз. (${lat.totalPrice} ₽)`;
+      const names = lat.items.slice(0, 4).map((i) => `${escapeHtml(i.title.slice(0, 22))} (${i.qty} шт × ${i.price}₽)`).join(', ');
+      sumEl.innerHTML =
+        `Сохранена с профиля <b>${escapeHtml(lat.accountId)}</b> на сумму <b>${lat.totalPrice} ₽</b>:<br>` +
+        `<span style="color:#57534e;">${names}${lat.items.length > 4 ? ` и ещё ${lat.items.length - 4}...` : ''}</span>`;
+    } else {
+      badgeEl.textContent = 'Пока пусто';
+      sumEl.textContent = 'Открой корзину в Лавке или нажми «📸 Снять слепок корзины», чтобы сравнить или перенести её на другой аккаунт.';
+    }
+  });
+
+  // 2. Загружаем базу цен (из локального хранилища + синхронизируем с :8765 если запущен)
+  chrome.storage.local.get([PRICE_DB_KEY, SETTINGS_KEY], async (res) => {
+    const localDb = { ...(res[PRICE_DB_KEY] || {}) };
+    const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
+
+    try {
+      const r = await fetchWithTimeout(`${cfg.backendUrl.replace(/\/$/, '')}/api/price/list?limit=300`, { method: 'GET' }, 1200);
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.items)) {
+          j.items.forEach((it) => {
+            if (it && it.slug) localDb[it.slug] = { ...(localDb[it.slug] || {}), ...it };
+          });
+        }
+      }
+    } catch {
+      // backend offline
+    }
+
+    const allItems = Object.values(localDb).sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    const diffCount = allItems.filter(hasPriceDiscrepancy).length;
+
+    document.getElementById('price-count-total').textContent = allItems.length;
+    document.getElementById('price-count-over').textContent = diffCount;
+
+    const listEl = document.getElementById('prices-list');
+    listEl.innerHTML = '';
+
+    const q = priceSearchQuery.trim().toLowerCase();
+    const filtered = allItems.filter((item) => {
+      if (currentPriceFilter === 'diff' && !hasPriceDiscrepancy(item)) return false;
+      if (q) {
+        const hay = `${item.title || ''} ${item.slug || ''} ${item.competitorSummary || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      listEl.innerHTML = '<div style="color:#7a7875;text-align:center;padding:14px;font-size:11.5px;">База цен наполняется автоматически, когда ты листаешь каталог или открываешь товары Лавки.</div>';
+      return;
+    }
+
+    filtered.slice(0, 80).forEach((item) => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      const safeSlug = encodeURIComponent(item.slug || '');
+      const safeTitle = escapeHtml(item.title || item.slug);
+      const accEntries = item.accounts ? Object.entries(item.accounts) : [];
+      const accSummary = accEntries.map(([k, v]) => `${escapeHtml(k)}: <b>${v.price} ₽</b>`).join(' | ');
+      const spread = (item.maxPrice && item.minPrice && item.maxPrice > item.minPrice)
+        ? `<span style="color:#b91c1c;font-weight:700;">Δ ${Math.round(item.maxPrice - item.minPrice)} ₽</span>`
+        : `<span style="color:#15803d;">${item.lastPrice || item.minPrice || '?'} ₽</span>`;
+
+      div.innerHTML = `
+        <div class="item-header">
+          <a href="https://lavka.yandex.ru/good/${safeSlug}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>
+          <span class="item-right">${spread}</span>
+        </div>
+        <div class="item-note">
+          Мин: <b>${item.minPrice ?? '?'} ₽</b> • Макс: <b>${item.maxPrice ?? '?'} ₽</b>
+          ${item.guestPrice ? ` • Без куки: <b>${item.guestPrice} ₽</b>` : ''}
+          ${accSummary ? `<br>${accSummary}` : ''}
+          ${item.competitorSummary ? `<br>🏪 Сети: ${escapeHtml(item.competitorSummary)}` : ''}
+        </div>
+      `;
+      listEl.appendChild(div);
+    });
+  });
+}
+
+document.getElementById('lavka-account-select').addEventListener('change', (e) => {
+  saveSettingsPatch({ lavkaAccountLabel: e.target.value });
+});
+
+document.getElementById('capture-cart-btn').addEventListener('click', () => {
+  const btn = document.getElementById('capture-cart-btn');
+  const acc = document.getElementById('lavka-account-select').value;
+  btn.textContent = '⏳ Снимаю...';
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const activeTab = tabs && tabs[0];
+    if (!activeTab || !activeTab.url || !activeTab.url.includes('lavka.yandex.ru')) {
+      btn.textContent = '⚠️ Открой Лавку';
+      setTimeout(() => { btn.textContent = '📸 Снять слепок корзины'; }, 2000);
+      return;
+    }
+    chrome.tabs.sendMessage(activeTab.id, { type: 'LQS_EXTRACT_CURRENT_CART_FROM_PAGE' }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !Array.isArray(resp.items) || resp.items.length === 0) {
+        btn.textContent = '⚠️ Открой /cart';
+        setTimeout(() => { btn.textContent = '📸 Снять слепок корзины'; }, 2200);
+        return;
+      }
+      chrome.runtime.sendMessage(
+        {
+          type: 'LQS_SAVE_CART_SNAPSHOT',
+          accountId: acc,
+          items: resp.items,
+          totalPrice: resp.totalPrice
+        },
+        () => {
+          btn.textContent = `✅ Снято (${resp.items.length} поз.)`;
+          loadPricesAndCartTab();
+          setTimeout(() => { btn.textContent = '📸 Снять слепок корзины'; }, 2000);
+        }
+      );
+    });
+  });
+});
+
+document.getElementById('compare-cart-btn').addEventListener('click', () => {
+  const btn = document.getElementById('compare-cart-btn');
+  const out = document.getElementById('cart-compare-output');
+  const acc = document.getElementById('lavka-account-select').value;
+  btn.textContent = '⏳ Сверяю...';
+  out.style.display = 'block';
+  out.textContent = 'Запрашиваю живые цены всех товаров корзины на текущем аккаунте и без куки...';
+
+  chrome.runtime.sendMessage({ type: 'LQS_COMPARE_CART_PRICES', accountId: acc }, (resp) => {
+    btn.textContent = '⚖️ Сверить цены здесь';
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      out.innerHTML = `⚠️ ${escapeHtml(resp?.error || 'Не удалось сверить корзину')}`;
+      return;
+    }
+
+    const diff = resp.diffTotal;
+    const diffBadge =
+      diff < 0
+        ? `<span style="color:#15803d;font-weight:800;">🎉 Здесь ВЫГОДНЕЕ на ${Math.abs(diff)} ₽!</span>`
+        : diff > 0
+        ? `<span style="color:#dc2626;font-weight:800;">⚠️ Здесь ДОРОЖЕ на +${diff} ₽!</span>`
+        : `<span style="color:#475569;font-weight:700;">Цены одинаковые (0 ₽ разницы)</span>`;
+
+    const rowsHtml = resp.items
+      .map((it) => {
+        const d = it.diffTotal;
+        const dStr = d < 0 ? `<b style="color:#15803d;">${d}₽</b>` : d > 0 ? `<b style="color:#dc2626;">+${d}₽</b>` : '0₽';
+        return `<div style="border-bottom:1px solid #f0eee9;padding:3px 0;">
+          <b>${escapeHtml(it.title.slice(0, 32))}</b> (${it.qty} шт):
+          было ${it.sourcePrice}₽ -> тут <b>${it.currentPrice}₽</b> (${dStr})
+          ${it.guestPrice ? ` | Гость: ${it.guestPrice}₽` : ''}
+        </div>`;
+      })
+      .join('');
+
+    out.innerHTML = `
+      <div style="margin-bottom:5px;">
+        • <b>${escapeHtml(resp.sourceAccount)}:</b> ${resp.sourceTotal} ₽<br>
+        • <b>${escapeHtml(resp.currentAccount)}:</b> ${resp.currentTotal} ₽ (Без куки: ${resp.guestTotal} ₽)<br>
+        • Итог: ${diffBadge}
+      </div>
+      ${rowsHtml}
+    `;
+    loadPricesAndCartTab();
+  });
+});
+
+document.getElementById('autobuild-cart-btn').addEventListener('click', () => {
+  const btn = document.getElementById('autobuild-cart-btn');
+  const out = document.getElementById('cart-compare-output');
+  btn.textContent = '⏳ Собираю корзину в Лавке...';
+  out.style.display = 'block';
+  out.textContent = 'Авто-сборщик открывает товары из слепка и нажимает «В корзину»...';
+
+  chrome.runtime.sendMessage({ type: 'LQS_AUTO_BUILD_CART' }, (resp) => {
+    btn.textContent = '🚀 Авто-собрать сохранённую корзину на этом аккаунте (1 клик)';
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      out.innerHTML = `⚠️ ${escapeHtml(resp?.error || 'Ошибка авто-сборки корзины')}`;
+      return;
+    }
+    out.innerHTML = `✅ <b>Готово!</b> Автоматически добавлено в корзину: <b>${resp.addedCount} из ${resp.totalRequested}</b> товаров.`;
+  });
+});
+
+document.getElementById('price-search-input').addEventListener('input', (e) => {
+  priceSearchQuery = e.target.value || '';
+  loadPricesAndCartTab();
+});
+
+document.querySelectorAll('[data-pfilter]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-pfilter]').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPriceFilter = btn.dataset.pfilter;
+    loadPricesAndCartTab();
+  });
+});
+
+// ==========================================================================
+// ВКЛАДКА 3: НАСТРОЙКИ И АВТОПИЛОТ ИИ
+// ==========================================================================
 function loadSettings() {
   chrome.storage.local.get([SETTINGS_KEY], (res) => {
     const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
@@ -132,18 +356,23 @@ function loadSettings() {
     document.getElementById('chk-auto-run-ai').checked = cfg.autoRunAiOnProductPage !== false;
     document.getElementById('chk-auto-open-drawer').checked = cfg.autoOpenDrawerOnAi !== false;
     document.getElementById('chk-auto-warmup').checked = cfg.autoWarmupGeminiTab !== false;
+    document.getElementById('chk-guest-probe').checked = cfg.enableGuestPriceProbe !== false;
+    if (cfg.lavkaAccountLabel) {
+      const sel = document.getElementById('lavka-account-select');
+      if (sel) sel.value = cfg.lavkaAccountLabel;
+    }
   });
 }
 
-// Сохранение тумблеров Zero-Click мгновенно при переключении
-['chk-auto-run-ai', 'chk-auto-open-drawer', 'chk-auto-warmup'].forEach((id) => {
+['chk-auto-run-ai', 'chk-auto-open-drawer', 'chk-auto-warmup', 'chk-guest-probe'].forEach((id) => {
   const el = document.getElementById(id);
   if (el) {
     el.addEventListener('change', () => {
       saveSettingsPatch({
         autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
         autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
-        autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked
+        autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked,
+        enableGuestPriceProbe: document.getElementById('chk-guest-probe').checked
       });
     });
   }
@@ -155,9 +384,6 @@ document.getElementById('clear-ai-cache-btn').addEventListener('click', () => {
   });
 });
 
-// ==========================================================================
-// ЖИВОЙ РАДАР И АВТОПИЛОТ ПОДКЛЮЧЕНИЯ GEMINI
-// ==========================================================================
 function setRadarPill(pillId, valId, isOk, isWarn, text, title = '') {
   const pill = document.getElementById(pillId);
   const val = document.getElementById(valId);
@@ -182,15 +408,6 @@ function populateAccountSelector(resp) {
     const labelEmail = t.email ? `${t.email} (/u/${t.accountIndex})` : `Вкладка /u/${t.accountIndex} (id:${t.tabId})`;
     opt.textContent = `🟢 Открыта #${idx + 1}: ${labelEmail}`;
     sel.insertBefore(opt, sel.firstChild);
-  });
-
-  openTabs.forEach((t) => {
-    if (t.email) {
-      const staticOpt = sel.querySelector(`option[value="${t.accountIndex}"]`);
-      if (staticOpt) {
-        staticOpt.textContent = `Аккаунт #${t.accountIndex} — ${t.email} (/u/${t.accountIndex})`;
-      }
-    }
   });
 
   if (cfg.preferredGeminiTabId) {
@@ -228,7 +445,7 @@ function applyRadarResponse(resp) {
 
   const cacheBadge = document.getElementById('ai-cache-badge');
   if (cacheBadge) {
-    cacheBadge.textContent = `Кэш ИИ: ${resp.localAiCacheCount ?? 0} тов.`;
+    cacheBadge.textContent = `Кэш ИИ: ${resp.localAiCacheCount ?? 0} | Цен: ${resp.trackedPricesCount ?? 0}`;
   }
 
   const tabFound = Boolean(resp.geminiTab && resp.geminiTab.found);
@@ -241,9 +458,7 @@ function applyRadarResponse(resp) {
     tabFound,
     !tabFound,
     tabFound ? `✅ ${accTag || 'Открыта'}` : '⚪ Авто-старт',
-    tabFound
-      ? `Подключена вкладка: ${resp.geminiTab.email || resp.geminiTab.url || 'gemini.google.com'}`
-      : 'Откроется автоматически при заходе в Лавку'
+    tabFound ? `Подключена вкладка Gemini` : 'Откроется автоматически при заходе в Лавку'
   );
 
   const cookiesOk = Boolean(resp.cookies && resp.cookies.ok);
@@ -252,19 +467,11 @@ function applyRadarResponse(resp) {
     'val-cookies',
     cookiesOk,
     !cookiesOk,
-    cookiesOk ? `✅ Активны (${resp.cookies.count})` : '⚠️ Не вошёл',
-    cookiesOk ? 'Найдены куки авторизации Google' : 'Войди в аккаунт на gemini.google.com'
+    cookiesOk ? `✅ Активны (${resp.cookies.count})` : '⚠️ Не вошёл'
   );
 
   const bridgeOk = Boolean(resp.bridge && resp.bridge.ok);
-  setRadarPill(
-    'pill-bridge',
-    'val-bridge',
-    bridgeOk,
-    false,
-    bridgeOk ? '✅ Подключён' : '⚪ Выкл',
-    resp.bridge ? resp.bridge.msg : ''
-  );
+  setRadarPill('pill-bridge', 'val-bridge', bridgeOk, false, bridgeOk ? '✅ Подключён' : '⚪ Выкл');
 
   const backendOk = Boolean(resp.backend && resp.backend.ok);
   setRadarPill(
@@ -272,31 +479,23 @@ function applyRadarResponse(resp) {
     'val-backend',
     backendOk,
     false,
-    backendOk ? `✅ ОК (${resp.backend.cachedItems})` : '⚪ Выкл',
-    resp.backend ? resp.backend.msg : ''
+    backendOk ? `✅ ОК (${resp.backend.trackedPrices || 0})` : '⚪ Локально'
   );
 }
 
 function refreshAiRadar() {
   if (!chrome.runtime || !chrome.runtime.sendMessage) return;
   chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
-    if (chrome.runtime.lastError || !resp || !resp.ok) {
-      setRadarPill('pill-gemini-tab', 'val-gemini-tab', false, true, 'Обнови расш.');
-      return;
+    if (!chrome.runtime.lastError && resp && resp.ok) {
+      applyRadarResponse(resp);
     }
-    applyRadarResponse(resp);
   });
 }
 
-document.getElementById('refresh-radar-btn').addEventListener('click', () => {
-  refreshAiRadar();
-});
+document.getElementById('refresh-radar-btn').addEventListener('click', refreshAiRadar);
 
 document.getElementById('gemini-account-select').addEventListener('change', () => {
   const choice = getSelectedAccountChoice();
-  const statusBox = document.getElementById('autopilot-status-box');
-  statusBox.style.display = 'block';
-  statusBox.textContent = '⏳ Переключаю целевой аккаунт Gemini...';
   chrome.runtime.sendMessage(
     {
       type: 'LQS_SELECT_GEMINI_ACCOUNT',
@@ -305,13 +504,7 @@ document.getElementById('gemini-account-select').addEventListener('change', () =
       openOrFocusTab: false
     },
     (resp) => {
-      if (resp && resp.status) {
-        applyRadarResponse(resp.status);
-        const tabInfo = resp.status.geminiTab;
-        statusBox.innerHTML = tabInfo && tabInfo.found
-          ? `✅ Выбран аккаунт: <b>${escapeHtml(tabInfo.email || ('/u/' + tabInfo.accountIndex))}</b>`
-          : `ℹ️ Выбран аккаунт <b>/u/${escapeHtml(choice.accountIndex)}</b>. Он автоматически откроется при анализе товара.`;
-      }
+      if (resp && resp.status) applyRadarResponse(resp.status);
     }
   );
 });
@@ -338,7 +531,6 @@ document.getElementById('auto-connect-gemini-btn').addEventListener('click', () 
   const choice = getSelectedAccountChoice();
   btn.textContent = '⏳ Прогреваю выбранный аккаунт Gemini...';
   statusBox.style.display = 'block';
-  statusBox.textContent = 'Проверяем выбранную вкладку gemini.google.com...';
 
   chrome.runtime.sendMessage(
     {
@@ -348,28 +540,12 @@ document.getElementById('auto-connect-gemini-btn').addEventListener('click', () 
     },
     (resp) => {
       btn.textContent = '⚡ Проверить / прогреть выбранный Gemini сейчас';
-
-      if (chrome.runtime.lastError || !resp) {
-        statusBox.innerHTML =
-          '⚠️ <b>Фоновый воркер ещё не перезапущен!</b> Открой <code>chrome://extensions</code>, нажми круговую стрелку <b>🔄 Обновить</b> на карточке Lavka Quality Shield и обнови страницу Лавки (F5).';
-        return;
-      }
-
-      if (resp.status) {
-        applyRadarResponse(resp.status);
-      } else {
-        refreshAiRadar();
-      }
-
+      if (!resp) return;
+      if (resp.status) applyRadarResponse(resp.status);
       if (resp.cookiesOk && resp.tabOpened) {
-        statusBox.innerHTML =
-          `✅ <b>Zero-Click Автопилот готов!</b> Подключён аккаунт <b>${escapeHtml(resp.email || ('/u/' + (resp.accountIndex ?? '0')))}</b> (${resp.wasAlreadyOpen ? 'вкладка уже открыта' : 'закреплена в фоне'}, куки: ${resp.cookiesCount} шт.).<br>` +
-          `👉 Просто открывай любые товары в Яндекс Лавке — ИИ-обзор запустится сам!`;
-      } else if (!resp.cookiesOk) {
-        statusBox.innerHTML =
-          '⚠️ Вкладка <code>gemini.google.com</code> открыта, но куки входа не найдены. Перейди на вкладку Gemini и один раз войди в аккаунт Google!';
+        statusBox.innerHTML = `✅ <b>Zero-Click Автопилот готов!</b> Подключён аккаунт <b>${escapeHtml(resp.email || ('/u/' + (resp.accountIndex ?? '0')))}</b>.`;
       } else {
-        statusBox.textContent = '⚠️ Не удалось открыть вкладку Gemini: ' + (resp.error || 'неизвестная ошибка');
+        statusBox.innerHTML = '⚠️ Войди в аккаунт на <code>gemini.google.com</code>!';
       }
     }
   );
@@ -377,57 +553,35 @@ document.getElementById('auto-connect-gemini-btn').addEventListener('click', () 
 
 document.getElementById('copy-gemini-cookies-btn').addEventListener('click', () => {
   const btn = document.getElementById('copy-gemini-cookies-btn');
-  const statusBox = document.getElementById('autopilot-status-box');
-  statusBox.style.display = 'block';
-
   chrome.runtime.sendMessage({ type: 'LQS_GET_GEMINI_COOKIE_HEADER' }, async (resp) => {
-    if (chrome.runtime.lastError || !resp || !resp.ok || !resp.headerString) {
-      statusBox.innerHTML =
-        '⚠️ Куки не найдены! Сначала открой <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">gemini.google.com</a>, войди в аккаунт и обнови расширение в chrome://extensions.';
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(resp.headerString);
-      btn.textContent = `✅ Скопировано (${resp.cookiesCount} куки)! Вставь в :8083/admin/`;
-      statusBox.innerHTML =
-        '✅ <b>Header String скопирован в буфер обмена!</b> Теперь открой <a href="http://localhost:8083/admin/" target="_blank" rel="noopener noreferrer">http://localhost:8083/admin/</a> -> <b>Accounts -> Quick Add Cookie</b> и нажми Ctrl+V.';
-      setTimeout(() => {
-        btn.textContent = '🍪 Скопировать куки Gemini (Header String) без F12';
-      }, 3000);
-    } catch {
-      statusBox.textContent = '⚠️ Не удалось скопировать куки в буфер обмена.';
-    }
-  });
-});
-
-document.getElementById('copy-docker-cmd-btn').addEventListener('click', async () => {
-  const btn = document.getElementById('copy-docker-cmd-btn');
-  try {
-    await navigator.clipboard.writeText(DOCKER_POWERSHELL_CMD);
-    btn.textContent = '✅ Команда скопирована! Вставь в PowerShell';
+    if (!resp || !resp.ok || !resp.headerString) return;
+    await navigator.clipboard.writeText(resp.headerString);
+    btn.textContent = `✅ Скопировано (${resp.cookiesCount} куки)!`;
     setTimeout(() => {
-      btn.textContent = '📋 Скопировать команду Docker для PowerShell';
+      btn.textContent = '🍪 Скопировать куки Gemini (Header String) без F12';
     }, 2500);
-  } catch {
-    btn.textContent = '⚠️ Ошибка копирования';
-  }
+  });
 });
 
 function switchTab(activeId) {
   const map = {
     'tab-reviews-btn': 'panel-reviews',
+    'tab-prices-btn': 'panel-prices',
     'tab-settings-btn': 'panel-settings'
   };
   Object.keys(map).forEach((btnId) => {
     document.getElementById(btnId).classList.toggle('active', btnId === activeId);
     document.getElementById(map[btnId]).style.display = btnId === activeId ? 'block' : 'none';
   });
-  if (activeId === 'tab-settings-btn') {
+  if (activeId === 'tab-prices-btn') {
+    loadPricesAndCartTab();
+  } else if (activeId === 'tab-settings-btn') {
     refreshAiRadar();
   }
 }
 
 document.getElementById('tab-reviews-btn').addEventListener('click', () => switchTab('tab-reviews-btn'));
+document.getElementById('tab-prices-btn').addEventListener('click', () => switchTab('tab-prices-btn'));
 document.getElementById('tab-settings-btn').addEventListener('click', () => switchTab('tab-settings-btn'));
 
 document.getElementById('search-input').addEventListener('input', (e) => {
@@ -458,19 +612,21 @@ document.getElementById('save-ai-btn').addEventListener('click', () => {
     aiModel: document.getElementById('inp-ai-model').value.trim() || DEFAULT_SETTINGS.aiModel,
     autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
     autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
-    autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked
+    autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked,
+    enableGuestPriceProbe: document.getElementById('chk-guest-probe').checked,
+    lavkaAccountLabel: document.getElementById('lavka-account-select').value
   };
   saveSettingsPatch(patch, () => {
     const st = document.getElementById('ai-save-status');
-    st.textContent = '✅ Настройки ИИ и Автопилота сохранены!';
+    st.textContent = '✅ Настройки сохранены!';
     refreshAiRadar();
     setTimeout(() => { st.textContent = ''; }, 2000);
   });
 });
 
-document.querySelectorAll('.filter-btn').forEach((btn) => {
+document.querySelectorAll('[data-filter]').forEach((btn) => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.filter-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('[data-filter]').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     currentFilter = btn.dataset.filter;
     loadReviews();
@@ -508,15 +664,11 @@ document.getElementById('import-file').addEventListener('change', (e) => {
 });
 
 // ==========================================================================
-// БОРТОВОЙ ЖУРНАЛ ДЛЯ ИИ (КОРРЕКТНЫЙ ПРОМИС-СБОРЩИК БЕЗ ОБРЕЗАННЫХ ЛОГОВ)
+// БОРТОВОЙ ЖУРНАЛ ДЛЯ ИИ
 // ==========================================================================
 function renderModulePills(modules) {
   const container = document.getElementById('diag-module-pills');
-  if (!container) return;
-  if (!modules) {
-    container.innerHTML = '';
-    return;
-  }
+  if (!container || !modules) return;
   const labels = {
     router: 'Роутер',
     parser: 'Парсер',
@@ -545,128 +697,68 @@ async function fetchBackendLogsTail() {
         if (r.ok) {
           const data = await r.json();
           if (data && Array.isArray(data.logs) && data.logs.length > 0) {
-            const formatted = [
-              ``,
-              `## 7. ЛОГ ЛОКАЛЬНОГО FASTAPI СЕРВЕРА (:8765 /api/logs)`,
-              ...data.logs.slice(0, 30).map((l) => `${l.ts} [${l.level}] ${l.msg}`)
-            ].join('\n');
-            resolve(formatted);
+            resolve(['', '## 7. ЛОГ FASTAPI (:8765)', ...data.logs.slice(0, 25).map((l) => `${l.ts} [${l.level}] ${l.msg}`)].join('\n'));
             return;
           }
         }
       } catch {
-        // Backend offline — ignore
+        // ignore
       }
       resolve('');
-    });
-  });
-}
-
-async function fetchAiStatusForDiag() {
-  return new Promise((resolve) => {
-    if (!chrome.runtime || !chrome.runtime.sendMessage) {
-      resolve('');
-      return;
-    }
-    chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
-      if (chrome.runtime.lastError || !resp || !resp.ok) {
-        resolve('\n## 8. СТАТУС АВТОПИЛОТА ИИ\n- Ошибка опроса фонового воркера (требуется обновление расширения в chrome://extensions).');
-        return;
-      }
-      const section = [
-        ``,
-        `## 8. СТАТУС ZERO-CLICK АВТОПИЛОТА ИИ И КУКИ (BACKGROUND WORKER)`,
-        `- **Вкладка Gemini (gemini.google.com)**: ${resp.geminiTab.found ? `✅ Открыта (tabId=${resp.geminiTab.tabId})` : '⚪ Не открыта'}`,
-        `- **Куки Google**: ${resp.cookies.ok ? `✅ Найдены (${resp.cookies.count} шт., __Secure-1PSID=${resp.cookies.hasSecure1PSID})` : '⚠️ Не найдены'}`,
-        `- **Кэш ИИ в браузере**: ${resp.localAiCacheCount ?? 0} товаров`,
-        `- **Локальный мост ИИ (:8083)**: ${resp.bridge.ok ? '✅ ' + resp.bridge.msg : '⚪ ' + resp.bridge.msg}`,
-        `- **FastAPI сервер (:8765)**: ${resp.backend.ok ? '✅ ' + resp.backend.msg : '⚪ ' + resp.backend.msg}`
-      ].join('\n');
-      resolve(section);
     });
   });
 }
 
 async function refreshDiagnosticsView() {
   const box = document.getElementById('diag-report-box');
-  box.textContent = 'Собираю бортовой журнал со страницы Лавки и локального сервера...';
-
-  const [backendTail, aiStatusSection] = await Promise.all([
-    fetchBackendLogsTail(),
-    fetchAiStatusForDiag()
-  ]);
-
-  const extraTail = (backendTail || '') + (aiStatusSection || '');
+  box.textContent = 'Собираю бортовой журнал...';
+  const backendTail = await fetchBackendLogsTail();
 
   return new Promise((resolve) => {
-    if (chrome.tabs && chrome.tabs.query) {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs && tabs[0];
-        if (activeTab && activeTab.id && activeTab.url && activeTab.url.includes('lavka.yandex.ru')) {
-          chrome.tabs.sendMessage(
-            activeTab.id,
-            { type: 'LQS_GET_DIAGNOSTICS', backendDiag: lastBackendPingSummary },
-            (resp) => {
-              if (!chrome.runtime.lastError && resp && resp.reportText) {
-                renderModulePills(resp.modules);
-                box.textContent = resp.reportText + extraTail;
-                resolve(box.textContent);
-                return;
-              }
-              loadFallbackDiagFromStorage(box, extraTail).then(resolve);
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const activeTab = tabs && tabs[0];
+      if (activeTab && activeTab.id && activeTab.url && activeTab.url.includes('lavka.yandex.ru')) {
+        chrome.tabs.sendMessage(
+          activeTab.id,
+          { type: 'LQS_GET_DIAGNOSTICS', backendDiag: lastBackendPingSummary },
+          (resp) => {
+            if (!chrome.runtime.lastError && resp && resp.reportText) {
+              renderModulePills(resp.modules);
+              box.textContent = resp.reportText + backendTail;
+              resolve(box.textContent);
+              return;
             }
-          );
-        } else {
-          loadFallbackDiagFromStorage(box, extraTail).then(resolve);
-        }
-      });
-    } else {
-      loadFallbackDiagFromStorage(box, extraTail).then(resolve);
-    }
-  });
-}
-
-function loadFallbackDiagFromStorage(box, extraTail = '') {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
-      const snap = res && res[FLIGHT_LOG_KEY];
-      if (snap && snap.reportText) {
-        renderModulePills(snap.modules);
-        box.textContent = snap.reportText + extraTail;
+            chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
+              const snap = res && res[FLIGHT_LOG_KEY];
+              box.textContent = (snap && snap.reportText ? snap.reportText : 'Нажми F5 на вкладке Лавки') + backendTail;
+              resolve(box.textContent);
+            });
+          }
+        );
       } else {
-        box.textContent =
-          '# 🛠️ LAVKA QUALITY SHIELD v2.3.0 — AI DIAGNOSTIC LOG\n' +
-          '⚠️ Активная вкладка Яндекс Лавки ещё не перезагружена после обновления расширения.\n' +
-          'Нажми F5 на странице https://lavka.yandex.ru/, чтобы бортовой самописец записал телеметрию DOM.\n' +
-          extraTail;
+        chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
+          const snap = res && res[FLIGHT_LOG_KEY];
+          box.textContent = (snap && snap.reportText ? snap.reportText : 'Открой вкладку Лавки') + backendTail;
+          resolve(box.textContent);
+        });
       }
-      resolve(box.textContent);
     });
   });
 }
 
 document.getElementById('debug-spoiler').addEventListener('toggle', (e) => {
-  if (e.target.open) {
-    refreshDiagnosticsView();
-  }
+  if (e.target.open) refreshDiagnosticsView();
 });
 
-document.getElementById('diag-ping-btn').addEventListener('click', async () => {
+document.getElementById('diag-ping-btn').addEventListener('click', () => {
   const statusEl = document.getElementById('diag-ping-status');
   statusEl.style.display = 'block';
-  statusEl.textContent = '⏳ Проверяю связь со всеми источниками ИИ...';
-
   chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, async (resp) => {
-    if (chrome.runtime.lastError || !resp || !resp.ok) {
-      statusEl.textContent = '⚠️ Ошибка проверки статуса. Нажми Обновить в chrome://extensions.';
-      return;
-    }
+    if (!resp || !resp.ok) return;
     const lines = [
-      `${resp.geminiTab.found ? '✅' : '⚪'} Вкладка Gemini: ${resp.geminiTab.found ? 'Открыта' : 'Не открыта'}`,
-      `${resp.cookies.ok ? '✅' : '⚠️'} Куки Google: ${resp.cookies.ok ? `Найдены (${resp.cookies.count} шт.)` : 'Не найдены'}`,
-      `💾 Кэш ИИ в браузере: ${resp.localAiCacheCount ?? 0} тов.`,
-      `${resp.bridge.ok ? '✅' : '⚪'} Мост ИИ (:8083): ${resp.bridge.msg}`,
-      `${resp.backend.ok ? '✅' : '⚪'} FastAPI парсер (:8765): ${resp.backend.msg}`
+      `Вкладка Gemini: ${resp.geminiTab.found ? 'Открыта' : 'Нет'}`,
+      `Кэш ИИ: ${resp.localAiCacheCount ?? 0} | База цен: ${resp.trackedPricesCount ?? 0}`,
+      `Сервер :8765: ${resp.backend.msg}`
     ];
     lastBackendPingSummary = lines.join(' | ');
     statusEl.innerHTML = lines.map(escapeHtml).join('<br>');
@@ -678,12 +770,8 @@ document.getElementById('diag-ping-btn').addEventListener('click', async () => {
 document.getElementById('diag-copy-btn').addEventListener('click', async () => {
   const btn = document.getElementById('diag-copy-btn');
   const text = await refreshDiagnosticsView();
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = '✅ Лог для ИИ скопирован в буфер!';
-  } catch {
-    btn.textContent = '⚠️ Не удалось скопировать';
-  }
+  await navigator.clipboard.writeText(text);
+  btn.textContent = '✅ Скопировано!';
   setTimeout(() => { btn.textContent = '📋 Скопировать полный лог для ИИ (Markdown)'; }, 1800);
 });
 
@@ -693,25 +781,12 @@ document.getElementById('diag-download-btn').addEventListener('click', async () 
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `lavka-quality-shield-ai-debug-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.log`;
+  a.download = `lavka-quality-shield-v2.4.0-debug.log`;
   a.click();
 });
 
 document.getElementById('diag-clear-btn').addEventListener('click', () => {
-  if (chrome.tabs && chrome.tabs.query) {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const activeTab = tabs && tabs[0];
-      if (activeTab && activeTab.id && activeTab.url && activeTab.url.includes('lavka.yandex.ru')) {
-        chrome.tabs.sendMessage(activeTab.id, { type: 'LQS_CLEAR_DIAGNOSTICS' }, () => {
-          refreshDiagnosticsView();
-        });
-      } else {
-        chrome.storage.local.remove([FLIGHT_LOG_KEY], () => {
-          refreshDiagnosticsView();
-        });
-      }
-    });
-  }
+  chrome.storage.local.remove([FLIGHT_LOG_KEY], refreshDiagnosticsView);
 });
 
 loadReviews();

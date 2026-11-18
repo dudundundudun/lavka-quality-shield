@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Lavka Quality Shield v2.3.0 - Windows Silent Autostart Installer
+title Lavka Quality Shield v2.4.0 - Windows Silent Autostart Installer
 cd /d "%~dp0"
 
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
@@ -8,7 +8,7 @@ set "VBS_PATH=%STARTUP_DIR%\LavkaQualityShield_Autostart.vbs"
 set "APP_DIR=%~dp0"
 
 echo ============================================================
-echo   Lavka Quality Shield v2.3.0 - ZERO-CLICK WINDOWS AUTOSTART
+echo   Lavka Quality Shield v2.4.0 - ZERO-CLICK WINDOWS AUTOSTART
 echo ============================================================
 echo [1/3] Проверка библиотек Python (fastapi, uvicorn, httpx, bs4)...
 python -B -m pip install --quiet fastapi uvicorn httpx beautifulsoup4 pydantic
