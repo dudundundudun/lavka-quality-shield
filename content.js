@@ -1,21 +1,23 @@
 /**
- * Lavka Quality Shield v2.0.5 — Content Script (Hardened Audit Release)
- * Ключевые улучшения по итогам глубокого код-ревью v2.0.5:
- * 1. Исправлен ложный триггер pointerdown-watchdog при долгом зажатии кнопки (>420 мс) или правом клике:
- *    теперь сторожевой таймер запускается строго после pointerup (только для ЛКМ e.button === 0) + добавлен анти-дребезг (60 мс).
- * 2. Запросы к локальным серверам (:8765, :8083, :11434) проксируются через MV3 Service Worker (background.js):
- *    это полностью исключает блокировку Chrome Private Network Access (PNA) и CORS на https://lavka.yandex.ru.
- * 3. Встроенный виджет быстрого ввода API Key прямо внутри блока ИИ на странице Лавки:
- *    если мост :8083 вернул 401/403, ключ можно вставить и сохранить прямо в карточке товара в 1 клик.
- * 4. Мгновенный in-memory кэш базы отзывов и настроек (0 мс на чтение при скролле каталога вместо постоянных IPC-вызовов chrome.storage).
- * 5. Отслеживание SPA-переходов Яндекс Лавки (pushState/replaceState) через проверку смены URL.
- * 6. Полная защита от XSS (escapeHtml + sanitizeHttpUrl) при рендере внешних ссылок и заметок.
+ * Lavka Quality Shield v2.0.3 — Content Script (Zero-Thrash & Built-in Diagnostics)
+ * Что исправлено в v2.0.3:
+ * 1. Устранён бесконечный цикл MutationObserver (каждые 140 мс):
+ *    - Мутации внутри собственных элементов расширения (.lqs-*) полностью игнорируются наблюдателем.
+ *    - Кнопка «▾ Подробнее» больше НЕ перезаписывает свой innerHTML при фоновых синхронизациях,
+ *      благодаря чему дочерний <span> не уничтожается между mousedown и mouseup (клики срабатывают с 1-го раза 100% времени).
+ *    - Все дочерние элементы внутри кнопок получили pointer-events: none !important.
+ *    - Метрики, флаги и бейджи каталога обновляются только при реальном изменении данных (проверка хеша состояния).
+ * 2. Сохранение состояния открытого спойлера (drawerOpenBySlug) даже при полном пересоздании DOM-контейнера React-ом Лавки.
+ * 3. Встроенная система диагностики и телеметрии (LQS Diagnostics):
+ *    - Отслеживает мутации DOM, сэкономленные перезаписи, задержку кликов (pointerdown -> click), осиротевшие клики,
+ *      найденные селекторы Лавки и статус связи с FastAPI (:8765) и Gemini Argon (:8083).
+ *    - Открывается кнопкой «🩺 Диаг.» внутри спойлера, хоткеем Alt+Shift+D или из popup-окна расширения.
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.0.5';
+  const VERSION = '2.0.4';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const DIAG_STORAGE_KEY = 'lqs_diag_snapshot_v1';
@@ -38,115 +40,12 @@
     '💀 Не брать'
   ];
 
-  // Память открытых спойлеров по slug товара
+  // Память открытых спойлеров по slug товара, чтобы React-ререндер Лавки не захлопывал меню
   const drawerOpenBySlug = new Map();
-
-  // In-memory кэш для мгновенного доступа без лишних обращений к chrome.storage при скролле
-  let reviewsDbMemCache = null;
-  let settingsMemCache = null;
 
   let isRenderingProduct = false;
   let pendingProductRender = false;
   let currentReviewCache = null;
-  let lastKnownHref = window.location.href;
-  let lastDrawerToggleTs = 0;
-
-  // ==========================================================================
-  // БЕЗОПАСНОСТЬ И САНИТАЙЗИНГ (ANTI-XSS)
-  // ==========================================================================
-  function escapeHtml(raw) {
-    if (raw === null || raw === undefined) return '';
-    return String(raw)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
-  function sanitizeHttpUrl(rawUrl) {
-    if (!rawUrl) return '#';
-    try {
-      const u = new URL(String(rawUrl), window.location.origin);
-      if (u.protocol === 'http:' || u.protocol === 'https:') {
-        return u.href;
-      }
-    } catch {
-      // ignore
-    }
-    return '#';
-  }
-
-  // ==========================================================================
-  // ПРОКСИ-ЗАПРОСЫ ЧЕРЕЗ BACKGROUND SERVICE WORKER (ОБХОД PNA / CORS)
-  // ==========================================================================
-  async function extensionFetch(url, options = {}, timeoutMs = 25000) {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      try {
-        const bgResp = await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage(
-            {
-              type: 'LQS_PROXY_FETCH',
-              url,
-              method: options.method || 'GET',
-              headers: options.headers || {},
-              body: options.body,
-              timeoutMs
-            },
-            (res) => {
-              if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-              } else {
-                resolve(res);
-              }
-            }
-          );
-        });
-        if (bgResp) {
-          return bgResp;
-        }
-      } catch {
-        // Если сервис-воркер перезапускается, используем прямой fetch как фоллбэк
-      }
-    }
-
-    const t0 = performance.now();
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const resp = await fetch(url, { ...options, signal: ctrl.signal });
-      const dt = Math.round(performance.now() - t0);
-      const text = await resp.text();
-      let json = null;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        // ignore
-      }
-      return { ok: resp.ok, status: resp.status, latencyMs: dt, json, text };
-    } catch (err) {
-      const dt = Math.round(performance.now() - t0);
-      return { ok: false, status: 0, latencyMs: dt, error: err && err.message ? err.message : String(err) };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async function triggerBackgroundAutoDiscover(customApiKey = undefined) {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      try {
-        return await new Promise((resolve) => {
-          chrome.runtime.sendMessage(
-            { type: 'LQS_AUTO_DISCOVER_AI', apiKey: customApiKey },
-            (res) => resolve(res || { ok: false })
-          );
-        });
-      } catch {
-        return { ok: false };
-      }
-    }
-    return { ok: false };
-  }
 
   // ==========================================================================
   // ВСТРОЕННАЯ СИСТЕМА ДИАГНОСТИКИ И ТЕЛЕМЕТРИИ (LQS_DIAG)
@@ -158,7 +57,6 @@
       extMutations: 0,
       selfMutationsIgnored: 0,
       scheduleCalls: 0,
-      spaNavigations: 0,
       panelMounts: 0,
       panelSyncs: 0,
       domWritesExecuted: 0,
@@ -252,7 +150,7 @@
         `=== LAVKA QUALITY SHIELD v${this.version} DIAGNOSTIC REPORT ===`,
         `Time: ${new Date().toISOString()}`,
         `URL: ${audit.url}`,
-        `Slug: ${audit.slug || 'N/A (каталог)'} | Карточек в каталоге: ${audit.catalogCardsCount} | SPA Navs: ${c.spaNavigations}`,
+        `Slug: ${audit.slug || 'N/A (каталог)'} | Карточек в каталоге: ${audit.catalogCardsCount}`,
         ``,
         `[DOM SELECTORS AUDIT]`,
         `mainPage: ${flag(s.mainPage)} | infoBlock: ${flag(s.infoBlock)} | barContainer: ${flag(s.barContainer)}`,
@@ -288,7 +186,7 @@
       const metricsEl = box.querySelector('#lqs-diag-metrics');
       if (metricsEl) {
         const badge = (ok, label) =>
-          `<span class="lqs-diag-pill ${ok ? 'ok' : 'warn'}">${ok ? '✅' : '⚠️'} ${escapeHtml(label)}</span>`;
+          `<span class="lqs-diag-pill ${ok ? 'ok' : 'warn'}">${ok ? '✅' : '⚠️'} ${label}</span>`;
 
         metricsEl.innerHTML = `
           <div class="lqs-diag-pills-row">
@@ -337,70 +235,37 @@
     }
   };
 
-  // ==========================================================================
-  // ТОЧНЫЙ WATCHDOG КЛИКОВ (БЕЗ ЛОЖНЫХ СРАБАТЫВАНИЙ НА ДОЛГОМ ЗАЖАТИИ И ПКМ)
-  // ==========================================================================
-  let activePointerDown = null;
-  let postPointerUpTimer = null;
-
+  // Перехватчик «осиротевших» кликов (если pointerdown на кнопке LQS был, а click за 400 мс не произошёл)
+  let pendingPointerDown = null;
   document.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return; // Игнорируем правую и среднюю кнопки мыши
     const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
     if (!btn) return;
-    if (postPointerUpTimer) {
-      clearTimeout(postPointerUpTimer);
-      postPointerUpTimer = null;
+    const role = btn.id || btn.className;
+    const t0 = performance.now();
+    if (pendingPointerDown && pendingPointerDown.timer) {
+      clearTimeout(pendingPointerDown.timer);
     }
-    activePointerDown = {
-      btn,
-      role: btn.id || btn.className,
-      t0: performance.now()
-    };
-  }, true);
-
-  document.addEventListener('pointercancel', () => {
-    activePointerDown = null;
-    if (postPointerUpTimer) {
-      clearTimeout(postPointerUpTimer);
-      postPointerUpTimer = null;
-    }
-  }, true);
-
-  document.addEventListener('pointerup', (e) => {
-    if (e.button !== 0 || !activePointerDown) return;
-    const upBtn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
-    const tracked = activePointerDown;
-    if (upBtn !== tracked.btn) {
-      // Пользователь увёл курсор с кнопки до отпускания — это отмена клика, а не баг
-      activePointerDown = null;
-      return;
-    }
-    // Если pointerup произошёл на той же кнопке, нативный click обязан прийти в течение ~30 мс.
-    // Если через 90 мс click так и не пришёл — страница поглотила событие, восстанавливаем программно!
-    postPointerUpTimer = setTimeout(() => {
-      postPointerUpTimer = null;
-      if (!activePointerDown) return;
-      activePointerDown = null;
+    const timer = setTimeout(() => {
       LQS_DIAG.counters.missedClicks += 1;
-      LQS_DIAG.log('WARN', `Click swallowed after pointerup on [${tracked.role}] — executing auto-recovery.`);
-      if (tracked.btn && tracked.btn.id === 'lqs-drawer-toggle') {
-        toggleDrawerState(tracked.btn.closest('.lqs-product-panel'), 'auto-recovery');
+      LQS_DIAG.log('WARN', `Потерян click после pointerdown на [${role}]! Выполняю авто-восстановление.`);
+      // Если по какой-то внешней причине Лавка перебила нативный click на кнопке спойлера — дожимаем программно:
+      if (btn.id === 'lqs-drawer-toggle') {
+        toggleDrawerState(btn.closest('.lqs-product-panel'), 'auto-recovery');
       }
-    }, 90);
+      pendingPointerDown = null;
+    }, 420);
+    pendingPointerDown = { role, t0, timer };
   }, true);
 
   document.addEventListener('click', (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
     if (!btn) return;
     LQS_DIAG.counters.clicksTotal += 1;
-    if (postPointerUpTimer) {
-      clearTimeout(postPointerUpTimer);
-      postPointerUpTimer = null;
-    }
-    if (activePointerDown) {
-      const dt = Math.round(performance.now() - activePointerDown.t0);
+    if (pendingPointerDown) {
+      clearTimeout(pendingPointerDown.timer);
+      const dt = Math.round(performance.now() - pendingPointerDown.t0);
       LQS_DIAG.lastClickLatencyMs = dt;
-      activePointerDown = null;
+      pendingPointerDown = null;
     }
   }, true);
 
@@ -440,7 +305,7 @@
   }
 
   // ==========================================================================
-  // УТИЛИТЫ И IN-MEMORY КЭШ БАЗЫ ОТЗЫВОВ / НАСТРОЕК
+  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ
   // ==========================================================================
   function setHtmlIfChanged(el, nextHtml, tagKey = '') {
     if (!el) return false;
@@ -488,46 +353,39 @@
 
   function formatAiTextToHtml(rawText) {
     if (!rawText) return '';
-    const escaped = escapeHtml(rawText);
+    const escaped = String(rawText)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
     return escaped
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\n/g, '<br>');
   }
 
   async function getReviewsDB() {
-    if (reviewsDbMemCache !== null) {
-      return reviewsDbMemCache;
-    }
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
         chrome.storage.local.get([STORAGE_KEY], (res) => {
-          reviewsDbMemCache = (res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : {};
-          resolve(reviewsDbMemCache);
+          resolve((res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : {});
         });
       } else {
         try {
-          reviewsDbMemCache = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+          resolve(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'));
         } catch {
-          reviewsDbMemCache = {};
+          resolve({});
         }
-        resolve(reviewsDbMemCache);
       }
     });
   }
 
   async function getSettings() {
-    if (settingsMemCache !== null) {
-      return settingsMemCache;
-    }
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
         chrome.storage.local.get([SETTINGS_KEY], (res) => {
-          settingsMemCache = { ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) };
-          resolve(settingsMemCache);
+          resolve({ ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) });
         });
       } else {
-        settingsMemCache = { ...DEFAULT_SETTINGS };
-        resolve(settingsMemCache);
+        resolve(DEFAULT_SETTINGS);
       }
     });
   }
@@ -563,7 +421,6 @@
       slug: canonicalKey,
       updatedAt: new Date().toISOString()
     };
-    reviewsDbMemCache = db;
 
     LQS_DIAG.log('STORAGE_SAVE', `Saved review for ${canonicalKey}`, {
       rating: data.rating,
@@ -646,23 +503,10 @@
     let unitLabel = 'кг';
 
     if (meta.amountText) {
-      // Поддержка как обычного веса ("400 г", "0,5 кг"), так и мультипаков ("2 × 150 г")
-      const multiMatch = meta.amountText.match(/(\d+)\s*[xх×*]\s*([\d.,]+)\s*(г|кг|мл|л)/i);
-      const singleMatch = meta.amountText.match(/([\d.,]+)\s*(г|кг|мл|л)/i);
-      if (multiMatch) {
-        const count = parseInt(multiMatch[1], 10) || 1;
-        const val = parseFloat(multiMatch[2].replace(',', '.')) * count;
-        const unit = multiMatch[3].toLowerCase();
-        unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
-        if (val > 0) {
-          weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
-          if (meta.price) {
-            pricePerKg = Math.round((meta.price / weightGrams) * 1000);
-          }
-        }
-      } else if (singleMatch) {
-        const val = parseFloat(singleMatch[1].replace(',', '.'));
-        const unit = singleMatch[2].toLowerCase();
+      const m = meta.amountText.match(/([\d.,]+)\s*(г|кг|мл|л)/i);
+      if (m) {
+        const val = parseFloat(m[1].replace(',', '.'));
+        const unit = m[2].toLowerCase();
         unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
         if (val > 0) {
           weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
@@ -721,6 +565,11 @@
     return { pricePerKg, unitLabel, pricePer100gProtein, flags: flags.slice(0, 5) };
   }
 
+  /**
+   * Безопасное обновление кнопки «▾ Подробнее» БЕЗ пересоздания innerHTML!
+   * Дочерние узлы #lqs-drawer-dot и #lqs-drawer-label остаются в DOM всегда,
+   * поэтому клик мышью никогда не срывается между mousedown и mouseup.
+   */
   function updateDrawerToggleButton(panel, isOpen, review, smart) {
     if (!panel) return;
     const dotEl = panel.querySelector('#lqs-drawer-dot');
@@ -763,13 +612,6 @@
 
   function toggleDrawerState(panel, source = 'click') {
     if (!panel) return false;
-    const now = performance.now();
-    // Защита от двойного срабатывания в пределах одного кадра (60 мс)
-    if (now - lastDrawerToggleTs < 60) {
-      return panel.querySelector('#lqs-drawer')?.classList.contains('open') || false;
-    }
-    lastDrawerToggleTs = now;
-
     const drawer = panel.querySelector('#lqs-drawer');
     if (!drawer) return false;
 
@@ -802,12 +644,7 @@
   async function runConnectionHealthCheck(panel) {
     const statusEl = panel ? panel.querySelector('#lqs-diag-conn-status') : null;
     if (statusEl) {
-      statusEl.textContent = '⏳ Авто-поиск и проверка связи с FastAPI (:8765) и ИИ-мостом (:8083)...';
-    }
-
-    const disc = await triggerBackgroundAutoDiscover();
-    if (disc && disc.ok && disc.settings) {
-      settingsMemCache = disc.settings;
+      statusEl.textContent = '⏳ Проверяю связь с FastAPI (:8765) и ИИ-мостом (:8083)...';
     }
     const settings = await getSettings();
     const backendUrl = settings.backendUrl.replace(/\/$/, '');
@@ -815,28 +652,35 @@
 
     const results = [];
 
-    // 1. Проверка локального FastAPI через сервис-воркер
-    const r1 = await extensionFetch(`${backendUrl}/api/health`, { method: 'GET' }, 3000);
-    if (r1.ok) {
-      const cachedCount = r1.json ? (r1.json.cachedItems ?? '?') : '?';
-      results.push(`✅ FastAPI (${backendUrl}): ОК (${r1.latencyMs} мс, кэш: ${cachedCount} шт.)`);
-    } else if (r1.status > 0) {
-      results.push(`⚠️ FastAPI (${backendUrl}): HTTP ${r1.status} (${r1.latencyMs} мс)`);
-    } else {
-      results.push(`❌ FastAPI (${backendUrl}): выключен (запусти start_server.bat)`);
+    // 1. Проверка локального FastAPI
+    const t0 = performance.now();
+    try {
+      const r = await fetch(`${backendUrl}/api/health`, { method: 'GET' });
+      const dt = Math.round(performance.now() - t0);
+      if (r.ok) {
+        const j = await r.json().catch(() => ({}));
+        results.push(`✅ FastAPI (${backendUrl}): ОК (${dt} мс, кэш: ${j.cachedItems ?? '?'} шт.)`);
+      } else {
+        results.push(`⚠️ FastAPI (${backendUrl}): HTTP ${r.status} (${dt} мс)`);
+      }
+    } catch (err) {
+      results.push(`❌ FastAPI (${backendUrl}): недоступен (${err.message || 'запусти start_server.bat'})`);
     }
 
-    // 2. Проверка ИИ-моста (:8083/v1/models) через сервис-воркер
-    const headers = settings.aiApiKey ? { Authorization: `Bearer ${settings.aiApiKey}` } : {};
-    const r2 = await extensionFetch(`${aiBaseUrl}/models`, { method: 'GET', headers }, 3000);
-    if (r2.ok) {
-      results.push(`✅ ИИ-мост (${aiBaseUrl}): ОК (${r2.latencyMs} мс, модель: ${settings.aiModel})`);
-    } else if (r2.status === 401 || r2.status === 403) {
-      results.push(`🔑 ИИ-мост (${aiBaseUrl}): найден (${r2.latencyMs} мс), но нужен API Key из :8083/admin/`);
-    } else if (r2.status > 0) {
-      results.push(`⚠️ ИИ-мост (${aiBaseUrl}): HTTP ${r2.status} (${r2.latencyMs} мс)`);
-    } else {
-      results.push(`❌ ИИ-мост (${aiBaseUrl}): недоступен (${r2.error || 'проверь контейнер'})`);
+    // 2. Проверка ИИ-моста (:8083/v1/models)
+    const t1 = performance.now();
+    try {
+      const headers = {};
+      if (settings.aiApiKey) headers.Authorization = `Bearer ${settings.aiApiKey}`;
+      const r2 = await fetch(`${aiBaseUrl}/models`, { method: 'GET', headers });
+      const dt2 = Math.round(performance.now() - t1);
+      if (r2.ok) {
+        results.push(`✅ ИИ-мост (${aiBaseUrl}): ОК (${dt2} мс, модель: ${settings.aiModel})`);
+      } else {
+        results.push(`⚠️ ИИ-мост (${aiBaseUrl}): HTTP ${r2.status} (${dt2} мс)`);
+      }
+    } catch (err) {
+      results.push(`❌ ИИ-мост (${aiBaseUrl}): недоступен (${err.message || 'проверь контейнер'})`);
     }
 
     const summary = results.join(' | ');
@@ -886,7 +730,7 @@
 
     const flagsBox = panel.querySelector('#lqs-drawer-flags');
     if (flagsBox && smart) {
-      const nextFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
+      const nextFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('');
       setHtmlIfChanged(flagsBox, nextFlagsHtml, 'drawer-flags');
     }
 
@@ -920,65 +764,6 @@
     }
   }
 
-  function renderSourcesLinks(sourcesEl, sources) {
-    if (!sourcesEl) return;
-    if (!Array.isArray(sources) || sources.length === 0) {
-      sourcesEl.innerHTML = '';
-      return;
-    }
-    sourcesEl.innerHTML = sources
-      .map((s) => {
-        const safeUrl = escapeHtml(sanitizeHttpUrl(s.url));
-        const safeTitle = escapeHtml(s.title || 'Источник');
-        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">🔗 ${safeTitle}</a>`;
-      })
-      .join('');
-  }
-
-  /**
-   * Встроенная форма быстрого ввода API Key прямо внутри карточки товара на Лавке,
-   * чтобы не нужно было даже лезть в иконку расширения!
-   */
-  function renderInlineKeySetupUI(panel, meta, settings, statusNote) {
-    const aiContent = panel.querySelector('#lqs-ai-content');
-    if (!aiContent) return;
-
-    aiContent.innerHTML = `
-      <div style="display:flex;flex-direction:column;gap:7px;">
-        <div>${statusNote}</div>
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <input type="password" id="lqs-inline-api-key" placeholder="Вставь API Key из :8083/admin/..." value="${escapeHtml(settings.aiApiKey || '')}"
-            style="flex:1 1 180px;height:30px;padding:0 9px;border:1px solid #d6d3cd;border-radius:8px;font-size:12px;background:#fff;color:#21201f;">
-          <button type="button" id="lqs-inline-key-save"
-            style="height:30px;padding:0 11px;background:#fce000;border:1px solid #e5cb00;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;color:#21201f;">
-            💾 Сохранить и запустить ИИ
-          </button>
-          <a href="http://localhost:8083/admin/" target="_blank" rel="noopener noreferrer"
-            style="height:30px;padding:0 9px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:11.5px;font-weight:600;color:#1d4ed8;text-decoration:none;display:inline-flex;align-items:center;">
-            🔑 Открыть :8083/admin/
-          </a>
-        </div>
-      </div>
-    `;
-
-    const saveBtn = aiContent.querySelector('#lqs-inline-key-save');
-    const keyInp = aiContent.querySelector('#lqs-inline-api-key');
-    if (saveBtn && keyInp) {
-      saveBtn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const newKey = keyInp.value.trim();
-        const nextCfg = { ...settings, aiApiKey: newKey };
-        settingsMemCache = nextCfg;
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          await new Promise((r) => chrome.storage.local.set({ [SETTINGS_KEY]: nextCfg }, r));
-        }
-        await triggerBackgroundAutoDiscover(newKey);
-        requestAiProductReview(meta, panel, true);
-      });
-    }
-  }
-
   async function requestAiProductReview(meta, panel, forceRefresh = false) {
     const drawer = panel.querySelector('#lqs-drawer');
     const aiBox = panel.querySelector('#lqs-ai-box');
@@ -996,15 +781,13 @@
     aiContent.innerHTML = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора...';
     aiSources.innerHTML = '';
 
-    let settings = await getSettings();
+    const settings = await getSettings();
+    const t0 = performance.now();
     LQS_DIAG.log('AI_REQ_START', `Requesting AI review for "${meta.title}" (force=${forceRefresh})`);
 
-    let scrapedSources = [];
-
-    // 1. Локальный FastAPI сервер (:8765) через Service Worker Proxy
-    const backendResp = await extensionFetch(
-      `${settings.backendUrl.replace(/\/$/, '')}/api/analyze-product`,
-      {
+    // 1. Локальный FastAPI сервер (парсинг Отзовик/IRecommend/Роскачество + кэш SQLite)
+    try {
+      const resp = await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/analyze-product`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1020,54 +803,49 @@
           aiModel: settings.aiModel,
           forceRefresh: Boolean(forceRefresh)
         })
-      },
-      28000
-    );
+      });
 
-    if (backendResp.ok && backendResp.json && backendResp.json.ok !== false) {
-      const data = backendResp.json;
-      LQS_DIAG.lastAiCall = {
-        time: new Date().toLocaleTimeString(),
-        mode: data.cached ? 'FastAPI (SQLite Cache)' : 'FastAPI (:8765)',
-        status: 'OK',
-        latencyMs: backendResp.latencyMs,
-        error: null
-      };
-      LQS_DIAG.log('AI_REQ_OK', `FastAPI response in ${backendResp.latencyMs}ms (cached=${Boolean(data.cached)})`);
+      if (resp.ok) {
+        const data = await resp.json();
+        const dt = Math.round(performance.now() - t0);
+        LQS_DIAG.lastAiCall = {
+          time: new Date().toLocaleTimeString(),
+          mode: data.cached ? 'FastAPI (SQLite Cache)' : 'FastAPI (:8765)',
+          status: 'OK',
+          latencyMs: dt,
+          error: null
+        };
+        LQS_DIAG.log('AI_REQ_OK', `FastAPI response in ${dt}ms (cached=${Boolean(data.cached)})`);
 
-      aiContent.innerHTML = formatAiTextToHtml(data.verdict || 'Вердикт получен.');
-      renderSourcesLinks(aiSources, data.sources);
-      return;
+        aiContent.innerHTML = formatAiTextToHtml(data.verdict || 'Вердикт получен.');
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          aiSources.innerHTML = data.sources
+            .map((s) => `<a href="${s.url}" target="_blank" rel="noopener noreferrer">🔗 ${s.title || 'Источник'}</a>`)
+            .join('');
+        }
+        return;
+      } else {
+        LQS_DIAG.log('AI_FASTAPI_HTTP_ERR', `FastAPI HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      LQS_DIAG.log('AI_FASTAPI_SKIP', `FastAPI unreachable, trying direct bridge (:8083)`, err.message || String(err));
     }
 
-    if (backendResp.json && Array.isArray(backendResp.json.sources)) {
-      scrapedSources = backendResp.json.sources;
-      renderSourcesLinks(aiSources, scrapedSources);
-    }
+    // 2. Прямой фоллбэк к локальному мосту Gemini 4 Argon (localhost:8083/v1)
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (settings.aiApiKey) {
+        headers.Authorization = `Bearer ${settings.aiApiKey}`;
+      }
+      const prompt = [
+        `Сделай ультра-короткий (максимум 3 строчки) разбор продукта из Яндекс Лавки в стиле честного продуктового ревизора:`,
+        `Товар: ${meta.title} (${meta.amountText || 'вес не указан'}, цена: ${meta.price || '?'} ₽)`,
+        `Состав: ${meta.ingredientsText || 'не указан'}`,
+        `КБЖУ: ${meta.traitsText || 'не указано'}`,
+        `Формат: 1) Что по составу/белку и реальной цене, 2) Главный подвох или плюс, 3) Вердикт (Брать или Скипать).`
+      ].join('\n');
 
-    // Если FastAPI недоступен или вернул ошибку ИИ, запускаем быстрое фоновое авто-обнаружение ИИ-портов
-    const disc = await triggerBackgroundAutoDiscover();
-    if (disc && disc.ok && disc.settings) {
-      settings = disc.settings;
-      settingsMemCache = disc.settings;
-    }
-
-    // 2. Прямой вызов ИИ-моста (Gemini 4 Argon :8083 / Ollama :11434) через Service Worker Proxy
-    const headers = { 'Content-Type': 'application/json' };
-    if (settings.aiApiKey) {
-      headers.Authorization = `Bearer ${settings.aiApiKey}`;
-    }
-    const prompt = [
-      `Сделай ультра-короткий (максимум 3 строчки) разбор продукта из Яндекс Лавки в стиле честного продуктового ревизора:`,
-      `Товар: ${meta.title} (${meta.amountText || 'вес не указан'}, цена: ${meta.price || '?'} ₽)`,
-      `Состав: ${meta.ingredientsText || 'не указан'}`,
-      `КБЖУ: ${meta.traitsText || 'не указано'}`,
-      `Формат: 1) Что по составу/белку и реальной цене, 2) Главный подвох или плюс, 3) Вердикт (Брать или Скипать).`
-    ].join('\n');
-
-    const directResp = await extensionFetch(
-      `${settings.aiBaseUrl.replace(/\/$/, '')}/chat/completions`,
-      {
+      const directResp = await fetch(`${settings.aiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -1075,53 +853,46 @@
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.3
         })
-      },
-      28000
-    );
+      });
 
-    if (directResp.ok && directResp.json) {
-      const reply = directResp.json.choices?.[0]?.message?.content || 'Нет ответа от модели.';
+      if (directResp.ok) {
+        const json = await directResp.json();
+        const dt = Math.round(performance.now() - t0);
+        const reply = json.choices?.[0]?.message?.content || 'Нет ответа от модели.';
+        LQS_DIAG.lastAiCall = {
+          time: new Date().toLocaleTimeString(),
+          mode: `Direct Bridge (${settings.aiModel})`,
+          status: 'OK',
+          latencyMs: dt,
+          error: null
+        };
+        LQS_DIAG.log('AI_DIRECT_OK', `Direct AI response in ${dt}ms`);
+
+        aiContent.innerHTML = formatAiTextToHtml(reply);
+        aiSources.innerHTML = `<span style="color:#75736f;font-size:11.5px;">⚡ Напрямую через ${settings.aiModel} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
+        return;
+      } else {
+        throw new Error(`HTTP ${directResp.status}`);
+      }
+    } catch (err) {
+      const dt = Math.round(performance.now() - t0);
       LQS_DIAG.lastAiCall = {
         time: new Date().toLocaleTimeString(),
-        mode: `Direct Bridge (${settings.aiModel})`,
-        status: 'OK',
-        latencyMs: directResp.latencyMs,
-        error: null
+        mode: 'Failed',
+        status: 'ERROR',
+        latencyMs: dt,
+        error: err.message || String(err)
       };
-      LQS_DIAG.log('AI_DIRECT_OK', `Direct AI response in ${directResp.latencyMs}ms`);
-
-      aiContent.innerHTML = formatAiTextToHtml(reply);
-      if (scrapedSources.length === 0) {
-        aiSources.innerHTML = `<span style="color:#75736f;font-size:11.5px;">⚡ Напрямую через ${escapeHtml(settings.aiModel)} (запусти start_server.bat для поиска отзывов по сайтам)</span>`;
-      }
-      return;
+      LQS_DIAG.error('requestAiProductReview', err);
     }
 
-    const errSummary = directResp.status ? `HTTP ${directResp.status}` : (directResp.error || 'Connection refused');
-    LQS_DIAG.lastAiCall = {
-      time: new Date().toLocaleTimeString(),
-      mode: 'Failed',
-      status: 'ERROR',
-      latencyMs: directResp.latencyMs,
-      error: errSummary
-    };
-    LQS_DIAG.error('requestAiProductReview', errSummary);
-
-    if (directResp.status === 401 || directResp.status === 403 || (disc && disc.report && disc.report.aiNeedsKey)) {
-      renderInlineKeySetupUI(
-        panel,
-        meta,
-        settings,
-        `🔑 Мост <code>${escapeHtml(settings.aiBaseUrl)}</code> найден и работает, но требует <b>API Key</b>. Вставь его прямо сюда:`
-      );
-    } else {
-      renderInlineKeySetupUI(
-        panel,
-        meta,
-        settings,
-        `⚠️ Не удалось достучаться до ИИ (<code>${escapeHtml(settings.aiBaseUrl)}</code> — ${escapeHtml(errSummary)}). Проверь, что запущен Docker-контейнер Gemini Argon (<code>:8083</code>), или вставь API Key ниже:`
-      );
-    }
+    const isAuthErr = LQS_DIAG.lastAiCall && String(LQS_DIAG.lastAiCall.error || '').includes('401');
+    aiContent.innerHTML = isAuthErr
+      ? `🔑 Мост <code>${settings.aiBaseUrl}</code> работает, но требует <b>API Key</b>.<br>` +
+        `1) Открой <a href="http://localhost:8083/admin/" target="_blank" style="color:#1d4ed8;font-weight:600;">админку :8083/admin/</a> и скопируй ключ.<br>` +
+        `2) Нажми на иконку расширения → вкладка <b>🤖 ИИ</b> → вставь ключ и сохрани.`
+      : `⚠️ Не удалось подключиться к локальному серверу <code>${settings.backendUrl}</code> или ИИ-мосту <code>${settings.aiBaseUrl}</code>.<br>` +
+        `Проверь, что запущен Docker-контейнер Gemini Argon (<code>:8083</code>) или <code>start_server.bat</code>, либо открой вкладку <b>🤖 ИИ</b> в иконке расширения и нажми «⚡ Найти и подключить ИИ автоматически».`;
   }
 
   async function renderProductPageWidget() {
@@ -1181,7 +952,7 @@
         ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
       `.trim();
 
-      const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
+      const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${f.text}</span>`).join('');
 
       panel.innerHTML = `
         <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + кнопка «▾ Подробнее» -->
@@ -1222,7 +993,7 @@
 
           <div class="lqs-tags-row">
             ${PRESET_TAGS.map((tag) => `
-              <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</span>
+              <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${tag}">${tag}</span>
             `).join('')}
           </div>
 
@@ -1240,7 +1011,7 @@
             <div class="lqs-ai-sources" id="lqs-ai-sources"></div>
           </div>
 
-          <!-- ВСТРОЕННАЯ ПАНЕЛЬ ДИАГНОСТИКИ (LQS DIAGNOSTICS v2.0.5) -->
+          <!-- ВСТРОЕННАЯ ПАНЕЛЬ ДИАГНОСТИКИ (LQS DIAGNOSTICS v2.0.3) -->
           <div class="lqs-diag-box" id="lqs-diag-box">
             <div class="lqs-diag-header">
               <span>🩺 LQS Диагностика v${VERSION} (Alt+Shift+D)</span>
@@ -1249,13 +1020,14 @@
                 <button type="button" class="lqs-diag-action-btn primary" id="lqs-diag-copy">📋 Скопировать отчёт</button>
               </div>
             </div>
-            <div class="lqs-diag-conn-status" id="lqs-diag-conn-status">Нажми «🔌 Проверить связь» для авто-поиска и теста FastAPI (:8765) и Gemini Argon (:8083).</div>
+            <div class="lqs-diag-conn-status" id="lqs-diag-conn-status">Нажми «🔌 Проверить связь» для теста FastAPI (:8765) и Gemini Argon (:8083).</div>
             <div class="lqs-diag-metrics" id="lqs-diag-metrics"></div>
             <pre class="lqs-diag-log" id="lqs-diag-log"></pre>
           </div>
         </div>
       `;
 
+      // Записываем начальные хеши HTML, чтобы syncExistingPanelUI не перезаписывал DOM вхолостую
       const metricsEl = panel.querySelector('#lqs-metrics-inline');
       if (metricsEl) metricsEl.dataset.lqsHtmlCache = initialMetricsHtml;
       const flagsEl = panel.querySelector('#lqs-drawer-flags');
@@ -1478,6 +1250,10 @@
     return { slug, productId, imageKey, cleanTitle };
   }
 
+  /**
+   * Декорирование карточек каталога БЕЗ лишних удалений/вставок DOM,
+   * если рейтинг карточки не изменился.
+   */
   async function decorateCatalogCards() {
     LQS_DIAG.counters.catalogPasses += 1;
     const db = await getReviewsDB();
@@ -1538,18 +1314,11 @@
   let debounceTimer = null;
   function scheduleUpdate() {
     LQS_DIAG.counters.scheduleCalls += 1;
-    if (window.location.href !== lastKnownHref) {
-      lastKnownHref = window.location.href;
-      LQS_DIAG.counters.spaNavigations += 1;
-      LQS_DIAG.log('SPA_NAV', `URL changed to ${window.location.pathname}`);
-      runHydrationResyncWave();
-      return;
-    }
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       renderProductPageWidget();
       decorateCatalogCards();
-    }, 110);
+    }, 120);
   }
 
   function runHydrationResyncWave() {
@@ -1562,6 +1331,10 @@
     });
   }
 
+  /**
+   * Проверка: относится ли узел или запись мутации исключительно к нашим собственным элементам .lqs-*
+   * Это на 100% разрывает порочный круг самовозбуждения MutationObserver.
+   */
   function isOwnLqsNode(node) {
     if (!node) return false;
     if (node.nodeType === Node.ELEMENT_NODE) {
@@ -1626,17 +1399,9 @@
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local') {
-        if (changes[STORAGE_KEY]) {
-          reviewsDbMemCache = changes[STORAGE_KEY].newValue || {};
-        }
-        if (changes[SETTINGS_KEY]) {
-          settingsMemCache = { ...DEFAULT_SETTINGS, ...(changes[SETTINGS_KEY].newValue || {}) };
-        }
-        if (changes[STORAGE_KEY] || changes[SETTINGS_KEY]) {
-          renderProductPageWidget();
-          decorateCatalogCards();
-        }
+      if (area === 'local' && (changes[STORAGE_KEY] || changes[SETTINGS_KEY])) {
+        renderProductPageWidget();
+        decorateCatalogCards();
       }
     });
   }

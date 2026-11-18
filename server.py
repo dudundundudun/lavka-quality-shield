@@ -1,11 +1,11 @@
 """
-Lavka Quality Shield v2.0.5 — Локальный FastAPI сервер (127.0.0.1:8765)
-Исправления по итогам аудита v2.0.5:
-1. Защита SQLite-кэша от отравления ошибками (Cache Poisoning Fix):
-   если ИИ-мост (:8083) временно выключен или вернул 401, текст ошибки больше НЕ сохраняется в таблицу product_ai_cache.
-2. Авто-очистка старых ошибочных записей ("⚠️ Ошибка вызова ИИ...") при старте сервера.
-3. При ошибке ИИ сервер возвращает ok=False, но сохраняет найденные ссылки на внешние отзывы (sources),
-   чтобы расширение могло показать ссылки и автоматически переключиться на резервный канал.
+Lavka Quality Shield v2.0.3 — Локальный FastAPI сервер (127.0.0.1:8765)
+1. Принимает название, состав, БЖУ и цену товара из расширения Lavka Quality Shield.
+2. Ищет реальные отзывы о продукте в сети (Отзовик, IRecommend, Роскачество, ВкусВилл, Ozon).
+3. Кэширует результаты в локальной базе SQLite (lavka_ai_cache.db).
+4. Отправляет найденные отзывы + состав в твой локальный Cookie-мост Gemini 4 Argon (http://localhost:8083/v1)
+   или любой другой OpenAI-совместимый облачный/локальный ИИ.
+5. Содержит эндпоинт GET /api/health для встроенной системы диагностики расширения.
 """
 
 import os
@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.0.5")
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.0.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,10 +51,6 @@ def init_db() -> None:
                 updated_at TEXT
             )
             """
-        )
-        # Очищаем кэш от любых старых записей с текстом ошибки подключения
-        conn.execute(
-            "DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'"
         )
         conn.commit()
 
@@ -87,7 +83,7 @@ async def health_check():
         pass
     return {
         "status": "ok",
-        "version": "2.0.5",
+        "version": "2.0.3",
         "cachedItems": cached_count,
         "timestamp": datetime.utcnow().isoformat()
     }
@@ -185,9 +181,8 @@ async def analyze_product(req: AnalyzeRequest):
                 "SELECT verdict, sources_json FROM product_ai_cache WHERE slug = ?",
                 (cache_key,),
             ).fetchone()
-            if row and not str(row[0]).startswith("⚠️ Ошибка вызова ИИ"):
+            if row:
                 return {
-                    "ok": True,
                     "cached": True,
                     "verdict": row[0],
                     "sources": json.loads(row[1] or "[]"),
@@ -197,13 +192,10 @@ async def analyze_product(req: AnalyzeRequest):
     try:
         verdict = await call_ai_model(req, sources)
     except Exception as exc:
-        # НЕ сохраняем ошибку в SQLite-кэш, чтобы следующая попытка после ввода ключа сработала сразу!
-        return {
-            "ok": False,
-            "cached": False,
-            "error": str(exc),
-            "sources": sources,
-        }
+        verdict = (
+            f"⚠️ Ошибка вызова ИИ ({req.aiModel} @ {req.aiBaseUrl}): {exc}\n"
+            f"Проверь, что контейнер gemini-argon (:8083) запущен и API Key указан в настройках расширения."
+        )
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -222,7 +214,6 @@ async def analyze_product(req: AnalyzeRequest):
         conn.commit()
 
     return {
-        "ok": True,
         "cached": False,
         "verdict": verdict,
         "sources": sources,

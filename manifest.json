@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Минималистичный рейтинг и ИИ-ревизор",
-  "version": "2.0.5",
-  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), мгновенный спойлер, сервис-воркер обхода CORS/PNA, авто-подключение ИИ и диагностика.",
+  "version": "2.0.4",
+  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), мгновенный спойлер без DOM-фризов, встроенная диагностика и ИИ-агрегатор отзывов.",
   "permissions": [
     "storage",
     "tabs"
@@ -14,15 +14,11 @@
     "http://127.0.0.1:8083/*",
     "http://localhost:8083/*",
     "http://127.0.0.1:11434/*",
-    "http://localhost:11434/*",
-    "https://api.deepseek.com/*"
+    "http://localhost:11434/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.0.5"
+    "default_title": "Lavka Quality Shield v2.0.4"
   },
   "content_scripts": [
     {
