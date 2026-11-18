@@ -1,8 +1,7 @@
 /* ==========================================================================
-   Lavka Quality Shield v2.1.0 — Ультра-чистая одна строка без лишнего шума
-   На виду: Звёзды + Цена/кг + Цена/100г белка + кнопка «▾ Подробнее»
-   Под капотом: ИИ-ревизор, В бан, Сброс, флаги состава, теги и заметка.
-   (Вся диагностика и бортовой лог вынесены из веб-страницы в настройки попапа)
+   Lavka Quality Shield v2.3.0 — Zero-Click Full Autopilot Styles
+   На виду: Звёзды + Цена/кг + Цена/100г белка + Живой бейдж ИИ + кнопка «▾ Подробнее»
+   Под капотом: Авто-разбор ИИ, В бан, Сброс, флаги состава, теги и заметка.
    ========================================================================== */
 
 :root {
@@ -74,16 +73,16 @@ div.lqs-product-panel.is-god {
 }
 
 /* ==========================================================================
-   ОСНОВНАЯ СТРОКА (СТРОГО ОДНА ЛИНИЯ):
-   Слева: Звёзды + Цена за 1 кг + Цена за 100г белка
+   ОСНОВНАЯ СТРОКА:
+   Слева: Звёзды + Цена за 1 кг + Цена за 100г белка + Живой бейдж ИИ
    Справа: Кнопка «▾ Подробнее»
    ========================================================================== */
 div.lqs-product-panel .lqs-main-bar {
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
-  flex-wrap: nowrap !important;
-  gap: 8px !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
   width: 100% !important;
   min-height: 32px !important;
   height: auto !important;
@@ -92,10 +91,9 @@ div.lqs-product-panel .lqs-main-bar {
 div.lqs-product-panel .lqs-core-left {
   display: flex !important;
   align-items: center !important;
-  flex-wrap: nowrap !important;
+  flex-wrap: wrap !important;
   gap: 6px !important;
   min-width: 0 !important;
-  overflow: hidden !important;
 }
 
 /* Звёзды рейтинга */
@@ -142,12 +140,12 @@ div.lqs-product-panel button.lqs-star-btn.active {
   color: var(--lqs-star-active) !important;
 }
 
-/* Главные метрики: Цена за кг и Цена за 100 г белка */
+/* Главные метрики: Цена за кг, Цена за 100 г белка и бейдж ИИ */
 div.lqs-product-panel .lqs-metrics-inline {
   display: inline-flex !important;
   align-items: center !important;
   gap: 5px !important;
-  flex-wrap: nowrap !important;
+  flex-wrap: wrap !important;
   min-width: 0 !important;
 }
 
@@ -171,6 +169,36 @@ div.lqs-product-panel .lqs-metric-pill {
 
 div.lqs-product-panel .lqs-metric-pill.protein-pill {
   color: #3f3d3b !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.ai-pill-loading {
+  background: #eff6ff !important;
+  border-color: #93c5fd !important;
+  color: #1d4ed8 !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.verdict-good {
+  background: #dcfce7 !important;
+  border-color: #86efac !important;
+  color: #166534 !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.verdict-ok {
+  background: #f0f9ff !important;
+  border-color: #7dd3fc !important;
+  color: #0369a1 !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.verdict-warn {
+  background: #fef9c3 !important;
+  border-color: #fde047 !important;
+  color: #854d0e !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.verdict-bad {
+  background: #fee2e2 !important;
+  border-color: #fca5a5 !important;
+  color: #991b1b !important;
 }
 
 /* Кнопка открытия спойлера «▾ Подробнее» справа */

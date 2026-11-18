@@ -1,38 +1,34 @@
 /**
- * Lavka Quality Shield v2.2.0 — Content Script
- * Архитектура v2.1.0:
- * 1. Чистый интерфейс на странице Лавки: кнопка и панель диагностики полностью убраны из DOM страницы
- *    и перенесены в «⚙️ Настройки -> 🛠️ Бортовой журнал для ИИ» внутри popup-окна расширения.
- * 2. Бортовой самописец (LQS Flight Recorder):
- *    - Пошагово логирует работу каждого из 8 функциональных модулей расширения (Router, Parser, Calculator,
- *      Widget UI, Catalog Decorator, Cart Guard, Storage DB, AI Reviewer) с входными/выходными данными.
- *    - Сохраняет кольцевой буфер событий (до 120 записей) в chrome.storage.local между перезагрузками страниц.
- *    - При отсутствии любого DOM-селектора Лавки автоматически собирает карту актуальных data-testid на странице,
- *      чтобы при отправке лога в ИИ нейросеть сразу видела изменения вёрстки Яндекса и давала готовый фикс.
- * 3. Исправления по результатам аудита кода:
- *    - Исправлен баг регулярки КБЖУ, из-за которого при вёрстке «250 ккал \n белки 12 г» число калорий (250)
- *      захватывалось как количество белка. Добавлен построчный/поблочный парсер КБЖУ.
- *    - Добавлена поддержка мультипаков («2 × 150 г», «3 x 80 г») при расчёте честной цены за 1 кг/л.
- *    - Добавлен in-memory кэш базы отзывов (reviewsDbCache): скролл каталога больше не дёргает асинхронный
- *      chrome.storage.local.get каждые 120 мс.
- *    - Добавлен детектор SPA-навигации (pushState/replaceState), отслеживающий переходы между товарами и каталогом.
- *    - Добавлено экранирование HTML (защита от XSS) при рендере источников ИИ и быстрая кнопка «🗑️ Сброс» в спойлере.
+ * Lavka Quality Shield v2.3.0 — Content Script (Zero-Click Full Autopilot Edition)
+ * Что нового в v2.3.0:
+ * 1. Полный Zero-Click Автопилот на странице товара:
+ *    - При открытии любой карточки товара (/good/...) расширение САМО проверяет встроенный кэш ИИ-обзоров
+ *      в браузере (lqs_ai_cache_v1) и мгновенно показывает готовый вердикт.
+ *    - Если товар открыт впервые и включён режим Zero-Click (по умолчанию ВКЛ) — расширение САМО через 550 мс
+ *      запускает ИИ-разбор состава, КБЖУ, цены и отзывов без единого клика со стороны пользователя!
+ *    - На главной однострочной панели отображается компактный живой индикатор вердикта ИИ
+ *      («🤖 ⏳ ИИ-разбор...» -> «🤖 ✅ Стоит брать» / «🤖 👍 Хороший» / «🤖 ⚠️ На любителя» / «🤖 ❌ Не брать»).
+ * 2. Надёжный детектор SPA-переходов (таймер URL + popstate + MutationObserver) и авто-прогрев Gemini при старте.
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.2.0';
+  const VERSION = '2.3.0';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
+  const AI_CACHE_KEY = 'lqs_ai_cache_v1';
 
   const DEFAULT_SETTINGS = {
     backendUrl: 'http://127.0.0.1:8765',
     aiBaseUrl: 'http://localhost:8083/v1',
     aiApiKey: '',
     aiModel: 'gemini-4-argon',
-    useDirectBrowserAiFallback: true
+    useDirectBrowserAiFallback: true,
+    autoRunAiOnProductPage: true,
+    autoOpenDrawerOnAi: true,
+    autoWarmupGeminiTab: true
   };
 
   const PRESET_TAGS = [
@@ -47,9 +43,14 @@
 
   // Память открытых спойлеров по slug товара, чтобы React-ререндер Лавки не захлопывал меню
   const drawerOpenBySlug = new Map();
+  // Память уже запущенных авто-разборов ИИ в текущей сессии по slug, чтобы не спамить повторно
+  const autoAiTriggeredSlugs = new Set();
+  const lastAiResultBySlug = new Map();
+  let autoAiDebounceTimer = null;
 
-  // Синхронный кэш базы отзывов в памяти для мгновенной отрисовки каталога без лишних обращений к chrome.storage
+  // Синхронный кэш базы отзывов в памяти для мгновенной отрисовки каталога
   let reviewsDbCache = null;
+  let aiCacheMemory = null;
   let isRenderingProduct = false;
   let pendingProductRender = false;
   let currentReviewCache = null;
@@ -63,6 +64,27 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  /**
+   * Извлекает короткий бейдж вердикта из текста ответа ИИ для показа на главной панели в 1 строку
+   */
+  function extractVerdictBadgeFromText(verdictText) {
+    if (!verdictText) return null;
+    const t = String(verdictText);
+    if (t.includes('Отличный выбор') || t.includes('✅')) {
+      return { cls: 'verdict-good', text: '🤖 ✅ Стоит брать', shortCatalog: '🤖✅' };
+    }
+    if (t.includes('Хороший вариант') || t.includes('👍')) {
+      return { cls: 'verdict-ok', text: '🤖 👍 Хороший', shortCatalog: '🤖👍' };
+    }
+    if (t.includes('Не рекомендую') || t.includes('❌')) {
+      return { cls: 'verdict-bad', text: '🤖 ❌ Не брать', shortCatalog: '🤖❌' };
+    }
+    if (t.includes('На любителя') || t.includes('⚠️')) {
+      return { cls: 'verdict-warn', text: '🤖 ⚠️ На любителя', shortCatalog: '🤖⚠️' };
+    }
+    return { cls: 'verdict-ok', text: '🤖 ИИ-вердикт готов', shortCatalog: '🤖' };
   }
 
   // ==========================================================================
@@ -86,10 +108,10 @@
       clicksTotal: 0,
       drawerToggles: 0,
       missedClicksRecovered: 0,
+      autoAiRuns: 0,
       errors: 0
     },
     lastClickLatencyMs: null,
-    // Состояние каждого из 8 ключевых модулей расширения
     modules: {
       router: { status: 'INIT', lastRun: null, summary: 'Ожидание инициализации роутера' },
       parser: { status: 'IDLE', lastRun: null, summary: 'Страница товара ещё не открывалась', data: null },
@@ -98,7 +120,7 @@
       catalog: { status: 'IDLE', lastRun: null, summary: 'Каталог ещё не сканировался' },
       cartGuard: { status: 'IDLE', lastRun: null, summary: 'Перехватчик корзины в режиме ожидания' },
       storage: { status: 'INIT', lastRun: null, summary: 'Загрузка базы отзывов...' },
-      aiReviewer: { status: 'IDLE', lastRun: null, summary: 'Запросы к ИИ в этой сессии не выполнялись', lastCall: null }
+      aiReviewer: { status: 'IDLE', lastRun: null, summary: 'Готов к Zero-Click Автопилоту', lastCall: null }
     },
     events: [],
     _initialized: false,
@@ -111,7 +133,6 @@
         chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
           const saved = res && res[FLIGHT_LOG_KEY];
           if (saved && Array.isArray(saved.events)) {
-            // Сохраняем историю предыдущих событий и добавляем в начало новые
             const combined = [...this.events, ...saved.events];
             this.events = combined.slice(0, 120);
           }
@@ -199,8 +220,6 @@
       const drawerEl = panelEl ? panelEl.querySelector('#lqs-drawer') : null;
       const catalogCardsCount = document.querySelectorAll('div[data-testid="product-card"]').length;
 
-      // Если мы на странице товара, но какой-то из ключевых селекторов не найден —
-      // собираем список реальных data-testid на странице для подсказки ИИ!
       let discoveredTestIds = [];
       if (slug && (!mainPage || !infoBlock || !titleEl || !priceEl)) {
         const allTestIdNodes = document.querySelectorAll('[data-testid]');
@@ -252,7 +271,7 @@
         `- **Timestamp**: ${new Date().toISOString()} (сессия с ${this.sessionStartedAt})`,
         `- **URL**: ${dom.url}`,
         `- **Тип страницы**: ${dom.pageType} (Slug: \`${dom.slug || 'нет'}\`, Карточек в каталоге: ${dom.catalogCardsCount})`,
-        `- **База отзывов в памяти**: ${reviewsDbCache ? Object.keys(reviewsDbCache).length : 0} записей`,
+        `- **База отзывов в памяти**: ${reviewsDbCache ? Object.keys(reviewsDbCache).length : 0} записей | **Кэш ИИ в памяти**: ${aiCacheMemory ? Object.keys(aiCacheMemory).length : 0} товаров`,
         ``,
         `## 2. МАТРИЦА ФУНКЦИОНИРОВАНИЯ МОДУЛЕЙ (FUNCTION HEALTH MATRIX)`,
         `1. **[ROUTER] SPA-навигация и гидратация**: \`${m.router.status}\` (${m.router.lastRun || '—'}) — ${m.router.summary}`,
@@ -262,7 +281,7 @@
         `5. **[CATALOG] Разметка карточек каталога**: \`${m.catalog.status}\` (${m.catalog.lastRun || '—'}) — ${m.catalog.summary}`,
         `6. **[CART_GUARD] Защита от покупки бана**: \`${m.cartGuard.status}\` (${m.cartGuard.lastRun || '—'}) — ${m.cartGuard.summary}`,
         `7. **[STORAGE] Хранилище chrome.storage.local**: \`${m.storage.status}\` (${m.storage.lastRun || '—'}) — ${m.storage.summary}`,
-        `8. **[AI_REVIEWER] Локальный сервер :8765 и ИИ :8083**: \`${m.aiReviewer.status}\` (${m.aiReviewer.lastRun || '—'}) — ${m.aiReviewer.summary}`
+        `8. **[AI_REVIEWER] Zero-Click ИИ Автопилот**: \`${m.aiReviewer.status}\` (${m.aiReviewer.lastRun || '—'}) — ${m.aiReviewer.summary}`
       ];
 
       if (backendDiag) {
@@ -315,7 +334,7 @@
       lines.push(
         ``,
         `## 5. СЧЁТЧИКИ ПРОИЗВОДИТЕЛЬНОСТИ И СТАБИЛЬНОСТИ DOM`,
-        `- **SPA переходов**: ${c.spaTransitions} | **Маунтов панели**: ${c.panelMounts} | **Синхронизаций UI**: ${c.panelSyncs}`,
+        `- **SPA переходов**: ${c.spaTransitions} | **Маунтов панели**: ${c.panelMounts} | **Синхронизаций UI**: ${c.panelSyncs} | **Zero-Click ИИ-запусков**: ${c.autoAiRuns}`,
         `- **Записей в DOM выполнено**: ${c.domWritesExecuted} | **Пропущено дублей (кэш хеша)**: ${c.domWritesSkipped}`,
         `- **Мутаций Лавки обработано**: ${c.extMutations} | **Собственных мутаций .lqs-* отсечено**: ${c.selfMutationsIgnored}`,
         `- **Проходов каталога**: ${c.catalogPasses} (обновлено бейджей: ${c.catalogBadgesUpdated}, пропущено без изменений: ${c.catalogBadgesSkipped})`,
@@ -354,7 +373,15 @@
 
   LQS_RECORDER.init();
 
-  // Перехват глобальных ошибок и необработанных промисов внутри content script
+  // Сигнализируем фоновому воркеру прогреть Автопилот сразу при заходе на Лавку
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+    chrome.runtime.sendMessage({ type: 'LQS_WARMUP_AUTOPILOT' }, () => {
+      if (chrome.runtime.lastError) {
+        // ignore
+      }
+    });
+  }
+
   window.addEventListener('error', (ev) => {
     if (ev && ev.error) {
       LQS_RECORDER.error('window.onerror', ev.error);
@@ -367,7 +394,6 @@
     }
   });
 
-  // Защита от сорванных кликов (если React Лавки перебил pointerdown -> click на кнопке спойлера)
   let pendingPointerDown = null;
   document.addEventListener('pointerdown', (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('.lqs-product-panel button, .lqs-product-panel .lqs-tag-chip') : null;
@@ -400,7 +426,6 @@
     }
   }, true);
 
-  // Скрытый хоткей Alt + Shift + D — тихо копирует полный ИИ-отчёт в буфер обмена без засорения страницы
   window.addEventListener('keydown', (e) => {
     if (e.altKey && e.shiftKey && (e.code === 'KeyD' || e.key === 'D' || e.key === 'd' || e.key === 'в' || e.key === 'В')) {
       e.preventDefault();
@@ -410,7 +435,6 @@
     }
   });
 
-  // Обработка запросов из popup.js (получение живого ИИ-лога и очистка буфера)
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (!msg) return false;
@@ -437,7 +461,7 @@
   }
 
   // ==========================================================================
-  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ (С IN-MEMORY КЭШИРОВАНИЕМ)
+  // УТИЛИТЫ И РАБОТА С БАЗОЙ ОТЗЫВОВ И КЭШЕМ ИИ
   // ==========================================================================
   function setHtmlIfChanged(el, nextHtml, tagKey = '') {
     if (!el) return false;
@@ -497,10 +521,11 @@
     }
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([STORAGE_KEY], (res) => {
+        chrome.storage.local.get([STORAGE_KEY, AI_CACHE_KEY], (res) => {
           reviewsDbCache = (res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : {};
+          aiCacheMemory = (res && res[AI_CACHE_KEY]) ? res[AI_CACHE_KEY] : {};
           const count = Object.keys(reviewsDbCache).length;
-          LQS_RECORDER.updateModule('storage', 'OK', `База загружена в память (${count} товаров)`);
+          LQS_RECORDER.updateModule('storage', 'OK', `База загружена в память (${count} оценок, ${Object.keys(aiCacheMemory).length} ИИ-обзоров)`);
           resolve(reviewsDbCache);
         });
       } else {
@@ -645,7 +670,6 @@
     const oldPriceText = oldPriceEl ? oldPriceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.') : '';
     const ingredientsText = ingredientsEl ? ingredientsEl.innerText.trim() : '';
 
-    // Собираем КБЖУ как в виде плоского текста, так и по отдельным парам (ключ-значение) из дочерних блоков
     const traitsPairs = [];
     if (traitsEl) {
       const children = traitsEl.querySelectorAll('li, div > div, dl > div');
@@ -685,9 +709,6 @@
     return meta;
   }
 
-  /**
-   * Извлекает конкретный макронутриент (белки/жиры/углеводы/ккал) без ложного захвата соседних чисел.
-   */
   function extractNutrientValue(traitsText, keywordRegex, unitHintRegex) {
     if (!traitsText) return null;
     const segments = traitsText.split(/[|\n;]+/);
@@ -700,7 +721,6 @@
         }
       }
     }
-    // Фоллбэк: ищем в пределах 15 символов с обязательной проверкой единицы измерения или двоеточия
     const directAfter = new RegExp(keywordRegex.source + '[^\\d|\\n]{0,12}([\\d]+(?:[.,]\\d+)?)', 'i');
     const m1 = traitsText.match(directAfter);
     if (m1) return parseFloat(m1[1].replace(',', '.'));
@@ -712,45 +732,120 @@
     return null;
   }
 
+  function normalizePieceUnit(rawUnit) {
+    const u = String(rawUnit || '').toLowerCase();
+    if (u.startsWith('пакет') || u.startsWith('пак') || u.startsWith('саше')) return 'пак';
+    if (u.startsWith('капс')) return 'капс';
+    if (u.startsWith('табл')) return 'табл';
+    if (u.startsWith('рул')) return 'рул';
+    if (u.startsWith('лист')) return 'лист';
+    if (u.startsWith('порц')) return 'порц';
+    if (u.startsWith('пар')) return 'пар';
+    if (u.startsWith('уп')) return 'уп';
+    return 'шт';
+  }
+
+  function parseWeightAndPiecesFromString(rawStr) {
+    if (!rawStr) return { weightGrams: null, unitLabel: 'кг', piecesCount: null, pieceUnitLabel: 'шт' };
+    const text = String(rawStr).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
+
+    let weightGrams = null;
+    let unitLabel = 'кг';
+    let piecesCount = null;
+    let pieceUnitLabel = 'шт';
+
+    const multiMatch =
+      text.match(/(\d+)\s*[×xх*]\s*([\d.,]+)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i) ||
+      text.match(/(\d+)\s*(шт|штук[а-я]*|пакет[а-я]*|пак|саше|капс[а-я]*|порц[а-я]*|уп[а-я]*)\.?\s*(?:по|[×xх*]|\s)\s*([\d.,]+)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i);
+
+    if (multiMatch) {
+      if (multiMatch.length === 4) {
+        const count = parseInt(multiMatch[1], 10) || 1;
+        const val = parseFloat(multiMatch[2].replace(',', '.'));
+        const unit = multiMatch[3].toLowerCase();
+        unitLabel = (unit.startsWith('мл') || unit.startsWith('л')) ? 'л' : 'кг';
+        if (val > 0) {
+          const singleGrams = (unit.startsWith('кг') || unit.startsWith('л')) ? val * 1000 : val;
+          weightGrams = count * singleGrams;
+          piecesCount = count;
+        }
+      } else if (multiMatch.length >= 5) {
+        const count = parseInt(multiMatch[1], 10) || 1;
+        pieceUnitLabel = normalizePieceUnit(multiMatch[2]);
+        const val = parseFloat(multiMatch[3].replace(',', '.'));
+        const unit = multiMatch[4].toLowerCase();
+        unitLabel = (unit.startsWith('мл') || unit.startsWith('л')) ? 'л' : 'кг';
+        if (val > 0) {
+          const singleGrams = (unit.startsWith('кг') || unit.startsWith('л')) ? val * 1000 : val;
+          weightGrams = count * singleGrams;
+          piecesCount = count;
+        }
+      }
+    }
+
+    if (!weightGrams) {
+      const singleMatch = text.match(/(?:^|[^\d.,])([\d]+(?:[.,]\d+)?)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i);
+      if (singleMatch) {
+        const val = parseFloat(singleMatch[1].replace(',', '.'));
+        const unit = singleMatch[2].toLowerCase();
+        unitLabel = (unit.startsWith('мл') || unit.startsWith('л')) ? 'л' : 'кг';
+        if (val > 0) {
+          weightGrams = (unit.startsWith('кг') || unit.startsWith('л')) ? val * 1000 : val;
+        }
+      }
+    }
+
+    const pieceMatch = text.match(/(?:^|[^\d.,])(\d+)\s*(шт|штук[а-я]*|пакет[а-я]*|пак|саше|капс[а-я]*|табл[а-я]*|рулон[а-я]*|лист[а-я]*|порц[а-я]*|пар[а-я]*|уп[а-я]*)(?![а-яёa-z])/i);
+    if (pieceMatch) {
+      const cnt = parseInt(pieceMatch[1], 10);
+      if (cnt > 0) {
+        piecesCount = cnt;
+        pieceUnitLabel = normalizePieceUnit(pieceMatch[2]);
+      }
+    }
+
+    return { weightGrams, unitLabel, piecesCount, pieceUnitLabel };
+  }
+
   function analyzeProductQuality(meta) {
     const flags = [];
     let pricePerKg = null;
     let weightGrams = null;
+    let unitLabel = 'кг';
+    let piecesCount = null;
+    let pieceUnitLabel = 'шт';
+    let pricePerPiece = null;
     let proteinPer100g = null;
     let fatPer100g = null;
     let carbsPer100g = null;
     let kcalPer100g = null;
     let pricePer100gProtein = null;
-    let unitLabel = 'кг';
 
-    if (meta.amountText) {
-      // 1. Проверка мультипаков вида «2 × 150 г», «2x150 г», «3 шт по 80 г»
-      const multiMatch = meta.amountText.match(/(\d+)\s*[×xх*]\s*([\d.,]+)\s*(г|гр|кг|мл|л)\b/i) ||
-                         meta.amountText.match(/(\d+)\s*шт[^\d]*([\d.,]+)\s*(г|гр|кг|мл|л)\b/i);
-      if (multiMatch) {
-        const count = parseInt(multiMatch[1], 10) || 1;
-        const val = parseFloat(multiMatch[2].replace(',', '.'));
-        const unit = multiMatch[3].toLowerCase();
-        unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
-        if (val > 0) {
-          const singleGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
-          weightGrams = count * singleGrams;
-        }
-      } else {
-        const singleMatch = meta.amountText.match(/([\d.,]+)\s*(г|гр|кг|мл|л)\b/i);
-        if (singleMatch) {
-          const val = parseFloat(singleMatch[1].replace(',', '.'));
-          const unit = singleMatch[2].toLowerCase();
-          unitLabel = (unit === 'мл' || unit === 'л') ? 'л' : 'кг';
-          if (val > 0) {
-            weightGrams = (unit === 'кг' || unit === 'л') ? val * 1000 : val;
-          }
-        }
-      }
+    const fromAmount = parseWeightAndPiecesFromString(meta.amountText);
+    const fromTitle = parseWeightAndPiecesFromString(meta.title);
 
-      if (weightGrams && weightGrams > 0 && meta.price) {
-        pricePerKg = Math.round((meta.price / weightGrams) * 1000);
-      }
+    if (fromAmount.weightGrams) {
+      weightGrams = fromAmount.weightGrams;
+      unitLabel = fromAmount.unitLabel;
+    } else if (fromTitle.weightGrams) {
+      weightGrams = fromTitle.weightGrams;
+      unitLabel = fromTitle.pieceUnitLabel && !fromTitle.weightGrams ? 'кг' : fromTitle.unitLabel;
+    }
+
+    if (fromAmount.piecesCount) {
+      piecesCount = fromAmount.piecesCount;
+      pieceUnitLabel = fromAmount.pieceUnitLabel;
+    } else if (fromTitle.piecesCount) {
+      piecesCount = fromTitle.piecesCount;
+      pieceUnitLabel = fromTitle.pieceUnitLabel;
+    }
+
+    if (weightGrams && weightGrams > 0 && meta.price) {
+      pricePerKg = Math.round((meta.price / weightGrams) * 1000);
+    }
+
+    if (piecesCount && piecesCount > 0 && meta.price) {
+      pricePerPiece = Math.round(meta.price / piecesCount);
     }
 
     if (meta.traitsText) {
@@ -759,7 +854,7 @@
       carbsPer100g = extractNutrientValue(meta.traitsText, /углевод[ыаов]?/i, /(?:г|гр)\.?/);
       kcalPer100g = extractNutrientValue(meta.traitsText, /(?:ккал|калор)/i, /(?:ккал)?/);
 
-      if (proteinPer100g !== null && proteinPer100g > 0 && proteinPer100g <= 100 && pricePerKg) {
+      if (proteinPer100g !== null && proteinPer100g >= 3 && proteinPer100g <= 100 && pricePerKg) {
         const totalProteinInKg = proteinPer100g * 10;
         pricePer100gProtein = Math.round((pricePerKg / totalProteinInKg) * 100);
       }
@@ -804,6 +899,9 @@
       weightGrams,
       pricePerKg,
       unitLabel,
+      piecesCount,
+      pieceUnitLabel,
+      pricePerPiece,
       proteinPer100g,
       fatPer100g,
       carbsPer100g,
@@ -812,14 +910,52 @@
       flags: flags.slice(0, 6)
     };
 
+    const unitSummary = pricePerKg
+      ? `Цена/${unitLabel}: ~${pricePerKg}₽`
+      : (pricePerPiece && piecesCount > 1 ? `Цена/${pieceUnitLabel}: ~${pricePerPiece}₽ (${piecesCount} ${pieceUnitLabel})` : 'Поштучно/без веса');
+
     LQS_RECORDER.updateModule(
       'calculator',
-      pricePerKg ? 'OK' : 'WARN',
-      `Цена/${unitLabel}: ${pricePerKg ?? '—'}₽, Белок/100г: ${proteinPer100g ?? '—'}г (${pricePer100gProtein ? pricePer100gProtein + '₽/100г' : '—'}), Флагов: ${result.flags.length}`,
+      (pricePerKg || pricePerPiece) ? 'OK' : 'WARN',
+      `${unitSummary}, Белок/100г: ${proteinPer100g ?? '—'}г (${pricePer100gProtein ? pricePer100gProtein + '₽/100г' : '—'}), Флагов: ${result.flags.length}`,
       result
     );
 
     return result;
+  }
+
+  function buildMetricsInlineHtml(smart, meta, slug) {
+    if (!smart) return '';
+    let primaryPill = '';
+    if (smart.pricePerKg) {
+      const pieceHint = (smart.pricePerPiece && smart.piecesCount > 1)
+        ? ` (~${smart.pricePerPiece} ₽/${smart.pieceUnitLabel})`
+        : '';
+      primaryPill = `<span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}${pieceHint}">⚖️ ~${smart.pricePerKg} ₽/${smart.unitLabel}</span>`;
+    } else if (smart.pricePerPiece && smart.piecesCount && smart.piecesCount > 1) {
+      primaryPill = `<span class="lqs-metric-pill" title="Товар продаётся поштучно (${smart.piecesCount} ${smart.pieceUnitLabel} в упаковке)">🔢 ~${smart.pricePerPiece} ₽/${smart.pieceUnitLabel}</span>`;
+    } else if (meta && meta.price) {
+      primaryPill = `<span class="lqs-metric-pill" title="Товар продаётся поштучно (вес в граммах не указан)">🔢 ${Math.round(meta.price)} ₽/шт</span>`;
+    } else {
+      primaryPill = `<span class="lqs-metric-pill" title="Вес или объём не указан на карточке">⚖️ Поштучно</span>`;
+    }
+
+    const proteinPill = smart.pricePer100gProtein
+      ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>`
+      : '';
+
+    let aiVerdictPill = '';
+    const cachedAi = (slug && lastAiResultBySlug.get(slug)) || (slug && aiCacheMemory && aiCacheMemory[slug]);
+    if (cachedAi && cachedAi.loading) {
+      aiVerdictPill = `<span class="lqs-metric-pill ai-pill-loading" title="Zero-Click Автопилот анализирует товар...">🤖 ⏳ ИИ...</span>`;
+    } else if (cachedAi && cachedAi.verdict) {
+      const vBadge = extractVerdictBadgeFromText(cachedAi.verdict);
+      if (vBadge) {
+        aiVerdictPill = `<span class="lqs-metric-pill ${vBadge.cls}" title="Вердикт ИИ-ревизора (нажми Подробнее)">${escapeHtml(vBadge.text)}</span>`;
+      }
+    }
+
+    return `${primaryPill} ${proteinPill} ${aiVerdictPill}`.trim();
   }
 
   // ==========================================================================
@@ -885,9 +1021,51 @@
     return isOpen;
   }
 
+  function renderAiVerdictIntoPanel(panel, slug, meta, resultObj, shouldOpenDrawer = true) {
+    if (!panel || !resultObj || !resultObj.verdict) return;
+    const drawer = panel.querySelector('#lqs-drawer');
+    const aiBox = panel.querySelector('#lqs-ai-box');
+    const aiContent = panel.querySelector('#lqs-ai-content');
+    const aiSources = panel.querySelector('#lqs-ai-sources');
+    if (!aiBox || !aiContent || !aiSources) return;
+
+    lastAiResultBySlug.set(slug, {
+      verdict: resultObj.verdict,
+      sources: resultObj.sources || [],
+      mode: resultObj.mode || 'Автопилот ИИ',
+      loading: false
+    });
+
+    if (shouldOpenDrawer && drawer && !drawer.classList.contains('open')) {
+      drawer.classList.add('open');
+      if (slug) drawerOpenBySlug.set(slug, true);
+    }
+
+    const smart = analyzeProductQuality(meta);
+    updateDrawerToggleButton(panel, Boolean(drawer && drawer.classList.contains('open')), currentReviewCache, smart);
+
+    const metricsBox = panel.querySelector('#lqs-metrics-inline');
+    if (metricsBox) {
+      setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-ai');
+    }
+
+    aiBox.classList.add('visible');
+    aiContent.innerHTML = formatAiTextToHtml(resultObj.verdict);
+    const sourceLinks = Array.isArray(resultObj.sources)
+      ? resultObj.sources
+          .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+          .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
+          .join('')
+      : '';
+
+    const modeBadge = `<span style="color:#0369a1;font-size:11px;font-weight:600;">⚡ ${escapeHtml(resultObj.mode || 'Автопилот ИИ')}</span>`;
+    aiSources.innerHTML = sourceLinks ? `${modeBadge} ${sourceLinks}` : modeBadge;
+  }
+
   function syncExistingPanelUI(panel, review, meta) {
     LQS_RECORDER.counters.panelSyncs += 1;
     currentReviewCache = review;
+    const slug = panel.dataset.slug || extractSlugFromUrl(window.location.href);
 
     const r = (review && review.rating) ? Number(review.rating) : 0;
     const banned = Boolean(review && review.banned);
@@ -917,10 +1095,7 @@
 
     const metricsBox = panel.querySelector('#lqs-metrics-inline');
     if (metricsBox && smart) {
-      const nextMetricsHtml = `
-        <span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/${smart.unitLabel}` : `Цена/${smart.unitLabel} —`}</span>
-        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
-      `.trim();
+      const nextMetricsHtml = buildMetricsInlineHtml(smart, meta, slug);
       setHtmlIfChanged(metricsBox, nextMetricsHtml, 'metrics-inline');
     }
 
@@ -965,29 +1140,42 @@
     }
   }
 
-  async function requestAiProductReview(meta, panel, forceRefresh = false) {
+  async function requestAiProductReview(meta, panel, forceRefresh = false, isZeroClickAuto = false) {
     const drawer = panel.querySelector('#lqs-drawer');
     const aiBox = panel.querySelector('#lqs-ai-box');
     const aiContent = panel.querySelector('#lqs-ai-content');
     const aiSources = panel.querySelector('#lqs-ai-sources');
 
     const slug = panel.dataset.slug || extractSlugFromUrl(window.location.href);
-    drawer.classList.add('open');
-    if (slug) drawerOpenBySlug.set(slug, true);
+    const settings = await getSettings();
 
+    if (!isZeroClickAuto || settings.autoOpenDrawerOnAi !== false) {
+      drawer.classList.add('open');
+      if (slug) drawerOpenBySlug.set(slug, true);
+    }
+
+    lastAiResultBySlug.set(slug, { loading: true });
     const smart = analyzeProductQuality(meta);
-    updateDrawerToggleButton(panel, true, currentReviewCache, smart);
+    updateDrawerToggleButton(panel, drawer.classList.contains('open'), currentReviewCache, smart);
+
+    const metricsBox = panel.querySelector('#lqs-metrics-inline');
+    if (metricsBox) {
+      setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-loading');
+    }
 
     aiBox.classList.add('visible');
-    aiContent.innerHTML = '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора (Автопилот)...';
+    aiContent.innerHTML = isZeroClickAuto
+      ? '⏳ <b>Zero-Click Автопилот:</b> автоматически проверяю отзывы по 14 площадкам и запускаю ИИ-разбор состава...'
+      : '⏳ Ищу отзывы в сети и спрашиваю ИИ-ревизора (Автопилот)...';
     aiSources.innerHTML = '';
 
-    const settings = await getSettings();
     const t0 = performance.now();
-    LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh})`);
+    if (isZeroClickAuto) {
+      LQS_RECORDER.counters.autoAiRuns += 1;
+    }
+    LQS_RECORDER.record('AI', `Started AI review for "${meta.title}" (force=${forceRefresh}, auto=${isZeroClickAuto})`);
     LQS_RECORDER.updateModule('aiReviewer', 'RUNNING', `Запрос ИИ-ревизора для "${meta.title.slice(0, 30)}"...`);
 
-    // 1. Обращаемся к фоновому оркестратору background.js (поддерживает :8765 + :8083 + Автопилот через открытую вкладку Gemini!)
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       try {
         const bgResult = await new Promise((resolve) => {
@@ -1002,6 +1190,13 @@
                 price: meta.price,
                 ingredients: meta.ingredientsText,
                 traits: meta.traitsText,
+                pricePerKg: smart.pricePerKg,
+                unitLabel: smart.unitLabel,
+                pricePerPiece: smart.pricePerPiece,
+                pieceUnitLabel: smart.pieceUnitLabel,
+                piecesCount: smart.piecesCount,
+                proteinPer100g: smart.proteinPer100g,
+                pricePer100gProtein: smart.pricePer100gProtein,
                 forceRefresh: Boolean(forceRefresh)
               }
             },
@@ -1028,74 +1223,79 @@
             sourcesCount: (bgResult.sources || []).length
           });
 
-          aiContent.innerHTML = formatAiTextToHtml(bgResult.verdict);
-          const sourceLinks = Array.isArray(bgResult.sources)
-            ? bgResult.sources
-                .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
-                .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
-                .join('')
-            : '';
-
-          const modeBadge = `<span style="color:#0369a1;font-size:11px;font-weight:600;">⚡ Режим: ${escapeHtml(modeLabel)}</span>`;
-          aiSources.innerHTML = sourceLinks ? `${modeBadge} ${sourceLinks}` : modeBadge;
+          renderAiVerdictIntoPanel(panel, slug, meta, bgResult, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
           return;
         } else if (bgResult && bgResult.error) {
+          lastAiResultBySlug.delete(slug);
+          if (metricsBox) {
+            setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-err');
+          }
           LQS_RECORDER.record('AI', `Background orchestrator reported: ${bgResult.error}`);
+          const dt = Math.round(performance.now() - t0);
+          LQS_RECORDER.updateModule('aiReviewer', 'WARN', `Ответ оркестратора (${dt} мс): ${bgResult.error}`);
+          aiContent.innerHTML = `⚠️ <b>${escapeHtml(bgResult.error)}</b>`;
+          if (Array.isArray(bgResult.sources) && bgResult.sources.length > 0) {
+            aiSources.innerHTML = bgResult.sources
+              .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+              .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Отзыв в сети')}</a>`)
+              .join('');
+          }
+          return;
         }
       } catch (bgErr) {
         LQS_RECORDER.record('AI', `Background orchestrator exception: ${bgErr.message || bgErr}`);
       }
     }
 
-    // 2. Резервный прямой фоллбэк (если background worker перезапускался)
-    try {
-      const resp = await fetch(`${settings.backendUrl.replace(/\/$/, '')}/api/analyze-product`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          slug,
-          title: meta.title,
-          brand: meta.brand,
-          amount: meta.amountText,
-          price: meta.price,
-          ingredients: meta.ingredientsText,
-          traits: meta.traitsText,
-          aiBaseUrl: settings.aiBaseUrl,
-          aiApiKey: settings.aiApiKey,
-          aiModel: settings.aiModel,
-          forceRefresh: Boolean(forceRefresh)
-        })
-      });
-
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.verdict && data.aiOk !== false) {
-          const dt = Math.round(performance.now() - t0);
-          LQS_RECORDER.updateModule('aiReviewer', 'OK', `Ответ через FastAPI (:8765) за ${dt} мс`);
-          aiContent.innerHTML = formatAiTextToHtml(data.verdict);
-          if (Array.isArray(data.sources) && data.sources.length > 0) {
-            aiSources.innerHTML = data.sources
-              .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
-              .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🔗 ${escapeHtml(s.title || 'Источник')}</a>`)
-              .join('');
-          }
-          return;
-        }
-      }
-    } catch (err) {
-      LQS_RECORDER.error('requestAiProductReview', err);
+    lastAiResultBySlug.delete(slug);
+    if (metricsBox) {
+      setHtmlIfChanged(metricsBox, buildMetricsInlineHtml(smart, meta, slug), 'metrics-inline-fallback');
     }
 
     const dt = Math.round(performance.now() - t0);
     LQS_RECORDER.updateModule(
       'aiReviewer',
       'ERROR',
-      `ИИ не подключён (${dt} мс) — открой ⚙️ Настройки и ИИ -> нажми «⚡ Авто-подключение через вкладку Gemini»`
+      `ИИ не подключён (${dt} мс) — войди в аккаунт на gemini.google.com`
     );
 
     aiContent.innerHTML =
-      `⚠️ <b>ИИ ещё не подключён!</b><br>` +
-      `Нажми на иконку расширения <b>Lavka Quality Shield</b> в панели браузера -> вкладка <b>«⚙️ Настройки и ИИ»</b> -> синяя кнопка <b>«⚡ Авто-подключение через вкладку Gemini (1 клик)»</b>.`;
+      `⚠️ <b>Для запуска Автопилота ИИ нужно один раз войти в аккаунт Google на <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">gemini.google.com</a>!</b>`;
+  }
+
+  /**
+   * Планирует автоматический Zero-Click запуск ИИ при открытии карточки товара
+   */
+  function scheduleZeroClickAiForProduct(slug, panel) {
+    if (!slug || !panel) return;
+
+    // 1. Если для этого slug уже есть вердикт в памяти или в локальном кэше браузера — рендерим мгновенно (0 мс)!
+    const cachedEntry = lastAiResultBySlug.get(slug) || (aiCacheMemory && aiCacheMemory[slug]);
+    if (cachedEntry && cachedEntry.verdict) {
+      const latestMeta = extractProductPageMetadata();
+      getSettings().then((settings) => {
+        renderAiVerdictIntoPanel(panel, slug, latestMeta, cachedEntry, settings.autoOpenDrawerOnAi !== false);
+      });
+      return;
+    }
+
+    if (autoAiTriggeredSlugs.has(slug)) return;
+
+    clearTimeout(autoAiDebounceTimer);
+    autoAiDebounceTimer = setTimeout(async () => {
+      const currentSlug = extractSlugFromUrl(window.location.href);
+      if (currentSlug !== slug) return;
+
+      const settings = await getSettings();
+      if (settings.autoRunAiOnProductPage === false) return;
+
+      const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(slug)}"]`) || panel;
+      const latestMeta = extractProductPageMetadata();
+      if (!latestMeta || !latestMeta.title) return;
+
+      autoAiTriggeredSlugs.add(slug);
+      requestAiProductReview(latestMeta, activePanel, false, true);
+    }, 550);
   }
 
   async function renderProductPageWidget() {
@@ -1145,6 +1345,7 @@
       let existing = mainPage.querySelector('.lqs-product-panel');
       if (existing && existing.dataset.slug === slug) {
         syncExistingPanelUI(existing, current, meta);
+        scheduleZeroClickAiForProduct(slug, existing);
         LQS_RECORDER.updateModule(
           'widget',
           'OK',
@@ -1162,15 +1363,11 @@
       panel.className = `lqs-product-panel ${current.banned || (current.rating > 0 && current.rating <= 2) ? 'is-banned' : (current.rating >= 4 ? 'is-god' : '')}`;
       panel.dataset.slug = slug;
 
-      const initialMetricsHtml = `
-        <span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}">⚖️ ${smart.pricePerKg ? `~${smart.pricePerKg} ₽/${smart.unitLabel}` : `Цена/${smart.unitLabel} —`}</span>
-        ${smart.pricePer100gProtein ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>` : ''}
-      `.trim();
-
+      const initialMetricsHtml = buildMetricsInlineHtml(smart, meta, slug);
       const initialFlagsHtml = smart.flags.map((f) => `<span class="lqs-flag-${f.type}">${escapeHtml(f.text)}</span>`).join('');
 
       panel.innerHTML = `
-        <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + кнопка «▾ Подробнее» -->
+        <!-- ЕДИНСТВЕННАЯ ОСНОВНАЯ СТРОКА: Звёзды + Цена/кг + Цена/100г белка + Живой статус ИИ + кнопка «▾ Подробнее» -->
         <div class="lqs-main-bar">
           <div class="lqs-core-left">
             <div class="lqs-stars-inline" id="lqs-stars-box">
@@ -1188,7 +1385,7 @@
           </button>
         </div>
 
-        <!-- ВЫПАДАЮЩЕЕ МЕНЮ ПОД КАПОТОМ (открывается по клику на «▾ Подробнее») -->
+        <!-- ВЫПАДАЮЩЕЕ МЕНЮ ПОД КАПОТОМ (открывается автоматически при Zero-Click ИИ или по клику на «▾ Подробнее») -->
         <div class="lqs-drawer ${isDrawerInitiallyOpen ? 'open' : ''}" id="lqs-drawer">
           <div class="lqs-drawer-toolbar">
             <div class="lqs-drawer-actions">
@@ -1219,8 +1416,8 @@
 
           <div class="lqs-ai-box" id="lqs-ai-box">
             <div class="lqs-ai-header">
-              <span>🤖 Сводка отзывов + разбор состава</span>
-              <button type="button" class="lqs-ai-refresh-btn" id="lqs-ai-refresh" title="Принудительно обновить ИИ-обзор">🔄 Обновить</button>
+              <span>🤖 Сводка отзывов + разбор состава (Zero-Click Автопилот)</span>
+              <button type="button" class="lqs-ai-refresh-btn" id="lqs-ai-refresh" title="Принудительно переспросить ИИ-ревизора">🔄 Обновить</button>
             </div>
             <div class="lqs-ai-content" id="lqs-ai-content"></div>
             <div class="lqs-ai-sources" id="lqs-ai-sources"></div>
@@ -1327,14 +1524,14 @@
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel, false);
+        requestAiProductReview(latestMeta, panel, false, false);
       });
 
       panel.querySelector('#lqs-ai-refresh').addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel, true);
+        requestAiProductReview(latestMeta, panel, true, false);
       });
 
       panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {
@@ -1369,6 +1566,9 @@
         saveBtn.textContent = '✅ Ок';
         setTimeout(() => { saveBtn.textContent = '💾 Ок'; }, 1200);
       });
+
+      // ЗАПУСКАЕМ ZERO-CLICK АВТОПИЛОТ ИИ ПРИ ОТКРЫТИИ ТОВАРА!
+      scheduleZeroClickAiForProduct(slug, panel);
     } catch (err) {
       LQS_RECORDER.updateModule('widget', 'ERROR', `Ошибка рендера: ${err.message || err}`);
       LQS_RECORDER.error('renderProductPageWidget', err);
@@ -1476,12 +1676,15 @@
       const ids = extractCardIdentifiers(card);
       const match = findReviewInDB(db, ids);
       const review = match ? match.item : null;
+      const aiCached = ids.slug && aiCacheMemory ? aiCacheMemory[ids.slug] : null;
 
       const oldNote = card.querySelector('.lqs-card-note-preview');
       if (oldNote) oldNote.remove();
 
       const hasReview = Boolean(review && (review.rating > 0 || review.banned));
-      if (!hasReview) {
+      const hasAiVerdict = Boolean(!hasReview && aiCached && aiCached.verdict);
+
+      if (!hasReview && !hasAiVerdict) {
         if (card.dataset.lqsBadgeKey) {
           delete card.dataset.lqsBadgeKey;
           const oldBadge = card.querySelector('.lqs-card-badge');
@@ -1495,14 +1698,26 @@
       }
 
       badgedCount += 1;
-      const isBad = Boolean(review.banned || (review.rating > 0 && review.rating <= 2));
-      if (isBad) bannedCount += 1;
+      let tier = 'ok';
+      let text = '';
+      let titleText = '';
+      let isBad = false;
 
-      const tier = isBad ? 'trash' : (review.rating >= 4 ? 'god' : 'ok');
-      const text = isBad ? `💀 ${review.rating ? review.rating + '★' : 'БАН'}` : `★ ${review.rating}`;
-      const titleText = (review.note && review.note.trim())
-        ? review.note.trim()
-        : ((review.tags && review.tags.length) ? review.tags.join(', ') : '');
+      if (hasReview) {
+        isBad = Boolean(review.banned || (review.rating > 0 && review.rating <= 2));
+        if (isBad) bannedCount += 1;
+        tier = isBad ? 'trash' : (review.rating >= 4 ? 'god' : 'ok');
+        text = isBad ? `💀 ${review.rating ? review.rating + '★' : 'БАН'}` : `★ ${review.rating}`;
+        titleText = (review.note && review.note.trim())
+          ? review.note.trim()
+          : ((review.tags && review.tags.length) ? review.tags.join(', ') : '');
+      } else if (hasAiVerdict) {
+        const vBadge = extractVerdictBadgeFromText(aiCached.verdict);
+        text = vBadge ? vBadge.shortCatalog : '🤖';
+        tier = vBadge && vBadge.cls === 'verdict-good' ? 'god' : (vBadge && vBadge.cls === 'verdict-bad' ? 'trash' : 'ok');
+        titleText = aiCached.verdict.replace(/\*\*/g, '').slice(0, 220);
+      }
+
       const badgeKey = `${tier}|${text}|${titleText}`;
 
       let badge = card.querySelector('.lqs-card-badge');
@@ -1532,12 +1747,12 @@
     LQS_RECORDER.updateModule(
       'catalog',
       'OK',
-      `Просканировано карточек: ${cards.length} (с оценкой: ${badgedCount}, затемнено в бане: ${bannedCount})`
+      `Просканировано карточек: ${cards.length} (с бейджем: ${badgedCount}, затемнено в бане: ${bannedCount})`
     );
   }
 
   // ==========================================================================
-  // НАБЛЮДАТЕЛЬ DOM И ДЕТЕКТОР SPA-ПЕРЕХОДОВ
+  // НАБЛЮДАТЕЛЬ DOM И НАДЁЖНЫЙ ДЕТЕКТОР SPA-ПЕРЕХОДОВ
   // ==========================================================================
   let debounceTimer = null;
   function scheduleUpdate() {
@@ -1556,10 +1771,17 @@
       const prevUrl = lastObservedUrl;
       lastObservedUrl = currentUrl;
       LQS_RECORDER.counters.spaTransitions += 1;
-      LQS_RECORDER.record('ROUTER', `SPA transition: ${new URL(prevUrl).pathname} -> ${window.location.pathname}`);
+      try {
+        LQS_RECORDER.record('ROUTER', `SPA transition: ${new URL(prevUrl).pathname} -> ${window.location.pathname}`);
+      } catch {
+        LQS_RECORDER.record('ROUTER', `SPA transition -> ${window.location.pathname}`);
+      }
       runHydrationResyncWave('spa-url-change');
     }
   }
+
+  // Надёжный легковесный поллер URL каждые 350 мс на случай тихих history.pushState в React Router
+  setInterval(checkUrlTransition, 350);
 
   function runHydrationResyncWave(reason = 'init') {
     const slug = extractSlugFromUrl(window.location.href);
@@ -1651,7 +1873,12 @@
           );
           renderProductPageWidget();
           decorateCatalogCards();
-        } else if (changes[SETTINGS_KEY]) {
+        }
+        if (changes[AI_CACHE_KEY]) {
+          aiCacheMemory = changes[AI_CACHE_KEY].newValue || {};
+          decorateCatalogCards();
+        }
+        if (changes[SETTINGS_KEY]) {
           renderProductPageWidget();
         }
       }

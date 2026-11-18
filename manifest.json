@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lavka Quality Shield — Рейтинг, КБЖУ-радар и ИИ-ревизор",
-  "version": "2.2.0",
-  "description": "Чистая 1-строчная панель (Рейтинг + Цена за кг/белок), авто-подключение к открытой вкладке Gemini без ключей, ИИ-агрегатор отзывов и бортовой лог.",
+  "name": "Lavka Quality Shield — Рейтинг, КБЖУ-радар и Zero-Click ИИ-ревизор",
+  "version": "2.3.0",
+  "description": "Полный Zero-Click Автопилот: сам запускает ИИ-разбор при открытии товара, кэширует ответы в браузере, считает честную цену за кг/л и 100 г белка, ищет отзывы по 14 сайтам и защищает корзину.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -19,6 +19,9 @@
     "https://lavka.yandex.ru/*",
     "https://gemini.google.com/*",
     "https://*.google.com/*",
+    "https://google.com/*",
+    "https://html.duckduckgo.com/*",
+    "https://lite.duckduckgo.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*",
     "http://127.0.0.1:8083/*",
@@ -29,7 +32,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.2.0",
+    "default_title": "Lavka Quality Shield v2.3.0 — Zero-Click Autopilot",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

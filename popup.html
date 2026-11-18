@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.2.0</title>
+  <title>Lavka Quality Shield v2.3.0</title>
   <style>
     body {
       width: 405px;
@@ -181,6 +181,38 @@
       border-radius: 12px;
       padding: 10px;
       font-size: 12px;
+    }
+
+    /* БЛОК ZERO-CLICK ПОЛНОГО АВТОПИЛОТА */
+    .zero-click-card {
+      background: linear-gradient(135deg, #ecfdf5 0%, #dcfce7 100%);
+      border: 1px solid #86efac;
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin-bottom: 9px;
+    }
+    .zero-click-title {
+      font-weight: 800;
+      font-size: 11.5px;
+      color: #166534;
+      margin-bottom: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .zero-click-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #14532d;
+      margin-bottom: 4px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .zero-click-row input {
+      margin: 0;
+      cursor: pointer;
     }
 
     /* БЛОК АВТОПИЛОТА GEMINI */
@@ -462,7 +494,7 @@
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;">v2.2.0</span>
+    <span style="font-size:11px;color:#7a7875;">v2.3.0 Zero-Click</span>
   </div>
 
   <div class="tabs">
@@ -474,7 +506,7 @@
   <div id="panel-reviews">
     <div class="stats">
       <div class="stat-box"><strong id="count-all">0</strong>Всего</div>
-      <div class="stat-box" style="color:#15803d"><strong id="count-god">0</strong>Годнота</div>
+      <div class="stat-box" style="color:#15803d"><strong id="count-god">0</strong>Отличные</div>
       <div class="stat-box" style="color:#dc2626"><strong id="count-trash">0</strong>В бане</div>
     </div>
     <input type="text" class="search-input" id="search-input" placeholder="🔍 Быстрый поиск по названию или заметке...">
@@ -491,13 +523,36 @@
     </div>
   </div>
 
-  <!-- ВКЛАДКА 2: АВТОПИЛОТ GEMINI + ПОШАГОВЫЙ МАСТЕР + НАСТРОЙКИ ИИ + БОРТОВОЙ ЛОГ -->
+  <!-- ВКЛАДКА 2: ZERO-CLICK АВТОПИЛОТ + НАСТРОЙКИ ИИ + БОРТОВОЙ ЛОГ -->
   <div class="settings-panel" id="panel-settings">
+
+    <!-- БЛОК 0: РЕЖИМ ZERO-CLICK «СЕЛ И ПОЕХАЛ» (ВКЛЮЧЕН ПО УМОЛЧАНИЮ) -->
+    <div class="zero-click-card">
+      <div class="zero-click-title">
+        <span>🚀 Полный Автопилот (Zero-Click)</span>
+        <span id="ai-cache-badge" style="font-size:10.5px;color:#15803d;font-weight:700;">Кэш ИИ: 0</span>
+      </div>
+      <label class="zero-click-row">
+        <input type="checkbox" id="chk-auto-run-ai" checked>
+        <span><b>Сам запускать ИИ-разбор</b> при открытии любого товара (0 кликов)</span>
+      </label>
+      <label class="zero-click-row">
+        <input type="checkbox" id="chk-auto-open-drawer" checked>
+        <span><b>Сам раскрывать карточку</b> с готовым вердиктом ИИ</span>
+      </label>
+      <label class="zero-click-row">
+        <input type="checkbox" id="chk-auto-warmup" checked>
+        <span><b>Сам прогревать вкладку Gemini</b> при старте браузера и Лавки</span>
+      </label>
+      <div style="display:flex;justify-content:flex-end;margin-top:3px;">
+        <button type="button" id="clear-ai-cache-btn" style="border:1px solid #86efac;background:#ffffff;color:#166534;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;">🗑️ Очистить кэш ИИ в браузере</button>
+      </div>
+    </div>
 
     <!-- БЛОК 1: АВТОПИЛОТ GEMINI В 1 КЛИК -->
     <div class="autopilot-card">
       <div class="autopilot-header">
-        <span>🤖 Автопилот подключения Gemini</span>
+        <span>🤖 Статус подключения Gemini</span>
         <button type="button" id="refresh-radar-btn" style="border:none;background:transparent;color:#0369a1;cursor:pointer;font-size:11px;font-weight:700;" title="Обновить статус">🔄 Статус</button>
       </div>
       <div class="radar-grid">
@@ -506,8 +561,22 @@
         <div class="radar-pill" id="pill-bridge"><span>🚀 Мост :8083</span><strong id="val-bridge">...</strong></div>
         <div class="radar-pill" id="pill-backend"><span>🐍 Парсер :8765</span><strong id="val-backend">...</strong></div>
       </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:10.5px;font-weight:700;color:#0369a1;margin-bottom:3px;">👤 Целевой аккаунт / вкладка Gemini:</label>
+        <div style="display:flex;gap:4px;">
+          <select id="gemini-account-select" style="flex:1;padding:5px 6px;border-radius:7px;border:1px solid #7dd3fc;background:#ffffff;font-size:11px;font-weight:600;color:#0f172a;outline:none;">
+            <option value="auto">🔄 Авто (любая открытая вкладка Gemini)</option>
+            <option value="0">Аккаунт #0 — Основной (/u/0/app)</option>
+            <option value="1">Аккаунт #1 — Второй (/u/1/app)</option>
+            <option value="2">Аккаунт #2 — Третий (/u/2/app)</option>
+            <option value="3">Аккаунт #3 — Четвёртый (/u/3/app)</option>
+            <option value="4">Аккаунт #4 — Пятый (/u/4/app)</option>
+          </select>
+          <button type="button" id="open-selected-gemini-btn" title="Открыть или переключиться на выбранный аккаунт Gemini" style="padding:5px 8px;border-radius:7px;border:1px solid #7dd3fc;background:#ffffff;color:#0369a1;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;">🌐 Открыть</button>
+        </div>
+      </div>
       <button type="button" class="autopilot-btn-primary" id="auto-connect-gemini-btn">
-        ⚡ Авто-подключение через вкладку Gemini (1 клик)
+        ⚡ Проверить / прогреть выбранный Gemini сейчас
       </button>
       <button type="button" class="autopilot-btn-secondary" id="copy-gemini-cookies-btn">
         🍪 Скопировать куки Gemini (Header String) без F12
@@ -518,28 +587,20 @@
     <!-- БЛОК 2: ПОШАГОВЫЙ ГАЙД «ЗА РУЧКУ» ПРЯМО В РАСШИРЕНИИ -->
     <details class="wizard-spoiler" id="wizard-spoiler">
       <summary>
-        <span>🗺️ Пошаговый гайд: как подключить ИИ (2 способа)</span>
+        <span>🗺️ Пошаговый гайд: как работает Zero-Click ИИ</span>
         <span style="font-size:10px;color:#7a7875;">▾ открыть</span>
       </summary>
       <div class="wizard-steps">
         <div class="wizard-box">
-          <div class="wizard-box-title">🟢 Способ 1. Полный автомат через браузер (0 настроек, без Docker)</div>
-          <div>1. Просто войди в свой аккаунт на <b>gemini.google.com</b> в этом браузере.</div>
-          <div>2. Нажми синюю кнопку <b>«⚡ Авто-подключение через вкладку Gemini»</b> выше.</div>
-          <div>3. Всё! Расширение само найдёт вкладку с чатом Gemini, подхватит куки и будет делать разбор состава и КБЖУ прямо через неё. Если дополнительно запустить <code>start_server.bat</code> — оно ещё и подтянет живые отзывы с Отзовика/IRecommend!</div>
+          <div class="wizard-box-title">🟢 Способ 1. Полный Zero-Click Автомат через браузер (0 кликов!)</div>
+          <div>1. Один раз войди в свой аккаунт на <b>gemini.google.com</b> в этом браузере.</div>
+          <div>2. Больше ничего нажимать не нужно! При запуске браузера и открытии Лавки расширение <b>само тихо прогреет фоновую вкладку Gemini</b>, само спарсит отзывы с 14 площадок и <b>само запустит ИИ-разбор</b> при открытии любого товара, сохранив ответ в кэш браузера.</div>
         </div>
 
         <div class="wizard-box">
-          <div class="wizard-box-title">🚀 Способ 2. Через локальный мост Gemini 4 Argon (:8083 из твоего гайда)</div>
-          <div><b>Шаг 1.</b> Запусти Docker Desktop и выполни в PowerShell команду запуска моста:</div>
+          <div class="wizard-box-title">🚀 Способ 2. Автозапуск локального сервера (:8765) и Docker (:8083) вместе с Windows</div>
+          <div>Если хочешь, чтобы фоновый сервер Python и Docker-мост запускались сами при включении ПК без чёрных окон консоли — просто один раз запусти файл <code>enable_windows_autostart.bat</code> в папке расширения!</div>
           <button type="button" class="mini-copy-btn" id="copy-docker-cmd-btn">📋 Скопировать команду Docker для PowerShell</button>
-          <div style="margin-top:5px;"><b>Шаг 2.</b> Нажми кнопку <b>«🍪 Скопировать куки Gemini без F12»</b> выше (расширение само достанет <code>Header String</code> из браузера, ставить Cookie-Editor не нужно!).</div>
-          <div style="margin-top:5px;"><b>Шаг 3.</b> Открой админку <a href="http://localhost:8083/admin/" target="_blank" rel="noopener noreferrer" style="color:#0284c7;font-weight:700;">http://localhost:8083/admin/</a>:
-            <br>• В <b>Accounts -> Quick Add Cookie</b> вставь скопированные куки.
-            <br>• В <b>Settings</b> выбери модель <code>gemini-4-argon</code>, включи <b>Auto-follow bl version (ВКЛ)</b> и <b>临时对话 / Временный чат (ВКЛ)</b>, а <b>服务端多轮续接 (ВЫКЛ)</b>.
-            <br>• Скопируй <b>API Key</b> в правом верхнем углу админки, вставь в поле <b>API Key</b> ниже и нажми «Сохранить».
-          </div>
-          <div style="margin-top:5px;"><b>Шаг 4.</b> Запусти <code>start_server.bat</code> в папке расширения для поиска отзывов по Отзовику и кэша SQLite.</div>
         </div>
       </div>
     </details>
@@ -578,7 +639,7 @@
       </summary>
       <div class="debug-body">
         <div class="debug-hint">
-          Записывает как работают все 8 модулей расширения (парсер, КБЖУ, виджет, каталог, защита корзины, ИИ). Скопируй этот отчёт и отправь любому ИИ для мгновенного поиска багов.
+          Записывает как работают все 8 модулей расширения (парсер, КБЖУ, виджет, каталог, защита корзины, Zero-Click ИИ). Скопируй этот отчёт и отправь любому ИИ для мгновенного поиска багов.
         </div>
 
         <div class="module-pills" id="diag-module-pills"></div>

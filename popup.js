@@ -6,7 +6,13 @@ const DEFAULT_SETTINGS = {
   backendUrl: 'http://127.0.0.1:8765',
   aiBaseUrl: 'http://localhost:8083/v1',
   aiApiKey: '',
-  aiModel: 'gemini-4-argon'
+  aiModel: 'gemini-4-argon',
+  preferBrowserGeminiTab: true,
+  geminiAccountIndex: 'auto',
+  preferredGeminiTabId: null,
+  autoRunAiOnProductPage: true,
+  autoOpenDrawerOnAi: true,
+  autoWarmupGeminiTab: true
 };
 
 const DOCKER_POWERSHELL_CMD =
@@ -24,6 +30,29 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(id);
+    return resp;
+  } catch (err) {
+    clearTimeout(id);
+    throw err;
+  }
+}
+
+function saveSettingsPatch(patch, callback) {
+  chrome.storage.local.get([SETTINGS_KEY], (res) => {
+    const current = { ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) };
+    const next = { ...current, ...patch };
+    chrome.storage.local.set({ [SETTINGS_KEY]: next }, () => {
+      if (callback) callback(next);
+    });
+  });
 }
 
 function loadReviews() {
@@ -100,8 +129,31 @@ function loadSettings() {
     document.getElementById('inp-ai-url').value = cfg.aiBaseUrl;
     document.getElementById('inp-ai-key').value = cfg.aiApiKey;
     document.getElementById('inp-ai-model').value = cfg.aiModel;
+    document.getElementById('chk-auto-run-ai').checked = cfg.autoRunAiOnProductPage !== false;
+    document.getElementById('chk-auto-open-drawer').checked = cfg.autoOpenDrawerOnAi !== false;
+    document.getElementById('chk-auto-warmup').checked = cfg.autoWarmupGeminiTab !== false;
   });
 }
+
+// Сохранение тумблеров Zero-Click мгновенно при переключении
+['chk-auto-run-ai', 'chk-auto-open-drawer', 'chk-auto-warmup'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('change', () => {
+      saveSettingsPatch({
+        autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
+        autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
+        autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked
+      });
+    });
+  }
+});
+
+document.getElementById('clear-ai-cache-btn').addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'LQS_CLEAR_AI_CACHE' }, () => {
+    refreshAiRadar();
+  });
+});
 
 // ==========================================================================
 // ЖИВОЙ РАДАР И АВТОПИЛОТ ПОДКЛЮЧЕНИЯ GEMINI
@@ -115,53 +167,124 @@ function setRadarPill(pillId, valId, isOk, isWarn, text, title = '') {
   val.textContent = text;
 }
 
+function populateAccountSelector(resp) {
+  const sel = document.getElementById('gemini-account-select');
+  if (!sel || !resp) return;
+  const cfg = resp.settings || {};
+  const openTabs = Array.isArray(resp.openGeminiTabs) ? resp.openGeminiTabs : [];
+
+  Array.from(sel.querySelectorAll('option[data-dynamic-tab="true"]')).forEach((o) => o.remove());
+
+  openTabs.forEach((t, idx) => {
+    const opt = document.createElement('option');
+    opt.value = `tab:${t.tabId}:${t.accountIndex}`;
+    opt.dataset.dynamicTab = 'true';
+    const labelEmail = t.email ? `${t.email} (/u/${t.accountIndex})` : `Вкладка /u/${t.accountIndex} (id:${t.tabId})`;
+    opt.textContent = `🟢 Открыта #${idx + 1}: ${labelEmail}`;
+    sel.insertBefore(opt, sel.firstChild);
+  });
+
+  openTabs.forEach((t) => {
+    if (t.email) {
+      const staticOpt = sel.querySelector(`option[value="${t.accountIndex}"]`);
+      if (staticOpt) {
+        staticOpt.textContent = `Аккаунт #${t.accountIndex} — ${t.email} (/u/${t.accountIndex})`;
+      }
+    }
+  });
+
+  if (cfg.preferredGeminiTabId) {
+    const dynMatch = sel.querySelector(`option[value^="tab:${cfg.preferredGeminiTabId}:"]`);
+    if (dynMatch) {
+      sel.value = dynMatch.value;
+      return;
+    }
+  }
+  const targetVal = String(cfg.geminiAccountIndex ?? 'auto');
+  if (sel.querySelector(`option[value="${targetVal}"]`)) {
+    sel.value = targetVal;
+  }
+}
+
+function getSelectedAccountChoice() {
+  const sel = document.getElementById('gemini-account-select');
+  const raw = sel ? sel.value : 'auto';
+  if (raw.startsWith('tab:')) {
+    const parts = raw.split(':');
+    return {
+      preferredTabId: Number(parts[1]) || null,
+      accountIndex: parts[2] || '0'
+    };
+  }
+  return {
+    preferredTabId: null,
+    accountIndex: raw
+  };
+}
+
+function applyRadarResponse(resp) {
+  if (!resp || !resp.ok) return;
+  populateAccountSelector(resp);
+
+  const cacheBadge = document.getElementById('ai-cache-badge');
+  if (cacheBadge) {
+    cacheBadge.textContent = `Кэш ИИ: ${resp.localAiCacheCount ?? 0} тов.`;
+  }
+
+  const tabFound = Boolean(resp.geminiTab && resp.geminiTab.found);
+  const accTag = resp.geminiTab && resp.geminiTab.email
+    ? resp.geminiTab.email.split('@')[0]
+    : (resp.geminiTab && resp.geminiTab.accountIndex !== null ? `/u/${resp.geminiTab.accountIndex}` : '');
+  setRadarPill(
+    'pill-gemini-tab',
+    'val-gemini-tab',
+    tabFound,
+    !tabFound,
+    tabFound ? `✅ ${accTag || 'Открыта'}` : '⚪ Авто-старт',
+    tabFound
+      ? `Подключена вкладка: ${resp.geminiTab.email || resp.geminiTab.url || 'gemini.google.com'}`
+      : 'Откроется автоматически при заходе в Лавку'
+  );
+
+  const cookiesOk = Boolean(resp.cookies && resp.cookies.ok);
+  setRadarPill(
+    'pill-cookies',
+    'val-cookies',
+    cookiesOk,
+    !cookiesOk,
+    cookiesOk ? `✅ Активны (${resp.cookies.count})` : '⚠️ Не вошёл',
+    cookiesOk ? 'Найдены куки авторизации Google' : 'Войди в аккаунт на gemini.google.com'
+  );
+
+  const bridgeOk = Boolean(resp.bridge && resp.bridge.ok);
+  setRadarPill(
+    'pill-bridge',
+    'val-bridge',
+    bridgeOk,
+    false,
+    bridgeOk ? '✅ Подключён' : '⚪ Выкл',
+    resp.bridge ? resp.bridge.msg : ''
+  );
+
+  const backendOk = Boolean(resp.backend && resp.backend.ok);
+  setRadarPill(
+    'pill-backend',
+    'val-backend',
+    backendOk,
+    false,
+    backendOk ? `✅ ОК (${resp.backend.cachedItems})` : '⚪ Выкл',
+    resp.backend ? resp.backend.msg : ''
+  );
+}
+
 function refreshAiRadar() {
   if (!chrome.runtime || !chrome.runtime.sendMessage) return;
   chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
     if (chrome.runtime.lastError || !resp || !resp.ok) {
-      setRadarPill('pill-gemini-tab', 'val-gemini-tab', false, true, 'Ошибка');
+      setRadarPill('pill-gemini-tab', 'val-gemini-tab', false, true, 'Обнови расш.');
       return;
     }
-
-    const tabFound = Boolean(resp.geminiTab && resp.geminiTab.found);
-    setRadarPill(
-      'pill-gemini-tab',
-      'val-gemini-tab',
-      tabFound,
-      !tabFound,
-      tabFound ? '✅ Открыта' : '⚪ Нет вкладки',
-      tabFound ? 'Найдена открытая вкладка gemini.google.com' : 'Нажми «Авто-подключение», чтобы открыть вкладку Gemini'
-    );
-
-    const cookiesOk = Boolean(resp.cookies && resp.cookies.ok);
-    setRadarPill(
-      'pill-cookies',
-      'val-cookies',
-      cookiesOk,
-      !cookiesOk,
-      cookiesOk ? `✅ Активны (${resp.cookies.count})` : '⚠️ Не вошёл',
-      cookiesOk ? 'Найдены куки авторизации Google (__Secure-1PSID)' : 'Войди в аккаунт на gemini.google.com'
-    );
-
-    const bridgeOk = Boolean(resp.bridge && resp.bridge.ok);
-    setRadarPill(
-      'pill-bridge',
-      'val-bridge',
-      bridgeOk,
-      false,
-      bridgeOk ? '✅ Подключён' : '⚪ Выкл',
-      resp.bridge ? resp.bridge.msg : ''
-    );
-
-    const backendOk = Boolean(resp.backend && resp.backend.ok);
-    setRadarPill(
-      'pill-backend',
-      'val-backend',
-      backendOk,
-      false,
-      backendOk ? `✅ ОК (${resp.backend.cachedItems})` : '⚪ Выкл',
-      resp.backend ? resp.backend.msg : ''
-    );
+    applyRadarResponse(resp);
   });
 }
 
@@ -169,32 +292,87 @@ document.getElementById('refresh-radar-btn').addEventListener('click', () => {
   refreshAiRadar();
 });
 
+document.getElementById('gemini-account-select').addEventListener('change', () => {
+  const choice = getSelectedAccountChoice();
+  const statusBox = document.getElementById('autopilot-status-box');
+  statusBox.style.display = 'block';
+  statusBox.textContent = '⏳ Переключаю целевой аккаунт Gemini...';
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SELECT_GEMINI_ACCOUNT',
+      accountIndex: choice.accountIndex,
+      preferredTabId: choice.preferredTabId,
+      openOrFocusTab: false
+    },
+    (resp) => {
+      if (resp && resp.status) {
+        applyRadarResponse(resp.status);
+        const tabInfo = resp.status.geminiTab;
+        statusBox.innerHTML = tabInfo && tabInfo.found
+          ? `✅ Выбран аккаунт: <b>${escapeHtml(tabInfo.email || ('/u/' + tabInfo.accountIndex))}</b>`
+          : `ℹ️ Выбран аккаунт <b>/u/${escapeHtml(choice.accountIndex)}</b>. Он автоматически откроется при анализе товара.`;
+      }
+    }
+  );
+});
+
+document.getElementById('open-selected-gemini-btn').addEventListener('click', () => {
+  const choice = getSelectedAccountChoice();
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_SELECT_GEMINI_ACCOUNT',
+      accountIndex: choice.accountIndex,
+      preferredTabId: choice.preferredTabId,
+      openOrFocusTab: true,
+      makeActive: true
+    },
+    (resp) => {
+      if (resp && resp.status) applyRadarResponse(resp.status);
+    }
+  );
+});
+
 document.getElementById('auto-connect-gemini-btn').addEventListener('click', () => {
   const btn = document.getElementById('auto-connect-gemini-btn');
   const statusBox = document.getElementById('autopilot-status-box');
-  btn.textContent = '⏳ Ищу вкладку Gemini и проверяю куки...';
+  const choice = getSelectedAccountChoice();
+  btn.textContent = '⏳ Прогреваю выбранный аккаунт Gemini...';
   statusBox.style.display = 'block';
-  statusBox.textContent = 'Проверяем авторизацию на gemini.google.com...';
+  statusBox.textContent = 'Проверяем выбранную вкладку gemini.google.com...';
 
-  chrome.runtime.sendMessage({ type: 'LQS_AUTO_CONNECT_GEMINI_TAB' }, (resp) => {
-    btn.textContent = '⚡ Авто-подключение через вкладку Gemini (1 клик)';
-    refreshAiRadar();
+  chrome.runtime.sendMessage(
+    {
+      type: 'LQS_AUTO_CONNECT_GEMINI_TAB',
+      accountIndex: choice.accountIndex,
+      preferredTabId: choice.preferredTabId
+    },
+    (resp) => {
+      btn.textContent = '⚡ Проверить / прогреть выбранный Gemini сейчас';
 
-    if (chrome.runtime.lastError || !resp) {
-      statusBox.textContent = '⚠️ Ошибка связи с фоновым воркером расширения. Перезагрузи расширение в chrome://extensions.';
-      return;
+      if (chrome.runtime.lastError || !resp) {
+        statusBox.innerHTML =
+          '⚠️ <b>Фоновый воркер ещё не перезапущен!</b> Открой <code>chrome://extensions</code>, нажми круговую стрелку <b>🔄 Обновить</b> на карточке Lavka Quality Shield и обнови страницу Лавки (F5).';
+        return;
+      }
+
+      if (resp.status) {
+        applyRadarResponse(resp.status);
+      } else {
+        refreshAiRadar();
+      }
+
+      if (resp.cookiesOk && resp.tabOpened) {
+        statusBox.innerHTML =
+          `✅ <b>Zero-Click Автопилот готов!</b> Подключён аккаунт <b>${escapeHtml(resp.email || ('/u/' + (resp.accountIndex ?? '0')))}</b> (${resp.wasAlreadyOpen ? 'вкладка уже открыта' : 'закреплена в фоне'}, куки: ${resp.cookiesCount} шт.).<br>` +
+          `👉 Просто открывай любые товары в Яндекс Лавке — ИИ-обзор запустится сам!`;
+      } else if (!resp.cookiesOk) {
+        statusBox.innerHTML =
+          '⚠️ Вкладка <code>gemini.google.com</code> открыта, но куки входа не найдены. Перейди на вкладку Gemini и один раз войди в аккаунт Google!';
+      } else {
+        statusBox.textContent = '⚠️ Не удалось открыть вкладку Gemini: ' + (resp.error || 'неизвестная ошибка');
+      }
     }
-
-    if (resp.cookiesOk && resp.tabOpened) {
-      statusBox.innerHTML =
-        '✅ <b>Готово! Автопилот подключён.</b> Вкладка <code>gemini.google.com</code> и куки найдены — теперь кнопка «🤖 ИИ-обзор» на странице товара Лавки работает автоматически прямо через браузер!';
-    } else if (!resp.cookiesOk) {
-      statusBox.innerHTML =
-        '⚠️ Я открыл вкладку <code>gemini.google.com</code>, но ты ещё не вошёл в Google-аккаунт. Войди в аккаунт во вкладке Gemini и нажми эту кнопку ещё раз!';
-    } else {
-      statusBox.textContent = '⚠️ Не удалось автоматически открыть вкладку Gemini.';
-    }
-  });
+  );
 });
 
 document.getElementById('copy-gemini-cookies-btn').addEventListener('click', () => {
@@ -205,7 +383,7 @@ document.getElementById('copy-gemini-cookies-btn').addEventListener('click', () 
   chrome.runtime.sendMessage({ type: 'LQS_GET_GEMINI_COOKIE_HEADER' }, async (resp) => {
     if (chrome.runtime.lastError || !resp || !resp.ok || !resp.headerString) {
       statusBox.innerHTML =
-        '⚠️ Куки Google не найдены! Сначала открой <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">gemini.google.com</a> и войди в аккаунт.';
+        '⚠️ Куки не найдены! Сначала открой <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer">gemini.google.com</a>, войди в аккаунт и обнови расширение в chrome://extensions.';
       return;
     }
     try {
@@ -273,15 +451,18 @@ document.getElementById('preset-ollama').addEventListener('click', () => {
 });
 
 document.getElementById('save-ai-btn').addEventListener('click', () => {
-  const cfg = {
+  const patch = {
     backendUrl: document.getElementById('inp-backend').value.trim() || DEFAULT_SETTINGS.backendUrl,
     aiBaseUrl: document.getElementById('inp-ai-url').value.trim() || DEFAULT_SETTINGS.aiBaseUrl,
     aiApiKey: document.getElementById('inp-ai-key').value.trim(),
-    aiModel: document.getElementById('inp-ai-model').value.trim() || DEFAULT_SETTINGS.aiModel
+    aiModel: document.getElementById('inp-ai-model').value.trim() || DEFAULT_SETTINGS.aiModel,
+    autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
+    autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
+    autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked
   };
-  chrome.storage.local.set({ [SETTINGS_KEY]: cfg }, () => {
+  saveSettingsPatch(patch, () => {
     const st = document.getElementById('ai-save-status');
-    st.textContent = '✅ Настройки ИИ сохранены!';
+    st.textContent = '✅ Настройки ИИ и Автопилота сохранены!';
     refreshAiRadar();
     setTimeout(() => { st.textContent = ''; }, 2000);
   });
@@ -327,7 +508,7 @@ document.getElementById('import-file').addEventListener('change', (e) => {
 });
 
 // ==========================================================================
-// БОРТОВОЙ ЖУРНАЛ ДЛЯ ИИ (ВНУТРИ СПОЙЛЕРА В НАСТРОЙКАХ)
+// БОРТОВОЙ ЖУРНАЛ ДЛЯ ИИ (КОРРЕКТНЫЙ ПРОМИС-СБОРЩИК БЕЗ ОБРЕЗАННЫХ ЛОГОВ)
 // ==========================================================================
 function renderModulePills(modules) {
   const container = document.getElementById('diag-module-pills');
@@ -360,14 +541,14 @@ async function fetchBackendLogsTail() {
       const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
       const backendUrl = cfg.backendUrl.replace(/\/$/, '');
       try {
-        const r = await fetch(`${backendUrl}/api/logs`);
+        const r = await fetchWithTimeout(`${backendUrl}/api/logs`, { method: 'GET' }, 1500);
         if (r.ok) {
           const data = await r.json();
           if (data && Array.isArray(data.logs) && data.logs.length > 0) {
             const formatted = [
               ``,
               `## 7. ЛОГ ЛОКАЛЬНОГО FASTAPI СЕРВЕРА (:8765 /api/logs)`,
-              ...data.logs.slice(0, 25).map((l) => `${l.ts} [${l.level}] ${l.msg}`)
+              ...data.logs.slice(0, 30).map((l) => `${l.ts} [${l.level}] ${l.msg}`)
             ].join('\n');
             resolve(formatted);
             return;
@@ -381,46 +562,86 @@ async function fetchBackendLogsTail() {
   });
 }
 
+async function fetchAiStatusForDiag() {
+  return new Promise((resolve) => {
+    if (!chrome.runtime || !chrome.runtime.sendMessage) {
+      resolve('');
+      return;
+    }
+    chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !resp.ok) {
+        resolve('\n## 8. СТАТУС АВТОПИЛОТА ИИ\n- Ошибка опроса фонового воркера (требуется обновление расширения в chrome://extensions).');
+        return;
+      }
+      const section = [
+        ``,
+        `## 8. СТАТУС ZERO-CLICK АВТОПИЛОТА ИИ И КУКИ (BACKGROUND WORKER)`,
+        `- **Вкладка Gemini (gemini.google.com)**: ${resp.geminiTab.found ? `✅ Открыта (tabId=${resp.geminiTab.tabId})` : '⚪ Не открыта'}`,
+        `- **Куки Google**: ${resp.cookies.ok ? `✅ Найдены (${resp.cookies.count} шт., __Secure-1PSID=${resp.cookies.hasSecure1PSID})` : '⚠️ Не найдены'}`,
+        `- **Кэш ИИ в браузере**: ${resp.localAiCacheCount ?? 0} товаров`,
+        `- **Локальный мост ИИ (:8083)**: ${resp.bridge.ok ? '✅ ' + resp.bridge.msg : '⚪ ' + resp.bridge.msg}`,
+        `- **FastAPI сервер (:8765)**: ${resp.backend.ok ? '✅ ' + resp.backend.msg : '⚪ ' + resp.backend.msg}`
+      ].join('\n');
+      resolve(section);
+    });
+  });
+}
+
 async function refreshDiagnosticsView() {
   const box = document.getElementById('diag-report-box');
   box.textContent = 'Собираю бортовой журнал со страницы Лавки и локального сервера...';
 
-  const backendTail = await fetchBackendLogsTail();
+  const [backendTail, aiStatusSection] = await Promise.all([
+    fetchBackendLogsTail(),
+    fetchAiStatusForDiag()
+  ]);
 
-  if (chrome.tabs && chrome.tabs.query) {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const activeTab = tabs && tabs[0];
-      if (activeTab && activeTab.id && activeTab.url && activeTab.url.includes('lavka.yandex.ru')) {
-        chrome.tabs.sendMessage(
-          activeTab.id,
-          { type: 'LQS_GET_DIAGNOSTICS', backendDiag: lastBackendPingSummary },
-          (resp) => {
-            if (!chrome.runtime.lastError && resp && resp.reportText) {
-              renderModulePills(resp.modules);
-              box.textContent = resp.reportText + (backendTail ? '\n' + backendTail : '');
-              return;
+  const extraTail = (backendTail || '') + (aiStatusSection || '');
+
+  return new Promise((resolve) => {
+    if (chrome.tabs && chrome.tabs.query) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const activeTab = tabs && tabs[0];
+        if (activeTab && activeTab.id && activeTab.url && activeTab.url.includes('lavka.yandex.ru')) {
+          chrome.tabs.sendMessage(
+            activeTab.id,
+            { type: 'LQS_GET_DIAGNOSTICS', backendDiag: lastBackendPingSummary },
+            (resp) => {
+              if (!chrome.runtime.lastError && resp && resp.reportText) {
+                renderModulePills(resp.modules);
+                box.textContent = resp.reportText + extraTail;
+                resolve(box.textContent);
+                return;
+              }
+              loadFallbackDiagFromStorage(box, extraTail).then(resolve);
             }
-            loadFallbackDiagFromStorage(box, backendTail);
-          }
-        );
-      } else {
-        loadFallbackDiagFromStorage(box, backendTail);
-      }
-    });
-  } else {
-    loadFallbackDiagFromStorage(box, backendTail);
-  }
+          );
+        } else {
+          loadFallbackDiagFromStorage(box, extraTail).then(resolve);
+        }
+      });
+    } else {
+      loadFallbackDiagFromStorage(box, extraTail).then(resolve);
+    }
+  });
 }
 
-function loadFallbackDiagFromStorage(box, backendTail = '') {
-  chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
-    const snap = res && res[FLIGHT_LOG_KEY];
-    if (snap && snap.reportText) {
-      renderModulePills(snap.modules);
-      box.textContent = snap.reportText + (backendTail ? '\n' + backendTail : '');
-    } else {
-      box.textContent = 'Открой любую страницу https://lavka.yandex.ru/, чтобы бортовой самописец записал работу функций.';
-    }
+function loadFallbackDiagFromStorage(box, extraTail = '') {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
+      const snap = res && res[FLIGHT_LOG_KEY];
+      if (snap && snap.reportText) {
+        renderModulePills(snap.modules);
+        box.textContent = snap.reportText + extraTail;
+      } else {
+        box.textContent =
+          '# 🛠️ LAVKA QUALITY SHIELD v2.3.0 — AI DIAGNOSTIC LOG\n' +
+          '⚠️ Активная вкладка Яндекс Лавки ещё не перезагружена после обновления расширения.\n' +
+          'Нажми F5 на странице https://lavka.yandex.ru/, чтобы бортовой самописец записал телеметрию DOM.\n' +
+          extraTail;
+      }
+      resolve(box.textContent);
+    });
   });
 }
 
@@ -433,30 +654,30 @@ document.getElementById('debug-spoiler').addEventListener('toggle', (e) => {
 document.getElementById('diag-ping-btn').addEventListener('click', async () => {
   const statusEl = document.getElementById('diag-ping-status');
   statusEl.style.display = 'block';
-  statusEl.textContent = '⏳ Проверяю связь со всеми источниками ИИ (Вкладка Gemini, :8765, :8083)...';
+  statusEl.textContent = '⏳ Проверяю связь со всеми источниками ИИ...';
 
-  chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, (resp) => {
+  chrome.runtime.sendMessage({ type: 'LQS_CHECK_AI_STATUS' }, async (resp) => {
     if (chrome.runtime.lastError || !resp || !resp.ok) {
-      statusEl.textContent = '⚠️ Ошибка проверки статуса через фоновый воркер.';
+      statusEl.textContent = '⚠️ Ошибка проверки статуса. Нажми Обновить в chrome://extensions.';
       return;
     }
     const lines = [
       `${resp.geminiTab.found ? '✅' : '⚪'} Вкладка Gemini: ${resp.geminiTab.found ? 'Открыта' : 'Не открыта'}`,
-      `${resp.cookies.ok ? '✅' : '⚠️'} Куки Google (__Secure-1PSID): ${resp.cookies.ok ? `Найдены (${resp.cookies.count} шт.)` : 'Не найдены'}`,
+      `${resp.cookies.ok ? '✅' : '⚠️'} Куки Google: ${resp.cookies.ok ? `Найдены (${resp.cookies.count} шт.)` : 'Не найдены'}`,
+      `💾 Кэш ИИ в браузере: ${resp.localAiCacheCount ?? 0} тов.`,
       `${resp.bridge.ok ? '✅' : '⚪'} Мост ИИ (:8083): ${resp.bridge.msg}`,
       `${resp.backend.ok ? '✅' : '⚪'} FastAPI парсер (:8765): ${resp.backend.msg}`
     ];
     lastBackendPingSummary = lines.join(' | ');
     statusEl.innerHTML = lines.map(escapeHtml).join('<br>');
-    refreshAiRadar();
-    refreshDiagnosticsView();
+    applyRadarResponse(resp);
+    await refreshDiagnosticsView();
   });
 });
 
 document.getElementById('diag-copy-btn').addEventListener('click', async () => {
   const btn = document.getElementById('diag-copy-btn');
-  await refreshDiagnosticsView();
-  const text = document.getElementById('diag-report-box').textContent;
+  const text = await refreshDiagnosticsView();
   try {
     await navigator.clipboard.writeText(text);
     btn.textContent = '✅ Лог для ИИ скопирован в буфер!';
@@ -467,8 +688,7 @@ document.getElementById('diag-copy-btn').addEventListener('click', async () => {
 });
 
 document.getElementById('diag-download-btn').addEventListener('click', async () => {
-  await refreshDiagnosticsView();
-  const text = document.getElementById('diag-report-box').textContent;
+  const text = await refreshDiagnosticsView();
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
