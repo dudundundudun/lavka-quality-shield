@@ -16,6 +16,7 @@ lavka-quality-shield/
 │   ├── tests/                  # Юнит-тесты парсера, общих утилит и security-guards (node --test)
 │   ├── background.js           # Service Worker (ref-counted keep-alive, circuit breaker, радар)
 │   ├── bg/accounts-vault.js    # Сейф аккаунтов, куки-сессии, 1-клик свитчер и автозаполнение
+│   ├── bg/gemini-tab.js        # Вкладка Gemini, куки Google, автопрогрев и очередь промптов
 │   ├── content.js              # UI-панель, аудит корзины, нативный парсер Магнита
 │   ├── popup.html / popup.js   # Попап: история цен, клонирование корзины, статус 16 сетей
 │   ├── styles.css
