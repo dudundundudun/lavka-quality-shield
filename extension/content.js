@@ -17,6 +17,13 @@
   'use strict';
 
   const { VERSION, STORAGE_KEYS } = globalThis.LQS_CONFIG;
+  const {
+    escapeHtml,
+    safeHttpUrl,
+    getSettings,
+    buildFullProductSearchQuery,
+    buildDirectStoreSearchLinks
+  } = globalThis.LQS_UTILS;
   const STORAGE_KEY = STORAGE_KEYS.REVIEWS;
   const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
   const FLIGHT_LOG_KEY = STORAGE_KEYS.FLIGHT_LOG;
@@ -62,22 +69,6 @@
   let isCartAccDropdownOpen = false;
   let cachedAccountsVault = null;
 
-  function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
-  function safeHttpUrl(url) {
-    if (typeof url !== 'string') return '';
-    const trimmed = url.trim();
-    return /^https?:\/\//i.test(trimmed) ? trimmed : '';
-  }
-
   function normalizeTitle(raw) {
     if (!raw) return '';
     return String(raw)
@@ -89,51 +80,6 @@
       .trim()
       .toLowerCase()
       .replace(/ё/g, 'е');
-  }
-
-  function buildFullProductSearchQuery(title, brand = '', amount = '') {
-    let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
-    q = q.replace(/(^|\s)(?:бзмж|стм)(?=\s|$)/gi, ' ');
-    q = q.replace(/\s+/g, ' ').trim();
-
-    if (brand) {
-      const cleanBrand = String(brand).replace(/[\u00ad\u200b\u00a0«»"']/g, ' ').trim();
-      if (cleanBrand && !q.toLowerCase().includes(cleanBrand.toLowerCase())) {
-        q = cleanBrand.toLowerCase() === 'из лавки' ? `${q} Из Лавки` : `${q} ${cleanBrand}`;
-      }
-    }
-
-    if (amount) {
-      const cleanAmt = String(amount).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
-      if (cleanAmt && !q.toLowerCase().includes(cleanAmt.toLowerCase())) {
-        q = `${q} ${cleanAmt}`;
-      }
-    }
-
-    return q.replace(/\s+/g, ' ').trim();
-  }
-
-  function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
-    const fullQuery = buildFullProductSearchQuery(rawTitle, brand, amount);
-    const enc = encodeURIComponent(fullQuery || rawTitle || '');
-    return [
-      { store: 'Магнит', category: 'У дома', url: `https://magnit.ru/search?term=${enc}`, query: fullQuery },
-      { store: 'Пятёрочка', category: 'У дома', url: `https://5ka.ru/catalog/?q=${enc}`, query: fullQuery },
-      { store: 'Перекрёсток', category: 'Супермаркет', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
-      { store: 'ВкусВилл', category: 'У дома', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
-      { store: 'Магнолия', category: 'У дома', url: `https://shop.mgnl.ru/catalog/?q=${enc}`, query: fullQuery },
-      { store: 'Дикси', category: 'У дома', url: `https://dixy.ru/catalog/?q=${enc}`, query: fullQuery },
-      { store: 'Чижик', category: 'Дискаунтер', url: `https://chizhik.club/search?query=${enc}`, query: fullQuery },
-      { store: 'Ашан', category: 'Гипермаркет', url: `https://www.auchan.ru/search/?q=${enc}`, query: fullQuery },
-      { store: 'МЕТРО', category: 'Гипермаркет', url: `https://online.metro-cc.ru/search?q=${enc}`, query: fullQuery },
-      { store: 'Глобус', category: 'Гипермаркет', url: `https://online.globus.ru/search/?q=${enc}`, query: fullQuery },
-      { store: 'Лента', category: 'Гипермаркет', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
-      { store: 'О’КЕЙ', category: 'Гипермаркет', url: `https://www.okeydostavka.ru/webapp/wcs/stores/servlet/SearchDisplay?searchTerm=${enc}`, query: fullQuery },
-      { store: 'Азбука Вкуса', category: 'Супермаркет', url: `https://av.ru/search/?text=${enc}`, query: fullQuery },
-      { store: 'Ozon Fresh', category: 'Маркетплейс', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
-      { store: 'Купер', category: 'Агрегатор', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery },
-      { store: 'Я.Маркет', category: 'Маркетплейс', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery }
-    ];
   }
 
   function findAiCacheInMemory(slug, title = '', imageKey = null) {
@@ -520,7 +466,10 @@
     };
 
     setTimeout(parseMagnitPageOffers, 800);
-    setInterval(parseMagnitPageOffers, 2800);
+    setInterval(() => {
+      if (document.hidden) return;
+      parseMagnitPageOffers();
+    }, 2800);
     return true;
   }
 
@@ -956,19 +905,6 @@
       } else {
         reviewsDbCache = {};
         resolve(reviewsDbCache);
-      }
-    });
-  }
-
-  async function getSettings() {
-    return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([SETTINGS_KEY], (res) => {
-          cachedSettings = { ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) };
-          resolve(cachedSettings);
-        });
-      } else {
-        resolve(DEFAULT_SETTINGS);
       }
     });
   }
@@ -3134,7 +3070,10 @@
     }
   }
 
-  setInterval(checkUrlTransition, 350);
+  setInterval(() => {
+    if (document.hidden) return;
+    checkUrlTransition();
+  }, 350);
 
   function runHydrationResyncWave(reason = 'init') {
     const slug = extractSlugFromUrl(window.location.href);

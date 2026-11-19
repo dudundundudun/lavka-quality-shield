@@ -61,6 +61,7 @@
       "js": [
         "shared/config.js",
         "shared/price-parser.js",
+        "shared/utils.js",
         "content.js"
       ],
       "run_at": "document_idle"

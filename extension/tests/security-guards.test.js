@@ -69,9 +69,13 @@ test('popup.html masks AI API key input and diagnostics/flight log redact secret
   assert.doesNotMatch(contentJs, /LQS_RECORDER\.record\([^)]*aiApiKey/);
 });
 
-test('content.js validates competitor href URLs with safeHttpUrl', () => {
+test('content.js validates competitor href URLs with safeHttpUrl from shared/utils.js', () => {
+  const utils = fs.readFileSync(path.join(extDir, 'shared', 'utils.js'), 'utf8');
+  const manifest = fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8');
   const content = fs.readFileSync(path.join(extDir, 'content.js'), 'utf8');
-  assert.match(content, /function safeHttpUrl\(url\)/);
+  assert.match(utils, /function safeHttpUrl\(url\)/);
+  assert.match(manifest, /"shared\/utils\.js",[\s\S]*?"content\.js"/);
+  assert.match(content, /safeHttpUrl[\s\S]*?=\s*globalThis\.LQS_UTILS/);
   assert.match(content, /escapeHtml\(safeHttpUrl\(o\.url\)\)/);
   assert.match(content, /escapeHtml\(safeRowUrl\)/);
 });

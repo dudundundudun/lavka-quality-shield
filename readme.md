@@ -11,8 +11,9 @@ lavka-quality-shield/
 │   ├── manifest.json
 │   ├── shared/config.js        # Единый источник настроек, ключей storage и заголовков
 │   ├── shared/price-parser.js  # Чистый парсер ₽/кг, ₽/л, ₽/шт и стоимости белка
+│   ├── shared/utils.js         # Общие утилиты (escapeHtml, safeHttpUrl, fetchWithTimeout, настройки, поиск)
 │   ├── data/seed-magnit.json   # Внешние seed-данные Магнита (fallback)
-│   ├── tests/price-parser.test.js # Юнит-тесты парсера цен (node --test)
+│   ├── tests/                  # Юнит-тесты парсера, общих утилит и security-guards (node --test)
 │   ├── background.js           # Service Worker (ref-counted keep-alive, circuit breaker, радар)
 │   ├── content.js              # UI-панель, аудит корзины, нативный парсер Магнита
 │   ├── popup.html / popup.js   # Попап: история цен, клонирование корзины, статус 16 сетей

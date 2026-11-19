@@ -1,4 +1,5 @@
 const { STORAGE_KEYS } = globalThis.LQS_CONFIG;
+const { escapeHtml, fetchWithTimeout, saveSettingsPatch } = globalThis.LQS_UTILS;
 const STORAGE_KEY = STORAGE_KEYS.REVIEWS;
 const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
 const FLIGHT_LOG_KEY = STORAGE_KEYS.FLIGHT_LOG;
@@ -25,39 +26,6 @@ let currentPriceFilter = 'all';
 let priceSearchQuery = '';
 let lastBackendPingSummary = null;
 let vaultAccountsCache = [];
-
-function escapeHtml(str) {
-  if (str === null || str === undefined) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return resp;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
-  }
-}
-
-function saveSettingsPatch(patch, callback) {
-  chrome.storage.local.get([SETTINGS_KEY], (res) => {
-    const current = { ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) };
-    const next = { ...current, ...patch };
-    chrome.storage.local.set({ [SETTINGS_KEY]: next }, () => {
-      if (callback) callback(next);
-    });
-  });
-}
 
 // ==========================================================================
 // ВКЛАДКА 1: ОТЗЫВЫ

@@ -20,7 +20,15 @@
 
 'use strict';
 
-importScripts('shared/config.js', 'shared/price-parser.js');
+importScripts('shared/config.js', 'shared/price-parser.js', 'shared/utils.js');
+
+const {
+  fetchWithTimeout,
+  getSettings,
+  saveSettingsPatch,
+  buildFullProductSearchQuery,
+  buildDirectStoreSearchLinks
+} = globalThis.LQS_UTILS;
 
 const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER, TOKEN_HEADER_NAME = 'X-LQS-Token' } = globalThis.LQS_CONFIG;
 const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
@@ -305,22 +313,6 @@ function startSwKeepAlive() {
   };
 }
 
-async function getSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([SETTINGS_KEY], (res) => {
-      resolve({ ...DEFAULT_SETTINGS, ...(res && res[SETTINGS_KEY] ? res[SETTINGS_KEY] : {}) });
-    });
-  });
-}
-
-async function saveSettingsPatch(patch) {
-  const current = await getSettings();
-  const next = { ...current, ...patch };
-  return new Promise((resolve) => {
-    chrome.storage.local.set({ [SETTINGS_KEY]: next }, () => resolve(next));
-  });
-}
-
 async function getStoredBackendToken() {
   return new Promise((resolve) => {
     chrome.storage.local.get([BACKEND_TOKEN_KEY], (res) => {
@@ -449,19 +441,6 @@ async function fetchBackendAccountSecrets(backendUrl, accountId) {
     backendOfflineUntilTs = Date.now() + 10000;
   }
   return null;
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return resp;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
-  }
 }
 
 function normalizeCacheKey(slug, title) {
@@ -608,34 +587,6 @@ function parseVolumeOrWeightGrams(rawStr) {
     if (val > 0) return val * mult;
   }
   return null;
-}
-
-function buildFullProductSearchQuery(title, brand = '', amount = '') {
-  let q = String(title || '').replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ');
-  q = q.replace(/(^|\s)(?:бзмж|стм)(?=\s|$)/gi, ' ');
-  q = q.replace(/\s+/g, ' ').trim();
-
-  if (brand) {
-    const cleanBrand = String(brand).replace(/[\u00ad\u200b\u00a0«»"']/g, ' ').trim();
-    if (cleanBrand && !q.toLowerCase().includes(cleanBrand.toLowerCase())) {
-      q = cleanBrand.toLowerCase() === 'из лавки' ? `${q} Из Лавки` : `${q} ${cleanBrand}`;
-    }
-  }
-
-  if (amount) {
-    const cleanAmt = String(amount).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
-    if (cleanAmt) {
-      const targetGrams = parseVolumeOrWeightGrams(cleanAmt);
-      const queryGrams = parseVolumeOrWeightGrams(q);
-      if (!queryGrams && !q.toLowerCase().includes(cleanAmt.toLowerCase())) {
-        q = `${q} ${cleanAmt}`;
-      } else if (targetGrams && queryGrams && Math.abs(targetGrams - queryGrams) > 5) {
-        q = `${q} ${cleanAmt}`;
-      }
-    }
-  }
-
-  return q.replace(/\s+/g, ' ').trim();
 }
 
 function normalizeSynonymTokens(text) {
@@ -2061,32 +2012,6 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
   }
 
   return summary;
-}
-
-function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
-  const fullQuery = buildFullProductSearchQuery(rawTitle, brand, amount);
-  const enc = encodeURIComponent(fullQuery || rawTitle || '');
-  return [
-    // У дома и экспресс
-    { store: 'Магнит', category: 'У дома', url: `https://magnit.ru/search?term=${enc}`, query: fullQuery },
-    { store: 'Пятёрочка', category: 'У дома', url: `https://5ka.ru/catalog/?q=${enc}`, query: fullQuery },
-    { store: 'Перекрёсток', category: 'Супермаркет', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
-    { store: 'ВкусВилл', category: 'У дома', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
-    { store: 'Магнолия', category: 'У дома', url: `https://shop.mgnl.ru/catalog/?q=${enc}`, query: fullQuery },
-    { store: 'Дикси', category: 'У дома', url: `https://dixy.ru/catalog/?q=${enc}`, query: fullQuery },
-    { store: 'Чижик', category: 'Дискаунтер', url: `https://chizhik.club/search?query=${enc}`, query: fullQuery },
-    // Гипермаркеты
-    { store: 'Ашан', category: 'Гипермаркет', url: `https://www.auchan.ru/search/?q=${enc}`, query: fullQuery },
-    { store: 'МЕТРО', category: 'Гипермаркет', url: `https://online.metro-cc.ru/search?q=${enc}`, query: fullQuery },
-    { store: 'Глобус', category: 'Гипермаркет', url: `https://online.globus.ru/search/?q=${enc}`, query: fullQuery },
-    { store: 'Лента', category: 'Гипермаркет', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
-    { store: 'О’КЕЙ', category: 'Гипермаркет', url: `https://www.okeydostavka.ru/webapp/wcs/stores/servlet/SearchDisplay?searchTerm=${enc}`, query: fullQuery },
-    { store: 'Азбука Вкуса', category: 'Супермаркет', url: `https://av.ru/search/?text=${enc}`, query: fullQuery },
-    // Маркетплейсы и агрегаторы
-    { store: 'Ozon Fresh', category: 'Маркетплейс', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
-    { store: 'Купер', category: 'Агрегатор', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery },
-    { store: 'Я.Маркет', category: 'Маркетплейс', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery }
-  ];
 }
 
 async function getExternalStoreOffersList() {
