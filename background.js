@@ -1,16 +1,21 @@
 /**
- * Lavka Quality Shield v2.5.2 — Background Service Worker
- * Что нового и исправлено в v2.5.2:
- * 1. CANONICAL PRODUCT CARD AUTHORITY (Название и характеристики ТОЛЬКО из оригинальной карточки товара `/good/<slug>`):
- *    - В корзине (`/cart`) Яндекс Лавка показывает урезанные названия (например, пишет «Напиток Cola Добрый» вместо
- *      «Напиток Cola «Добрый» газированный без сахара»).
- *    - Теперь при любом аудите корзины и зондировании цены расширение парсит HTML оригинальной карточки товара
- *      `https://lavka.yandex.ru/good/<slug>` (`h1[data-testid="product-title"]`, `span[data-testid="product-amount"]`,
- *      JSON-LD `Product` и `imageKey`) и берёт ПОЛНОЕ название и характеристики СТРОГО из карточки товара!
- *    - Запрещена перезапись полного названия из карточки товара сокращённым названием из корзины.
- *    - Добавлена сквозная связка по `imageKey` (`get-grocery-goods/...`), которая на 100% совпадает в каталоге, корзине и карточке.
- * 2. Точный фильтр модификаторов («без сахара» / «Zero», вкус, объём «1,5 л») для всех ссылок и цен конкурентов.
- * 3. Защита от `message channel closed before a response was received` (Keep-Alive + Push `LQS_AI_VERDICT_READY`).
+ * Lavka Quality Shield v2.6.0 — Background Service Worker
+ * Что нового и исправлено в v2.6.0:
+ * 1. МАТРИЦА ЦЕН 16 КРУПНЕЙШИХ МАГАЗИНОВ + НАТИВНЫЙ ПАРСЕР МАГНИТА (`magnit.ru` по Site Recon):
+ *    - Подключены 16 торговых сетей: Магнит, Пятёрочка, Перекрёсток, ВкусВилл, Магнолия, Дикси, Чижик,
+ *      Ашан, МЕТРО, Глобус, Лента, О’КЕЙ, Азбука Вкуса, Самокат, Ozon Fresh, Купер / Яндекс Маркет.
+ *    - Внедрена база внешних цен сетей (`lqs_ext_store_prices_v1`) + нативный сборщик цен с `magnit.ru`
+ *      (`article.unit-catalog-product-preview`, `a.pl-hover-base`, `/ecom/cart`, `#__NUXT_DATA__`, `/webgate/v2/goods/...`)
+ *      и живой парсер карточек ВкусВилл (`vkusvill.ru/search/?q=...`) + DuckDuckGo Multi-Store Search.
+ * 2. НАДЁЖНОЕ ЧТЕНИЕ ОТВЕТА ИЗ ФОНОВОЙ ВКЛАДКИ GEMINI (`executePromptInsideGeminiTab` v2.6.0):
+ *    - Устранён баг, когда ИИ-обзор уже виден во вкладке Gemini, но не появляется на странице товара Лавки.
+ *    - Поллинг вынесен из засыпающей фоновой вкладки в Service Worker (короткими импульсами по 800 мс),
+ *      а чтение текста переведено с зависящего от вьюпорта `.innerText` на layout-независимый DOM-обходчик
+ *      (`extractCleanResponseText`), который читает ответ даже из неактивной/свёрнутой вкладки!
+ *    - Добавлен мгновенный перехват уже готового ответа со страницы Gemini (за 0.1 сек без повторного ввода промпта!).
+ * 3. ИСПРАВЛЕНО СВОРАЧИВАНИЕ РАЗВЁРНУТОГО ОПИСАНИЯ (СПОЙЛЕРА) НА СТРАНИЦЕ ТОВАРА:
+ *    - Ручное закрытие спойлера (`▴ Скрыть`) теперь запоминается в `userManualDrawerStateBySlug` и никогда
+ *      самопроизвольно не раскрывается обратно при фоновых синхронизациях DOM.
  */
 
 'use strict';
@@ -18,6 +23,7 @@
 const SETTINGS_KEY = 'lqs_settings_v2';
 const AI_CACHE_KEY = 'lqs_ai_cache_v1';
 const PRICE_DB_KEY = 'lqs_price_db_v1';
+const EXT_STORE_DB_KEY = 'lqs_ext_store_prices_v1';
 const SAVED_CARTS_KEY = 'lqs_saved_carts_v1';
 const CART_LOCKS_KEY = 'lqs_cart_locks_v1';
 const ACCOUNTS_VAULT_KEY = 'lqs_accounts_vault_v1';
@@ -87,17 +93,103 @@ const REVIEW_SEARCH_SITES = [
   { domain: 'irecommend.ru', name: 'IRecommend' },
   { domain: 'rskrf.ru', name: 'Роскачество' },
   { domain: 'roscontrol.com', name: 'Росконтроль' },
-  { domain: 'vkusvill.ru', name: 'ВкусВилл' },
+  { domain: 'magnit.ru', name: 'Магнит' },
+  { domain: '5ka.ru', name: 'Пятёрочка' },
   { domain: 'perekrestok.ru', name: 'Перекрёсток' },
   { domain: 'vprok.ru', name: 'Перекрёсток Впрок' },
-  { domain: 'av.ru', name: 'Азбука Вкуса' },
+  { domain: 'vkusvill.ru', name: 'ВкусВилл' },
+  { domain: 'auchan.ru', name: 'Ашан' },
+  { domain: 'metro-cc.ru', name: 'МЕТРО' },
+  { domain: 'globus.ru', name: 'Глобус' },
   { domain: 'lenta.com', name: 'Лента' },
+  { domain: 'mgnl.ru', name: 'Магнолия' },
+  { domain: 'dixy.ru', name: 'Дикси' },
+  { domain: 'chizhik.club', name: 'Чижик' },
+  { domain: 'okeydostavka.ru', name: 'О’КЕЙ' },
+  { domain: 'av.ru', name: 'Азбука Вкуса' },
+  { domain: 'samokat.ru', name: 'Самокат' },
   { domain: 'ozon.ru', name: 'Ozon' },
   { domain: 'market.yandex.ru', name: 'Яндекс Маркет' },
   { domain: 'wildberries.ru', name: 'Wildberries' },
   { domain: 'kuper.ru', name: 'Купер' },
   { domain: 'sbermarket.ru', name: 'СберМаркет' },
   { domain: 'eda.yandex.ru', name: 'Яндекс Лавка / Еда' }
+];
+
+// Эталонные цены и прямые карточки из технического дампа Магнита (site-recon-magnit.ru)
+const MAGNIT_RECON_SEED_OFFERS = [
+  {
+    goodId: '1000475610',
+    store: 'Магнит',
+    title: 'Напиток Добрый Cola без сахара 1,5 л',
+    amount: '1,5 л',
+    price: 144,
+    oldPrice: null,
+    url: 'https://magnit.ru/product/1000475610-dobryy_napitok_kola_b_sakh_b_a_s_g_1_5l_pl_but_multon?shopCode=411717&shopType=express'
+  },
+  {
+    goodId: '1000135692',
+    store: 'Магнит',
+    title: 'Мороженое Магнат Шоколадный трюфель эскимо 67 г',
+    amount: '67 г',
+    price: 139,
+    oldPrice: 190,
+    url: 'https://magnit.ru/product/1000135692-morozhenoe_magnat_shokolad_i_tryufel_eskimo_72g?shopCode=411717&shopType=express'
+  },
+  {
+    goodId: '1000484117',
+    store: 'Магнит',
+    title: 'Газированный напиток Кола Evervess 1 л',
+    amount: '1 л',
+    price: 100,
+    oldPrice: null,
+    url: 'https://magnit.ru/product/1000484117-gazirovannyy_napitok_kola_evervess_1l'
+  },
+  {
+    goodId: '1000485813',
+    store: 'Магнит',
+    title: 'Сосиски Велком с сыром 450 г',
+    amount: '450 г',
+    price: 240,
+    oldPrice: 359,
+    url: 'https://magnit.ru/product/1000485813-sosiski_velkom_s_syrom_450g'
+  },
+  {
+    goodId: '2400008824',
+    store: 'Магнит',
+    title: 'Лапша Доширак Квисти со вкусом курицы 70 г',
+    amount: '70 г',
+    price: 31,
+    oldPrice: null,
+    url: 'https://magnit.ru/product/2400008824-lapsha_doshirak_kvisti_so_vkusom_kuritsy_70g'
+  },
+  {
+    goodId: '1000438044',
+    store: 'Магнит',
+    title: 'Энергетический напиток Adrenaline Rush Silver Energy Zero Sugar без сахара 449 мл',
+    amount: '449 мл',
+    price: 117,
+    oldPrice: null,
+    url: 'https://magnit.ru/product/1000438044-energeticheskiy_napitok_adrenaline_rush_silver_energy_zero_sugar_449ml'
+  },
+  {
+    goodId: '1000310698',
+    store: 'Магнит',
+    title: 'Мороженое Maxiduo Страчателла брикет 92 г',
+    amount: '92 г',
+    price: 99,
+    oldPrice: 120,
+    url: 'https://magnit.ru/product/1000310698-morozhenoe_maxiduo_strachatella_briket_92g'
+  },
+  {
+    goodId: '1000320440',
+    store: 'Магнит',
+    title: 'Мороженое Milka Эскимо Ванильное с молочным шоколадом 62 г',
+    amount: '62 г',
+    price: 129,
+    oldPrice: 150,
+    url: 'https://magnit.ru/product/1000320440-morozhenoe_milka_eskimo_vanilnoe_s_molochnym_shokoladom_62g'
+  }
 ];
 
 let geminiTabMutex = Promise.resolve();
@@ -1636,16 +1728,45 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
     const authoritativeTitle = summary.title || fullCardTitle || '';
     const authoritativeAmount = summary.amount || amount || '';
     const authoritativeBrand = summary.brand || brand || '';
-    summary.competitorOffers = sanitizeCompetitorOffersForProduct(
-      summary.competitorOffers || [],
+    const extList = await getExternalStoreOffersList();
+    const matchedExt = findMatchingExternalStoreOffersFromList(extList, authoritativeTitle, authoritativeAmount);
+
+    let combinedOffers = mergeUniqueStoreOffers(summary.competitorOffers || [], matchedExt);
+    combinedOffers = sanitizeCompetitorOffersForProduct(
+      combinedOffers,
       authoritativeTitle,
       authoritativeAmount
     );
+
+    // Если в базе ещё нет цен других магазинов для этого товара, запускаем прямой экспресс-парсинг ВкусВилла и мульти-поиска сетей
+    if (combinedOffers.filter((o) => o.price && o.price > 0).length < 2 && authoritativeTitle) {
+      try {
+        const directStoreOffers = await probeDirectRetailStoresForProduct(authoritativeTitle, authoritativeBrand, authoritativeAmount, currentPrice);
+        if (directStoreOffers.length > 0) {
+          combinedOffers = mergeUniqueStoreOffers(combinedOffers, directStoreOffers);
+          combinedOffers = sanitizeCompetitorOffersForProduct(combinedOffers, authoritativeTitle, authoritativeAmount);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    summary.competitorOffers = combinedOffers;
+    const priced = combinedOffers.filter((o) => o.price && o.price > 0);
+    if (priced.length > 0) {
+      summary.competitorMinPrice = Math.min(...priced.map((o) => o.price));
+      summary.competitorSummary = priced.slice(0, 4).map((o) => `${o.store}: ${o.price} ₽`).join(', ');
+    }
     summary.storeSearchLinks = buildDirectStoreSearchLinks(
       authoritativeTitle,
       authoritativeAmount,
       authoritativeBrand
     );
+
+    // Сохраняем обогащённую сводку в локальную БД
+    const latestDb = await getLocalPriceDb();
+    latestDb[cleanSlug] = summary;
+    chrome.storage.local.set({ [PRICE_DB_KEY]: latestDb });
   }
 
   return summary;
@@ -1655,13 +1776,137 @@ function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
   const fullQuery = buildFullProductSearchQuery(rawTitle, brand, amount);
   const enc = encodeURIComponent(fullQuery || rawTitle || '');
   return [
-    { store: 'Ozon', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
-    { store: 'Перекрёсток', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
-    { store: 'ВкусВилл', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
-    { store: 'Я.Маркет', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery },
-    { store: 'Лента', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
-    { store: 'Купер', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery }
+    // У дома и экспресс
+    { store: 'Магнит', category: 'У дома', url: `https://magnit.ru/search?term=${enc}`, query: fullQuery },
+    { store: 'Пятёрочка', category: 'У дома', url: `https://5ka.ru/catalog/?q=${enc}`, query: fullQuery },
+    { store: 'Перекрёсток', category: 'Супермаркет', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
+    { store: 'ВкусВилл', category: 'У дома', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
+    { store: 'Магнолия', category: 'У дома', url: `https://shop.mgnl.ru/catalog/?q=${enc}`, query: fullQuery },
+    { store: 'Дикси', category: 'У дома', url: `https://dixy.ru/catalog/?q=${enc}`, query: fullQuery },
+    { store: 'Чижик', category: 'Дискаунтер', url: `https://chizhik.club/search?query=${enc}`, query: fullQuery },
+    // Гипермаркеты
+    { store: 'Ашан', category: 'Гипермаркет', url: `https://www.auchan.ru/search/?q=${enc}`, query: fullQuery },
+    { store: 'МЕТРО', category: 'Гипермаркет', url: `https://online.metro-cc.ru/search?q=${enc}`, query: fullQuery },
+    { store: 'Глобус', category: 'Гипермаркет', url: `https://online.globus.ru/search/?q=${enc}`, query: fullQuery },
+    { store: 'Лента', category: 'Гипермаркет', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
+    { store: 'О’КЕЙ', category: 'Гипермаркет', url: `https://www.okeydostavka.ru/webapp/wcs/stores/servlet/SearchDisplay?searchTerm=${enc}`, query: fullQuery },
+    { store: 'Азбука Вкуса', category: 'Супермаркет', url: `https://av.ru/search/?text=${enc}`, query: fullQuery },
+    // Маркетплейсы и агрегаторы
+    { store: 'Ozon Fresh', category: 'Маркетплейс', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
+    { store: 'Купер', category: 'Агрегатор', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery },
+    { store: 'Я.Маркет', category: 'Маркетплейс', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery }
   ];
+}
+
+async function getExternalStoreOffersList() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([EXT_STORE_DB_KEY], (res) => {
+      const saved = res && Array.isArray(res[EXT_STORE_DB_KEY]) ? res[EXT_STORE_DB_KEY] : [];
+      const combined = [...saved];
+      const seenUrls = new Set(combined.map((o) => o.url));
+      for (const seed of MAGNIT_RECON_SEED_OFFERS) {
+        if (!seenUrls.has(seed.url)) {
+          combined.push(seed);
+          seenUrls.add(seed.url);
+        }
+      }
+      resolve(combined);
+    });
+  });
+}
+
+async function recordExternalStoreOffers(storeName, offers = []) {
+  if (!Array.isArray(offers) || offers.length === 0) return { savedCount: 0 };
+  const current = await getExternalStoreOffersList();
+  const byKey = new Map();
+  for (const item of current) {
+    if (!item || !item.title || !item.price) continue;
+    const k = `${item.store || storeName}|${item.url || normalizeTitleKey(item.title)}`;
+    byKey.set(k, item);
+  }
+  const nowIso = new Date().toISOString();
+  let addedOrUpdated = 0;
+  for (const raw of offers) {
+    if (!raw || !raw.title || !raw.price || Number(raw.price) <= 0) continue;
+    const cleanOffer = {
+      store: raw.store || storeName || 'Магнит',
+      goodId: raw.goodId || null,
+      title: String(raw.title).trim(),
+      amount: raw.amount || '',
+      price: Math.round(Number(raw.price)),
+      oldPrice: raw.oldPrice ? Math.round(Number(raw.oldPrice)) : null,
+      url: raw.url || `https://magnit.ru/search?term=${encodeURIComponent(raw.title)}`,
+      updatedAt: nowIso
+    };
+    const k = `${cleanOffer.store}|${cleanOffer.url || normalizeTitleKey(cleanOffer.title)}`;
+    byKey.set(k, cleanOffer);
+    addedOrUpdated += 1;
+  }
+  const finalArr = Array.from(byKey.values()).slice(-800);
+  await new Promise((resolve) => {
+    chrome.storage.local.set({ [EXT_STORE_DB_KEY]: finalArr }, resolve);
+  });
+
+  // Сразу обогащаем совпадающие товары в базе цен Лавки (lqs_price_db_v1)
+  const priceDb = await getLocalPriceDb();
+  let dbChanged = false;
+  for (const entry of Object.values(priceDb)) {
+    if (!entry || !entry.title) continue;
+    const matchedOffers = findMatchingExternalStoreOffersFromList(finalArr, entry.title, entry.amount || '');
+    if (matchedOffers.length > 0) {
+      const mergedOffers = mergeUniqueStoreOffers(entry.competitorOffers || [], matchedOffers);
+      entry.competitorOffers = sanitizeCompetitorOffersForProduct(mergedOffers, entry.title, entry.amount || '');
+      const priced = entry.competitorOffers.filter((o) => o.price && o.price > 0);
+      if (priced.length > 0) {
+        entry.competitorMinPrice = Math.min(...priced.map((o) => o.price));
+        entry.competitorSummary = priced.slice(0, 4).map((o) => `${o.store}: ${o.price} ₽`).join(', ');
+      }
+      dbChanged = true;
+    }
+  }
+  if (dbChanged) {
+    await new Promise((resolve) => chrome.storage.local.set({ [PRICE_DB_KEY]: priceDb }, resolve));
+  }
+  return { ok: true, savedCount: addedOrUpdated, totalExternalOffers: finalArr.length };
+}
+
+function findMatchingExternalStoreOffersFromList(extList, productTitle, productAmount = '') {
+  if (!productTitle || !Array.isArray(extList)) return [];
+  const matches = [];
+  for (const ext of extList) {
+    if (!ext || !ext.title || !ext.price) continue;
+    const check = isSearchResultMatchingProduct(ext.title, ext.amount || '', productTitle, productAmount);
+    if (check.isSameProduct && check.isSameVolume) {
+      matches.push({
+        store: ext.store || 'Магнит',
+        price: Math.round(Number(ext.price)),
+        oldPrice: ext.oldPrice ? Math.round(Number(ext.oldPrice)) : null,
+        url: ext.url,
+        title: ext.title,
+        isVerifiedStoreOffer: true
+      });
+    }
+  }
+  return matches;
+}
+
+function mergeUniqueStoreOffers(existingOffers = [], newOffers = []) {
+  const map = new Map();
+  for (const o of [...newOffers, ...existingOffers]) {
+    if (!o || !o.store) continue;
+    const key = `${o.store}|${o.price || 'noprice'}`;
+    if (!map.has(key)) {
+      map.set(key, o);
+    }
+  }
+  const arr = Array.from(map.values());
+  arr.sort((a, b) => {
+    if (a.price && b.price) return a.price - b.price;
+    if (a.price) return -1;
+    if (b.price) return 1;
+    return 0;
+  });
+  return arr;
 }
 
 /**
@@ -1734,8 +1979,10 @@ async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetwo
       const aiEntry = await getLocalAiCacheEntry(slug, fullAuthoritativeTitle, cardImageKey);
       const guestPrice = pEntry?.guestPrice || null;
 
+      const extStoreList = await getExternalStoreOffersList();
+      const matchedExtOffers = findMatchingExternalStoreOffersFromList(extStoreList, fullAuthoritativeTitle, cardAmount);
       let compOffers = sanitizeCompetitorOffersForProduct(
-        pEntry?.competitorOffers || [],
+        mergeUniqueStoreOffers(pEntry?.competitorOffers || [], matchedExtOffers),
         fullAuthoritativeTitle,
         cardAmount
       );
@@ -2672,6 +2919,79 @@ async function parseDdgHtmlSearch(query) {
   }
 }
 
+async function probeVkusVillSearchDirect(fullQuery, productTitle, productAmount = '', lavkaPrice = null) {
+  if (!fullQuery) return [];
+  try {
+    const url = `https://vkusvill.ru/search/?q=${encodeURIComponent(fullQuery)}`;
+    const resp = await fetchWithTimeout(
+      url,
+      {
+        method: 'GET',
+        credentials: 'omit',
+        headers: { 'Accept-Language': 'ru-RU,ru;q=0.9' }
+      },
+      3200
+    );
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const offers = [];
+    const cardChunks = html.split(/class="[^"]*ProductCard[^"]*"/i).slice(1, 8);
+    for (const chunk of cardChunks) {
+      const titleMatch =
+        chunk.match(/class="[^"]*ProductCard__link[^"]*"[^>]*title="([^"]+)"/i) ||
+        chunk.match(/class="[^"]*ProductCard__link[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
+      const hrefMatch = chunk.match(/href="(\/goods\/[^"]+)"/i);
+      const priceMatch =
+        chunk.match(/class="[^"]*Price--label[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ||
+        chunk.match(/(\d{2,4})\s*(?:₽|руб)/i);
+      if (!titleMatch || !priceMatch) continue;
+      const itemTitle = decodeHtmlEntities(titleMatch[1]);
+      const priceVal = parseFloat(decodeHtmlEntities(priceMatch[1]).replace(/[^\d.,]/g, '').replace(',', '.'));
+      if (!priceVal || priceVal < 15 || priceVal > 9500) continue;
+      if (lavkaPrice && (priceVal < lavkaPrice * 0.35 || priceVal > lavkaPrice * 3.0)) continue;
+
+      const weightMatch = chunk.match(/class="[^"]*ProductCard__weight[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+      const weightStr = weightMatch ? decodeHtmlEntities(weightMatch[1]) : '';
+      const check = isSearchResultMatchingProduct(`${itemTitle} ${weightStr}`, '', productTitle, productAmount);
+      if (check.isSameProduct && check.isSameVolume) {
+        offers.push({
+          store: 'ВкусВилл',
+          price: Math.round(priceVal),
+          url: hrefMatch ? `https://vkusvill.ru${hrefMatch[1]}` : url,
+          title: `${itemTitle} ${weightStr}`.trim(),
+          isVerifiedStoreOffer: true
+        });
+      }
+    }
+    return offers;
+  } catch {
+    return [];
+  }
+}
+
+async function probeDirectRetailStoresForProduct(productTitle, brand = '', amount = '', lavkaPrice = null) {
+  const fullQ = buildFullProductSearchQuery(productTitle, brand, amount);
+  if (!fullQ) return [];
+
+  const extList = await getExternalStoreOffersList();
+  const matchedSeedOrHarvested = findMatchingExternalStoreOffersFromList(extList, fullQ, amount);
+
+  const vvOffers = await probeVkusVillSearchDirect(fullQ, fullQ, amount, lavkaPrice);
+
+  let strictQ = fullQ;
+  if (/без\s+сахара/i.test(strictQ)) {
+    strictQ = strictQ.replace(/без\s+сахара/i, '"без сахара"');
+  }
+  const qStores = `${strictQ} цена ₽ (site:magnit.ru OR site:perekrestok.ru OR site:5ka.ru OR site:lenta.com OR site:auchan.ru OR site:online.metro-cc.ru OR site:globus.ru OR site:ozon.ru OR site:kuper.ru OR site:vprok.ru)`;
+  const ddgHits = await parseDdgHtmlSearch(qStores);
+  const extractedDdg = extractCompetitorPricesFromSources(ddgHits, lavkaPrice, fullQ, amount);
+
+  return mergeUniqueStoreOffers(
+    [...matchedSeedOrHarvested, ...vvOffers],
+    extractedDdg.competitorOffers || []
+  );
+}
+
 async function searchWebReviewsDirect(title, brand = '', amount = '') {
   const fullQ = buildFullProductSearchQuery(title, brand, amount);
   if (!fullQ) return [];
@@ -2681,7 +3001,7 @@ async function searchWebReviewsDirect(title, brand = '', amount = '') {
     strictQ = strictQ.replace(/без\s+сахара/i, '"без сахара"');
   }
 
-  const qPrimary = `${strictQ} цена отзывы (site:otzovik.com OR site:irecommend.ru OR site:vkusvill.ru OR site:perekrestok.ru OR site:ozon.ru OR site:lenta.com OR site:rskrf.ru)`;
+  const qPrimary = `${strictQ} цена отзывы (site:otzovik.com OR site:irecommend.ru OR site:magnit.ru OR site:5ka.ru OR site:perekrestok.ru OR site:vkusvill.ru OR site:auchan.ru OR site:online.metro-cc.ru OR site:globus.ru OR site:lenta.com OR site:ozon.ru OR site:kuper.ru OR site:rskrf.ru)`;
   const qFallback = `${strictQ} купить цена отзывы`;
 
   const collected = [];
@@ -3031,15 +3351,127 @@ async function ensureAutopilotWarmup(reason = 'auto') {
   }
 }
 
-async function executePromptInsideGeminiTab(tabId, promptText) {
+/**
+ * Надёжное выполнение промпта и чтение ответа из вкладки gemini.google.com (v2.6.0):
+ * 1) Не держит один долгий executeScript внутри фоновой вкладки (где Chrome троттлит setTimeout до 1+ сек и может заморозить промис).
+ * 2) Вместо .innerText (который в фоновых/скрытых вкладках с content-visibility:auto может возвращать пустую строку)
+ *    использует собственный DOM-сериализатор на базе textContent с сохранением **жирного** текста и переносов строк.
+ * 3) Если в открытой вкладке Gemini УЖЕ сгенерирован готовый ответ по этому товару (пользователь видит его во вкладке),
+ *    мгновенно забирает его за 0.1 сек без повторного ожидания!
+ */
+async function executePromptInsideGeminiTab(tabId, promptText, productTitle = '', forceRefresh = false) {
   const stopKeepAlive = startSwKeepAlive();
+  const swWait = (ms) => new Promise((r) => setTimeout(r, ms));
+
   try {
-    const results = await chrome.scripting.executeScript({
+    // ФАЗА 1: Быстрая проверка готового ответа во вкладке ИЛИ ввод промпта и клик «Отправить» (< 450 мс)
+    const initResults = await chrome.scripting.executeScript({
       target: { tabId },
-      args: [promptText],
-      func: async (prompt) => {
+      args: [promptText, productTitle || '', Boolean(forceRefresh)],
+      func: async (prompt, targetProdTitle, isForce) => {
         try {
           const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+          // Layout-независимый сериализатор ответа Gemini (работает на 100% даже в свёрнутой/фоновой вкладке!)
+          const extractCleanFormattedText = (rootNode) => {
+            if (!rootNode) return '';
+            const walk = (node) => {
+              if (!node) return '';
+              if (node.nodeType === Node.TEXT_NODE) {
+                return node.nodeValue || '';
+              }
+              if (node.nodeType !== Node.ELEMENT_NODE) return '';
+              const tag = (node.tagName || '').toLowerCase();
+              if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'button' || tag === 'mat-icon') {
+                return '';
+              }
+              if (tag === 'br') return '\n';
+              let inner = '';
+              for (const child of node.childNodes) {
+                inner += walk(child);
+              }
+              if (tag === 'strong' || tag === 'b') {
+                const trimmed = inner.trim();
+                return trimmed ? `**${trimmed}**` : '';
+              }
+              if (tag === 'li') {
+                return `\n• ${inner.trim()}\n`;
+              }
+              if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'tr', 'blockquote'].includes(tag)) {
+                return `${inner}\n`;
+              }
+              return inner;
+            };
+            const raw = walk(rootNode) || rootNode.textContent || '';
+            return raw
+              .replace(/\r/g, '')
+              .replace(/[ \t]+\n/g, '\n')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+          };
+
+          const getTopLevelResponseNodes = () => {
+            const topModels = Array.from(document.querySelectorAll('model-response'));
+            if (topModels.length > 0) {
+              return topModels.map((m) => m.querySelector('message-content, .markdown, .model-response-text') || m);
+            }
+            const msgContents = Array.from(document.querySelectorAll('message-content'));
+            if (msgContents.length > 0) return msgContents;
+            return Array.from(document.querySelectorAll('.model-response-text, .markdown, [data-message-author-role="model"]'));
+          };
+
+          const findStopBtn = () =>
+            document.querySelector(
+              'button[aria-label*="Stop"], button[aria-label*="Остановить"], button[aria-label*="Прервать"], button.stop-button'
+            );
+
+          const isStillGenerating = () => {
+            const stopBtn = findStopBtn();
+            if (stopBtn && !stopBtn.disabled && stopBtn.getBoundingClientRect().width > 0) return true;
+            const busyModels = document.querySelectorAll('model-response[aria-busy="true"], .response-streaming');
+            return busyModels.length > 0;
+          };
+
+          const existingNodes = getTopLevelResponseNodes();
+          const initialCount = existingNodes.length;
+          const initialLastText = initialCount > 0 ? extractCleanFormattedText(existingNodes[initialCount - 1]) : '';
+
+          // ПРОВЕРКА: Вдруг во вкладке Gemini УЖЕ лежит готовый ответ для этого товара?
+          if (!isForce && initialLastText.length > 80 && !isStillGenerating()) {
+            const pageTextLower = (document.body.textContent || '').toLowerCase().replace(/ё/g, 'е');
+            const lastTextLower = initialLastText.toLowerCase().replace(/ё/g, 'е');
+            const hasVerdictMarkers =
+              lastTextLower.includes('вердикт') &&
+              (lastTextLower.includes('отзывы') || lastTextLower.includes('состав'));
+
+            if (hasVerdictMarkers && targetProdTitle) {
+              const titleWords = String(targetProdTitle)
+                .toLowerCase()
+                .replace(/ё/g, 'е')
+                .match(/[а-яa-z0-9]{4,}/g) || [];
+              const significantWords = titleWords.filter(
+                (w) => !['напиток', 'газированный', 'продукт', 'товар', 'купить'].includes(w)
+              );
+              // Проверяем последний запрос пользователя или сам последний ответ во вкладке
+              const userPrompts = Array.from(document.querySelectorAll('user-query, .query-text, [data-message-author-role="user"]'));
+              const lastUserPromptText = userPrompts.length > 0
+                ? (userPrompts[userPrompts.length - 1].textContent || '').toLowerCase().replace(/ё/g, 'е')
+                : pageTextLower.slice(-3500);
+
+              const matchedInLastTurn = significantWords.length > 0 && significantWords.every(
+                (w) => lastUserPromptText.includes(w.slice(0, 5)) || lastTextLower.includes(w.slice(0, 5))
+              );
+              if (matchedInLastTurn) {
+                return {
+                  ok: true,
+                  alreadyReadyInTab: true,
+                  mode: `Вкладка Gemini (${window.location.pathname})`,
+                  text: initialLastText
+                };
+              }
+            }
+          }
+
           const findEditor = () =>
             document.querySelector('rich-textarea div.ql-editor[contenteditable="true"]') ||
             document.querySelector('div[contenteditable="true"][role="textbox"]') ||
@@ -3047,8 +3479,8 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
             document.querySelector('textarea');
 
           let editor = findEditor();
-          for (let waitTick = 0; !editor && waitTick < 20; waitTick++) {
-            await wait(350);
+          for (let waitTick = 0; !editor && waitTick < 12; waitTick++) {
+            await wait(250);
             editor = findEditor();
           }
 
@@ -3059,20 +3491,15 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
             };
           }
 
-          const findStopBtn = () =>
-            document.querySelector(
-              'button[aria-label*="Stop"], button[aria-label*="Остановить"], button[aria-label*="Прервать"], button.stop-button'
-            );
           const activeStop = findStopBtn();
-          if (activeStop && activeStop.offsetParent !== null) {
+          if (activeStop && !activeStop.disabled && activeStop.getBoundingClientRect().width > 0) {
             activeStop.click();
-            await wait(450);
+            await wait(350);
           }
 
-          const responseSelector = 'message-content, model-response .markdown, .model-response-text';
-          const initialNodes = document.querySelectorAll(responseSelector);
-          const initialCount = initialNodes.length;
-          const initialLastText = initialCount > 0 ? (initialNodes[initialCount - 1].innerText || '').trim() : '';
+          const refreshedNodes = getTopLevelResponseNodes();
+          const baselineCount = refreshedNodes.length;
+          const baselineText = baselineCount > 0 ? extractCleanFormattedText(refreshedNodes[baselineCount - 1]) : '';
 
           const fillPromptIntoEditor = () => {
             editor.focus();
@@ -3086,7 +3513,7 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
               sel.removeAllRanges();
               sel.addRange(range);
               const inserted = document.execCommand('insertText', false, prompt);
-              if (!inserted || !(editor.innerText || '').trim()) {
+              if (!inserted || !(editor.textContent || '').trim()) {
                 editor.textContent = prompt;
                 editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: prompt }));
               }
@@ -3112,79 +3539,176 @@ async function executePromptInsideGeminiTab(tabId, promptText) {
           };
 
           fillPromptIntoEditor();
-          await wait(300);
-          triggerSend();
-
-          const isStillGenerating = () => {
-            const stopBtn = findStopBtn();
-            if (stopBtn && stopBtn.offsetParent !== null) return true;
-            const busyModels = document.querySelectorAll('model-response[aria-busy="true"], .response-streaming');
-            return busyModels.length > 0;
-          };
-
-          let lastText = '';
-          let stableTicks = 0;
-          let retriedSend = false;
-
-          for (let i = 0; i < 52; i++) {
-            await wait(450);
-            const nodes = document.querySelectorAll(responseSelector);
-            const hasNewNode = nodes.length > initialCount;
-            const latestNode = nodes.length > 0 ? nodes[nodes.length - 1] : null;
-            const currentText = latestNode ? (latestNode.innerText || '').trim() : '';
-            const isNew = hasNewNode || (currentText && currentText !== initialLastText);
-
-            if (i === 5 && !isNew && !isStillGenerating() && !retriedSend) {
-              retriedSend = true;
-              if ((editor.innerText || editor.value || '').trim().length > 10) {
-                triggerSend();
-              } else {
-                fillPromptIntoEditor();
-                await wait(200);
-                triggerSend();
-              }
-            }
-
-            if (isNew && currentText.length > 25) {
-              if (currentText === lastText && !isStillGenerating()) {
-                stableTicks += 1;
-                if (stableTicks >= 3) {
-                  return {
-                    ok: true,
-                    mode: `Вкладка Gemini (${window.location.pathname})`,
-                    text: currentText
-                  };
-                }
-              } else {
-                lastText = currentText;
-                stableTicks = 0;
-              }
-            }
-          }
-
-          if (lastText && lastText.length > 25) {
-            return {
-              ok: true,
-              mode: `Вкладка Gemini (${window.location.pathname})`,
-              text: lastText
-            };
-          }
+          await wait(220);
+          const clickedSend = triggerSend();
 
           return {
-            ok: false,
-            error: 'Вкладка Gemini ещё генерирует ответ или ожидает вход в аккаунт (проверь открытую вкладку gemini.google.com).'
+            ok: true,
+            injected: true,
+            clickedSend,
+            baselineCount,
+            baselineText,
+            pathname: window.location.pathname
           };
         } catch (domErr) {
           return {
             ok: false,
-            error: `Ошибка в DOM вкладки Gemini: ${domErr.message || domErr}`
+            error: `Ошибка ввода в DOM вкладки Gemini: ${domErr.message || domErr}`
           };
         }
       }
     });
 
-    const first = results && results[0] ? results[0].result : null;
-    return first || { ok: false, error: 'Не удалось выполнить скрипт во вкладке Gemini.' };
+    const initRes = initResults && initResults[0] ? initResults[0].result : null;
+    if (!initRes || !initRes.ok) {
+      return initRes || { ok: false, error: 'Не удалось обратиться к вкладке Gemini.' };
+    }
+
+    // Если ответ уже лежал готовым во вкладке Gemini — возвращаем его мгновенно!
+    if (initRes.alreadyReadyInTab && initRes.text) {
+      return {
+        ok: true,
+        mode: initRes.mode || 'Вкладка Gemini (готовый ответ)',
+        text: initRes.text
+      };
+    }
+
+    const baselineCount = initRes.baselineCount || 0;
+    const baselineText = initRes.baselineText || '';
+    let lastText = '';
+    let stableTicks = 0;
+    let retriedSend = false;
+
+    // ФАЗА 2: Опрос из Service Worker'а (не подвержен фоновому троттлингу вкладки!)
+    for (let tick = 0; tick < 44; tick++) {
+      await swWait(800);
+
+      const pollResults = await chrome.scripting.executeScript({
+        target: { tabId },
+        args: [baselineCount, baselineText, promptText, tick === 4 && !retriedSend],
+        func: (baseCnt, baseTxt, prompt, shouldRetrySendIfIdle) => {
+          const extractCleanFormattedText = (rootNode) => {
+            if (!rootNode) return '';
+            const walk = (node) => {
+              if (!node) return '';
+              if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+              if (node.nodeType !== Node.ELEMENT_NODE) return '';
+              const tag = (node.tagName || '').toLowerCase();
+              if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'button' || tag === 'mat-icon') {
+                return '';
+              }
+              if (tag === 'br') return '\n';
+              let inner = '';
+              for (const child of node.childNodes) {
+                inner += walk(child);
+              }
+              if (tag === 'strong' || tag === 'b') {
+                const trimmed = inner.trim();
+                return trimmed ? `**${trimmed}**` : '';
+              }
+              if (tag === 'li') {
+                return `\n• ${inner.trim()}\n`;
+              }
+              if (['p', 'div', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'tr', 'blockquote'].includes(tag)) {
+                return `${inner}\n`;
+              }
+              return inner;
+            };
+            const raw = walk(rootNode) || rootNode.textContent || '';
+            return raw
+              .replace(/\r/g, '')
+              .replace(/[ \t]+\n/g, '\n')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+          };
+
+          const getTopLevelResponseNodes = () => {
+            const topModels = Array.from(document.querySelectorAll('model-response'));
+            if (topModels.length > 0) {
+              return topModels.map((m) => m.querySelector('message-content, .markdown, .model-response-text') || m);
+            }
+            const msgContents = Array.from(document.querySelectorAll('message-content'));
+            if (msgContents.length > 0) return msgContents;
+            return Array.from(document.querySelectorAll('.model-response-text, .markdown, [data-message-author-role="model"]'));
+          };
+
+          const findStopBtn = () =>
+            document.querySelector(
+              'button[aria-label*="Stop"], button[aria-label*="Остановить"], button[aria-label*="Прервать"], button.stop-button'
+            );
+
+          const isStillGenerating = () => {
+            const stopBtn = findStopBtn();
+            if (stopBtn && !stopBtn.disabled && stopBtn.getBoundingClientRect().width > 0) return true;
+            const busyModels = document.querySelectorAll('model-response[aria-busy="true"], .response-streaming');
+            return busyModels.length > 0;
+          };
+
+          const nodes = getTopLevelResponseNodes();
+          const currentCount = nodes.length;
+          const latestNode = currentCount > 0 ? nodes[currentCount - 1] : null;
+          const currentText = latestNode ? extractCleanFormattedText(latestNode) : '';
+          const generating = isStillGenerating();
+          const isNew = currentCount > baseCnt || (currentText && currentText !== baseTxt);
+
+          let didRetrySend = false;
+          if (shouldRetrySendIfIdle && !isNew && !generating) {
+            const sendBtn =
+              document.querySelector('button.send-button') ||
+              document.querySelector('button[aria-label*="Send"]') ||
+              document.querySelector('button[aria-label*="Отправить"]') ||
+              document.querySelector('.send-button-container button');
+            if (sendBtn && !sendBtn.disabled) {
+              sendBtn.click();
+              didRetrySend = true;
+            }
+          }
+
+          return {
+            currentCount,
+            currentText,
+            generating,
+            isNew,
+            didRetrySend,
+            pathname: window.location.pathname
+          };
+        }
+      });
+
+      const poll = pollResults && pollResults[0] ? pollResults[0].result : null;
+      if (!poll) continue;
+      if (poll.didRetrySend) retriedSend = true;
+
+      if (poll.isNew && poll.currentText && poll.currentText.length > 35) {
+        const hasVerdictWord = /вердикт|стоит брать|хороший вариант|на любителя|не рекомендую/i.test(poll.currentText);
+        if (poll.currentText === lastText && !poll.generating) {
+          stableTicks += 1;
+          if (stableTicks >= 2 || (stableTicks >= 1 && hasVerdictWord)) {
+            return {
+              ok: true,
+              mode: `Вкладка Gemini (${poll.pathname || '/app'})`,
+              text: poll.currentText
+            };
+          }
+        } else {
+          lastText = poll.currentText;
+          stableTicks = (!poll.generating && hasVerdictWord && poll.currentText.length > 140) ? 1 : 0;
+        }
+      }
+    }
+
+    if (lastText && lastText.length > 35) {
+      return {
+        ok: true,
+        mode: `Вкладка Gemini (${initRes.pathname || '/app'})`,
+        text: lastText
+      };
+    }
+
+    return {
+      ok: false,
+      error: 'Вкладка Gemini ещё генерирует ответ или ожидает вход в аккаунт (нажми «🤖 ИИ-обзор» или «🔄 Обновить» ещё раз, чтобы забрать готовый текст).'
+    };
   } catch (err) {
     return {
       ok: false,
@@ -3201,12 +3725,12 @@ function enqueueGeminiTabExecution(taskFn) {
   return next;
 }
 
-async function isProductStillRelevantForUser(slug, title, forceRefresh = false) {
-  if (forceRefresh) return true;
+async function isProductStillRelevantForUser(slug, title, forceRefresh = false, isManualUserClick = false) {
+  if (forceRefresh || isManualUserClick) return true;
   const reqKey = normalizeCacheKey(slug, title);
   if (reqKey && reqKey === latestRequestedProductKey) return true;
   try {
-    const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/good/*'] });
+    const lavkaTabs = await chrome.tabs.query({ url: ['https://lavka.yandex.ru/*'] });
     for (const t of lavkaTabs || []) {
       const u = decodeURIComponent(t.url || '').toLowerCase();
       if (slug && u.includes(String(slug).toLowerCase())) return true;
@@ -3508,7 +4032,12 @@ async function orchestrateProductAnalysisInternal(payload) {
         }
       }
 
-      const stillRelevant = await isProductStillRelevantForUser(payload.slug, authoritativeTitle, payload.forceRefresh);
+      const stillRelevant = await isProductStillRelevantForUser(
+        payload.slug,
+        authoritativeTitle,
+        payload.forceRefresh,
+        Boolean(payload.isManualUserClick)
+      );
       if (!stillRelevant) {
         return {
           ok: false,
@@ -3524,7 +4053,12 @@ async function orchestrateProductAnalysisInternal(payload) {
         const email = await detectTabAccountEmail(geminiTab.id);
         const accIdx = extractAccountIndexFromUrl(geminiTab.url);
         const promptForTab = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, true, priceIntel);
-        const tabResult = await executePromptInsideGeminiTab(geminiTab.id, promptForTab);
+        const tabResult = await executePromptInsideGeminiTab(
+          geminiTab.id,
+          promptForTab,
+          authoritativeTitle,
+          Boolean(payload.forceRefresh)
+        );
         if (tabResult && tabResult.ok && tabResult.text) {
           const accLabel = email ? `${email} (/u/${accIdx})` : `/u/${accIdx}`;
           const modeLabel = `Вкладка Gemini [${accLabel}]`;
@@ -3573,14 +4107,18 @@ async function orchestrateProductAnalysis(payload) {
   if (key) {
     latestRequestedProductKey = key;
   }
-  if (key && !payload.forceRefresh && inFlightRequests.has(key)) {
-    return inFlightRequests.get(key);
+  if (key && !payload.forceRefresh && !payload.isManualUserClick && inFlightRequests.has(key)) {
+    const existingEntry = inFlightRequests.get(key);
+    if (existingEntry && Date.now() - existingEntry.startedAt < 12000) {
+      return existingEntry.promise;
+    }
+    inFlightRequests.delete(key);
   }
   const promise = orchestrateProductAnalysisInternal(payload).finally(() => {
     if (key) inFlightRequests.delete(key);
   });
   if (key) {
-    inFlightRequests.set(key, promise);
+    inFlightRequests.set(key, { promise, startedAt: Date.now() });
   }
   return promise;
 }
@@ -3616,6 +4154,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'LQS_RECORD_PRICES') {
     recordPricesBatch(msg.accountId, msg.items || [])
       .then((summaries) => sendResponse({ ok: true, summaries }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_RECORD_EXTERNAL_STORE_OFFERS') {
+    recordExternalStoreOffers(msg.store || 'Магнит', msg.offers || [])
+      .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
   }

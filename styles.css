@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Lavka Quality Shield v2.5.2 — UI Fixes, Exact Product Store Links & Account Switcher
+   Lavka Quality Shield v2.6.0 — UI Fixes, Exact Product Store Links & Account Switcher
    ========================================================================== */
 
 :root {
@@ -778,4 +778,82 @@ div.lqs-product-panel .lqs-store-link:hover,
 
 .lqs-card-dimmed:hover {
   filter: grayscale(10%) opacity(0.95) !important;
+}
+
+
+/* МАТРИЦА СРАВНЕНИЯ ЦЕН В МАГАЗИНАХ (v2.6.0) */
+div.lqs-product-panel .lqs-price-matrix-box {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 5px !important;
+  width: 100% !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-title {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  flex-wrap: wrap !important;
+  gap: 4px !important;
+  font-size: 11.5px !important;
+  color: #0f172a !important;
+  margin-bottom: 2px !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-grid {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  width: 100% !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-row {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  padding: 4px 8px !important;
+  border-radius: 7px !important;
+  background: #f8fafc !important;
+  border: 1px solid #e2e8f0 !important;
+  font-size: 11.5px !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-row.is-best-price {
+  background: #dcfce7 !important;
+  border-color: #86efac !important;
+  color: #166534 !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-cell-name {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  color: #0f172a !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-cell-val {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  padding: 1px 6px !important;
+  border-radius: 5px !important;
+  font-size: 10.5px !important;
+  font-weight: 600 !important;
+  background: #ffffff !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #334155 !important;
+}
+
+div.lqs-product-panel .lqs-price-matrix-badge.best {
+  background: #166534 !important;
+  border-color: #166534 !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
 }

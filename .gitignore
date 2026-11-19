@@ -1,0 +1,34 @@
+# Local databases & runtime data
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+lavka_ai_cache.db
+
+# Local configuration & secrets
+.env
+.env.*
+.lqs_api_token
+.lqs_config.json
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Packaged builds & logs
+*.zip
+*.crx
+*.pem
+*.log
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

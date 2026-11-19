@@ -1,22 +1,22 @@
 /**
- * Lavka Quality Shield v2.5.2 — Content Script
- * Что нового и исправлено в v2.5.2:
- * 1. CANONICAL PRODUCT CARD AUTHORITY (Название и характеристики ТОЛЬКО из оригинальной карточки товара `/good/<slug>`):
- *    - В корзине (`/cart`) Яндекс Лавка показывает сокращённые названия товаров (например, «Напиток Cola Добрый» вместо
- *      «Напиток Cola «Добрый» газированный без сахара»).
- *    - Теперь расширение извлекает `imageKey` картинки из строки корзины, мгновенно подтягивает полное название из памяти
- *      (по `slug` или `imageKey`), а фоновый аудитор `LQS_AUDIT_CART_COMPETITORS` параллельно запрашивает оригинальную
- *      карточку товара `https://lavka.yandex.ru/good/<slug>` и парсит эталонный `<h1 data-testid="product-title">`,
- *      `<span data-testid="product-amount">` и бренд из JSON-LD!
- *    - Все ссылки на магазины (Ozon, Перекрёсток, ВкусВилл, Я.Маркет, Лента, Купер) и поиск конкурентов строятся
- *      СТРОГО по полному названию и характеристикам из оригинальной карточки товара!
- * 2. Полная защита от `message channel closed before a response was received` и зависаний окна ИИ.
+ * Lavka Quality Shield v2.6.0 — Content Script
+ * Что нового и исправлено в v2.6.0:
+ * 1. ИСПРАВЛЕНО СВОРАЧИВАНИЕ РАЗВЁРНУТОГО ОПИСАНИЯ (СПОЙЛЕРА) НА СТРАНИЦЕ ТОВАРА:
+ *    - Ручной клик по кнопке «▴ Скрыть» фиксируется в `userManualDrawerStateBySlug`, поэтому фоновые синхронизации
+ *      DOM и наличие готового кэша ИИ больше никогда не раскрывают спойлер обратно против воли пользователя.
+ * 2. МГНОВЕННЫЙ ВЫВОД ИИ-ОБЗОРА ИЗ ВКЛАДКИ GEMINI НА СТРАНИЦУ ТОВАРА:
+ *    - Кнопка «🤖 ИИ-обзор» передаёт `isManualUserClick: true`, обходит ложные пропуски и за 0.1 сек забирает
+ *      уже сгенерированный ответ прямо из вкладки `gemini.google.com` (даже если вкладка в фоне).
+ * 3. ОКНО СРАВНЕНИЯ ЦЕН 16 МАГАЗИНОВ + НАТИВНЫЙ СБОРЩИК ЦЕН МАГНИТА (`magnit.ru`):
+ *    - В карточке товара и в корзине выводится наглядная матрица сравнения цен (Лавка Текущий акк vs Гость без куки
+ *      vs Магнит, Пятёрочка, Перекрёсток, ВкусВилл, Магнолия, Дикси, Чижик, Ашан, МЕТРО, Глобус, Лента, О’КЕЙ,
+ *      Азбука Вкуса, Ozon, Купер, Я.Маркет) с подсветкой самой выгодной цены.
  */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.5.2';
+  const VERSION = '2.6.0';
   const STORAGE_KEY = 'lqs_reviews_v1';
   const SETTINGS_KEY = 'lqs_settings_v2';
   const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
@@ -48,6 +48,7 @@
   ];
 
   const drawerOpenBySlug = new Map();
+  const userManualDrawerStateBySlug = new Map();
   const autoAiTriggeredSlugs = new Set();
   const priceIntelRequestedSlugs = new Set();
   const lastAiResultBySlug = new Map();
@@ -121,12 +122,22 @@
     const fullQuery = buildFullProductSearchQuery(rawTitle, brand, amount);
     const enc = encodeURIComponent(fullQuery || rawTitle || '');
     return [
-      { store: 'Ozon', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
-      { store: 'Перекрёсток', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
-      { store: 'ВкусВилл', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
-      { store: 'Я.Маркет', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery },
-      { store: 'Лента', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
-      { store: 'Купер', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery }
+      { store: 'Магнит', category: 'У дома', url: `https://magnit.ru/search?term=${enc}`, query: fullQuery },
+      { store: 'Пятёрочка', category: 'У дома', url: `https://5ka.ru/catalog/?q=${enc}`, query: fullQuery },
+      { store: 'Перекрёсток', category: 'Супермаркет', url: `https://www.perekrestok.ru/cat/search?search=${enc}`, query: fullQuery },
+      { store: 'ВкусВилл', category: 'У дома', url: `https://vkusvill.ru/search/?q=${enc}`, query: fullQuery },
+      { store: 'Магнолия', category: 'У дома', url: `https://shop.mgnl.ru/catalog/?q=${enc}`, query: fullQuery },
+      { store: 'Дикси', category: 'У дома', url: `https://dixy.ru/catalog/?q=${enc}`, query: fullQuery },
+      { store: 'Чижик', category: 'Дискаунтер', url: `https://chizhik.club/search?query=${enc}`, query: fullQuery },
+      { store: 'Ашан', category: 'Гипермаркет', url: `https://www.auchan.ru/search/?q=${enc}`, query: fullQuery },
+      { store: 'МЕТРО', category: 'Гипермаркет', url: `https://online.metro-cc.ru/search?q=${enc}`, query: fullQuery },
+      { store: 'Глобус', category: 'Гипермаркет', url: `https://online.globus.ru/search/?q=${enc}`, query: fullQuery },
+      { store: 'Лента', category: 'Гипермаркет', url: `https://lenta.com/search/?searchText=${enc}`, query: fullQuery },
+      { store: 'О’КЕЙ', category: 'Гипермаркет', url: `https://www.okeydostavka.ru/webapp/wcs/stores/servlet/SearchDisplay?searchTerm=${enc}`, query: fullQuery },
+      { store: 'Азбука Вкуса', category: 'Супермаркет', url: `https://av.ru/search/?text=${enc}`, query: fullQuery },
+      { store: 'Ozon Fresh', category: 'Маркетплейс', url: `https://www.ozon.ru/search/?text=${enc}`, query: fullQuery },
+      { store: 'Купер', category: 'Агрегатор', url: `https://kuper.ru/multisearch?q=${enc}`, query: fullQuery },
+      { store: 'Я.Маркет', category: 'Маркетплейс', url: `https://market.yandex.ru/search?text=${enc}`, query: fullQuery }
     ];
   }
 
@@ -378,6 +389,147 @@
   }
 
   if (initYandexPassportHelperIfNeeded()) {
+    return;
+  }
+
+  // ==========================================================================
+  // НАТИВНЫЙ ПАРСЕР И СБОРЩИК ЦЕН МАГНИТА (MAGNIT.RU — ПО SITE RECON ДАМПУ)
+  // ==========================================================================
+  function initMagnitStoreHarvesterIfNeeded() {
+    const host = window.location.hostname.toLowerCase();
+    if (!host.includes('magnit.ru')) return false;
+
+    let lastHarvestHash = '';
+
+    const parseMagnitPageOffers = () => {
+      const offers = [];
+      const seen = new Set();
+
+      // 1. Карточки каталога и поиска: article.unit-catalog-product-preview / a.pl-hover-base[href*="/product/"]
+      const catalogCards = document.querySelectorAll('article.unit-catalog-product-preview, a.pl-hover-base[href*="/product/"]');
+      catalogCards.forEach((node) => {
+        const card = node.tagName === 'ARTICLE' ? node : (node.closest('article.unit-catalog-product-preview') || node);
+        const linkEl = card.tagName === 'A' ? card : card.querySelector('a.pl-hover-base[href*="/product/"], a[href*="/product/"]');
+        if (!linkEl) return;
+        const href = linkEl.getAttribute('href') || '';
+        if (!href.includes('/product/')) return;
+        const fullUrl = new URL(href, window.location.origin).href;
+        if (seen.has(fullUrl)) return;
+
+        const imgEl = card.querySelector('div.unit-catalog-product-preview-image img[alt], img[alt]');
+        const imgAlt = imgEl ? (imgEl.getAttribute('alt') || '').trim() : '';
+        const rawText = (card.innerText || linkEl.innerText || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+
+        const priceMatches = Array.from(rawText.matchAll(/(\d+(?:[.,]\d{1,2})?)\s*₽/g)).map((m) =>
+          parseFloat(m[1].replace(',', '.'))
+        );
+        if (priceMatches.length === 0) return;
+
+        const price = Math.round(priceMatches[0]);
+        const oldPrice = priceMatches.length > 1 && priceMatches[1] > priceMatches[0] ? Math.round(priceMatches[1]) : null;
+        const title = imgAlt && imgAlt.length > 4 ? imgAlt : rawText.replace(/^.*?₽\s*(?:-\d+%\s*\d+(?:[.,]\d+)?\s*₽\s*)?/i, '').trim();
+        if (!title || title.length < 3 || price <= 0) return;
+
+        const idMatch = href.match(/\/product\/(\d+)/);
+        const weightMatch = title.match(/(\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт)(?![а-яa-z]))/i);
+
+        seen.add(fullUrl);
+        offers.push({
+          store: 'Магнит',
+          goodId: idMatch ? idMatch[1] : null,
+          title,
+          amount: weightMatch ? weightMatch[1] : '',
+          price,
+          oldPrice,
+          url: fullUrl
+        });
+      });
+
+      // 2. Позиции корзины Магнита (/ecom/cart): a.cart-product-list-item-wrap-content[href*="/product/"]
+      const cartLinks = document.querySelectorAll('a.cart-product-list-item-wrap-content[href*="/product/"]');
+      cartLinks.forEach((linkEl) => {
+        const href = linkEl.getAttribute('href') || '';
+        const fullUrl = new URL(href, window.location.origin).href;
+        if (seen.has(fullUrl)) return;
+
+        const row = linkEl.closest('div.cart-product-item') || linkEl.parentElement;
+        const imgEl = row ? row.querySelector('div.cart-product-item__left img[alt], img[alt]') : null;
+        const imgAlt = imgEl ? (imgEl.getAttribute('alt') || '').trim() : '';
+        const rawText = ((row || linkEl).innerText || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+
+        const priceMatches = Array.from(rawText.matchAll(/(\d+(?:[.,]\d{1,2})?)\s*₽/g)).map((m) =>
+          parseFloat(m[1].replace(',', '.'))
+        );
+        if (priceMatches.length === 0) return;
+
+        const price = Math.round(priceMatches[0]);
+        const oldPrice = priceMatches.length > 1 && priceMatches[1] > priceMatches[0] ? Math.round(priceMatches[1]) : null;
+        const title = imgAlt && imgAlt.length > 4 ? imgAlt : rawText.split(/Финальная цена|\d+\s*₽/)[0].trim();
+        if (!title || title.length < 3 || price <= 0) return;
+
+        const idMatch = href.match(/\/product\/(\d+)/);
+        const weightMatch = title.match(/(\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт)(?![а-яa-z]))/i);
+
+        seen.add(fullUrl);
+        offers.push({
+          store: 'Магнит',
+          goodId: idMatch ? idMatch[1] : null,
+          title,
+          amount: weightMatch ? weightMatch[1] : '',
+          price,
+          oldPrice,
+          url: fullUrl
+        });
+      });
+
+      // 3. Страница самой карточки товара на magnit.ru (/product/...)
+      if (window.location.pathname.includes('/product/')) {
+        const h1 = document.querySelector('h1');
+        const pageTitle = h1 ? (h1.textContent || '').trim() : document.title.split('—')[0].trim();
+        const mainScope = document.querySelector('main') || document.body;
+        const priceMatches = Array.from((mainScope.innerText || '').slice(0, 2000).matchAll(/(\d+(?:[.,]\d{1,2})?)\s*₽/g)).map((m) =>
+          parseFloat(m[1].replace(',', '.'))
+        );
+        if (pageTitle && priceMatches.length > 0 && !seen.has(window.location.href)) {
+          const idMatch = window.location.pathname.match(/\/product\/(\d+)/);
+          const weightMatch = pageTitle.match(/(\d+(?:[.,]\d+)?\s*(?:г|гр|кг|мл|л|шт)(?![а-яa-z]))/i);
+          offers.push({
+            store: 'Магнит',
+            goodId: idMatch ? idMatch[1] : null,
+            title: pageTitle,
+            amount: weightMatch ? weightMatch[1] : '',
+            price: Math.round(priceMatches[0]),
+            oldPrice: priceMatches.length > 1 && priceMatches[1] > priceMatches[0] ? Math.round(priceMatches[1]) : null,
+            url: window.location.href
+          });
+        }
+      }
+
+      if (offers.length === 0) return;
+      const hash = offers.map((o) => `${o.goodId || o.title}:${o.price}`).join('|');
+      if (hash === lastHarvestHash) return;
+      lastHarvestHash = hash;
+
+      chrome.runtime.sendMessage({ type: 'LQS_RECORD_EXTERNAL_STORE_OFFERS', store: 'Магнит', offers }, (resp) => {
+        if (chrome.runtime.lastError || !resp) return;
+        let badge = document.querySelector('#lqs-magnit-harvester-pill');
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.id = 'lqs-magnit-harvester-pill';
+          badge.style.cssText =
+            'position:fixed;bottom:14px;right:14px;z-index:999999;background:#166534;color:#ffffff;padding:7px 12px;border-radius:10px;font-family:sans-serif;font-size:12px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,0.2);pointer-events:none;';
+          document.body.appendChild(badge);
+        }
+        badge.textContent = `🛡️ Lavka Shield: собрано ${offers.length} цен Магнита (всего в базе: ${resp.totalExternalOffers || offers.length})`;
+      });
+    };
+
+    setTimeout(parseMagnitPageOffers, 800);
+    setInterval(parseMagnitPageOffers, 2800);
+    return true;
+  }
+
+  if (initMagnitStoreHarvesterIfNeeded()) {
     return;
   }
 
@@ -1828,47 +1980,123 @@
     const pIntel = findPriceIntelInMemory(slug, title, imageKey);
 
     const storeLinks = buildDirectStoreSearchLinks(title, amount, brand);
+
+    // Собираем единую матрицу всех известных цен на этот товар (Лавка акк + Лавка Гость + другие аккаунты + Магнит / ВкусВилл / Перекрёсток / Ozon и др.)
+    const comparisonRows = [];
+    const curAccLabel = detectCurrentAccountLabel();
+    const lavkaNow = currentPrice ? Math.round(currentPrice) : (pIntel?.lastPrice ? Math.round(pIntel.lastPrice) : null);
+
+    if (lavkaNow) {
+      comparisonRows.push({
+        source: `Яндекс Лавка (${curAccLabel})`,
+        price: lavkaNow,
+        url: null,
+        isCurrent: true,
+        badge: 'Текущая цена'
+      });
+    }
+
+    if (pIntel && pIntel.guestPrice && pIntel.guestPrice > 0) {
+      const gPrice = Math.round(pIntel.guestPrice);
+      const diff = lavkaNow ? lavkaNow - gPrice : 0;
+      comparisonRows.push({
+        source: 'Яндекс Лавка (Гость без куки)',
+        price: gPrice,
+        url: null,
+        isGuest: true,
+        badge: diff > 2 ? `🔥 Дешевле на -${diff} ₽ (штраф на акке!)` : 'Без наценки'
+      });
+    }
+
+    if (pIntel && pIntel.accounts && typeof pIntel.accounts === 'object') {
+      for (const [accName, accObj] of Object.entries(pIntel.accounts)) {
+        if (accName === curAccLabel || accName === 'Гость (без куки)') continue;
+        if (accObj && accObj.price > 0) {
+          const aPrice = Math.round(accObj.price);
+          const diff = lavkaNow ? lavkaNow - aPrice : 0;
+          comparisonRows.push({
+            source: `Лавка (${accName})`,
+            price: aPrice,
+            url: null,
+            badge: diff > 2 ? `Выгоднее на -${diff} ₽` : (diff < -2 ? `Дороже на +${Math.abs(diff)} ₽` : 'Та же цена')
+          });
+        }
+      }
+    }
+
+    if (pIntel && Array.isArray(pIntel.competitorOffers)) {
+      for (const offer of pIntel.competitorOffers) {
+        if (!offer || !offer.store) continue;
+        const oPrice = offer.price && offer.price > 0 ? Math.round(offer.price) : null;
+        const diff = (lavkaNow && oPrice) ? lavkaNow - oPrice : 0;
+        comparisonRows.push({
+          source: `🏪 ${offer.store}`,
+          price: oPrice,
+          oldPrice: offer.oldPrice || null,
+          url: offer.url || null,
+          offerTitle: offer.title || '',
+          badge: oPrice
+            ? (diff > 2 ? `✅ Выгоднее на -${diff} ₽` : (diff < -2 ? `В Лавке дешевле на ${Math.abs(diff)} ₽` : 'Такая же цена'))
+            : 'Открыть карточку ↗'
+        });
+      }
+    }
+
+    const pricedRows = comparisonRows.filter((r) => r.price && r.price > 0);
+    const absoluteMinPrice = pricedRows.length > 0 ? Math.min(...pricedRows.map((r) => r.price)) : null;
+
+    const matrixTableHtml = comparisonRows.length > 0
+      ? `<div class="lqs-price-matrix-box">
+          <div class="lqs-price-matrix-title">
+            <span>📊 <b>Окно сравнения цен: где выгоднее купить именно этот товар</b></span>
+            ${
+              pIntel && pIntel.minPrice && pIntel.maxPrice
+                ? `<span style="font-size:10.5px;color:#475569;">История в БД: мин <b>${pIntel.minPrice} ₽</b> / макс <b>${pIntel.maxPrice} ₽</b></span>`
+                : ''
+            }
+          </div>
+          <div class="lqs-price-matrix-grid">
+            ${comparisonRows
+              .map((row) => {
+                const isBest = Boolean(row.price && absoluteMinPrice && row.price === absoluteMinPrice && pricedRows.length > 1);
+                const priceStr = row.price ? `<b>${row.price} ₽</b>` : '<span style="color:#64748b;">по ссылке</span>';
+                const oldStr = row.oldPrice && row.oldPrice > (row.price || 0)
+                  ? ` <s style="color:#94a3b8;font-size:10.5px;">${row.oldPrice} ₽</s>`
+                  : '';
+                const nameHtml = row.url
+                  ? `<a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;font-weight:700;text-decoration:underline;" title="${escapeHtml(row.offerTitle || row.source)}">${escapeHtml(row.source)} ↗</a>`
+                  : `<span style="font-weight:600;">${escapeHtml(row.source)}</span>`;
+                return `
+                  <div class="lqs-price-matrix-row ${isBest ? 'is-best-price' : ''}">
+                    <div class="lqs-price-matrix-cell-name">
+                      ${isBest ? '🏆 ' : ''}${nameHtml}
+                    </div>
+                    <div class="lqs-price-matrix-cell-val">
+                      ${priceStr}${oldStr}
+                      <span class="lqs-price-matrix-badge ${isBest ? 'best' : ''}">${escapeHtml(isBest ? 'ЛУЧШАЯ ЦЕНА' : row.badge)}</span>
+                    </div>
+                  </div>
+                `;
+              })
+              .join('')}
+          </div>
+        </div>`
+      : `<div>💰 <b>Радар цен:</b> собираю данные по гостевой цене (без куки), истории и другим магазинам...</div>`;
+
     const storeButtonsHtml = title
-      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed #bae6fd;align-items:center;">
-          <span style="font-size:11px;color:#475569;font-weight:600;margin-right:2px;">🔍 Найти точно этот товар:</span>
+      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:7px;padding-top:6px;border-top:1px dashed #bae6fd;align-items:center;">
+          <span style="font-size:11px;color:#0f172a;font-weight:700;margin-right:3px;">🔍 Сравнить в 16 сетях (полное название из карточки):</span>
           ${storeLinks
             .map(
               (s) =>
-                `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" style="font-size:11px !important;padding:2px 7px !important;border-radius:6px !important;background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;color:#1e293b !important;text-decoration:none !important;font-weight:600 !important;" title="Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)} ↗</a>`
+                `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" style="font-size:11px !important;padding:2px 7px !important;border-radius:6px !important;background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;color:#1e293b !important;text-decoration:none !important;font-weight:600 !important;" title="[${escapeHtml(s.category || 'Магазин')}] Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)} ↗</a>`
             )
             .join('')}
         </div>`
       : '';
 
-    if (!pIntel) {
-      return `<div>
-        <span>💰 <b>Радар цен:</b> собираю данные по гостевой цене (без куки), истории и другим магазинам...</span>
-        ${storeButtonsHtml}
-      </div>`;
-    }
-
-    const parts = [];
-    if (currentPrice) parts.push(`Сейчас (${escapeHtml(detectCurrentAccountLabel())}): <b>${Math.round(currentPrice)} ₽</b>`);
-    if (pIntel.guestPrice) {
-      const diff = currentPrice ? Math.round(currentPrice - pIntel.guestPrice) : 0;
-      const tag = diff > 2 ? `<b style="color:#b91c1c;">${pIntel.guestPrice} ₽ (тебе +${diff} ₽!)</b>` : `<b>${pIntel.guestPrice} ₽</b>`;
-      parts.push(`Без куки (Гость): ${tag}`);
-    }
-    if (pIntel.minPrice && pIntel.maxPrice) {
-      parts.push(`История БД: мин <b>${pIntel.minPrice} ₽</b> / макс <b>${pIntel.maxPrice} ₽</b>`);
-    }
-    if (pIntel.accounts && Object.keys(pIntel.accounts).length > 1) {
-      const accStr = Object.entries(pIntel.accounts)
-        .map(([k, v]) => `${escapeHtml(k)}: <b>${v.price} ₽</b>`)
-        .join(', ');
-      parts.push(`По аккаунтам: ${accStr}`);
-    }
-    if (pIntel.competitorSummary) {
-      parts.push(`Конкуренты: <b>${escapeHtml(pIntel.competitorSummary)}</b>`);
-    }
-
     return `<div>
-      <span>💰 ${parts.join(' • ')}</span>
+      ${matrixTableHtml}
       ${storeButtonsHtml}
     </div>`;
   }
@@ -1961,6 +2189,9 @@
     const slug = panel.dataset.slug || extractSlugFromUrl(window.location.href);
     if (slug) {
       drawerOpenBySlug.set(slug, isOpen);
+      // ЗАПОМИНАЕМ РУЧНОЙ ВЫБОР ПОЛЬЗОВАТЕЛЯ! Если пользователь сам нажал «▴ Скрыть»,
+      // фоновые ререндеры и кэш ИИ больше НЕ имеют права сами открывать спойлер обратно!
+      userManualDrawerStateBySlug.set(slug, isOpen);
     }
 
     const latestMeta = extractProductPageMetadata();
@@ -1972,7 +2203,7 @@
     return isOpen;
   }
 
-  function renderAiVerdictIntoPanel(panel, slug, meta, resultObj, shouldOpenDrawer = true) {
+  function renderAiVerdictIntoPanel(panel, slug, meta, resultObj, shouldOpenDrawer = true, isExplicitUserAiClick = false) {
     if (!panel || !resultObj || !resultObj.verdict) return;
     const drawer = panel.querySelector('#lqs-drawer');
     const aiBox = panel.querySelector('#lqs-ai-box');
@@ -1997,9 +2228,15 @@
       loading: false
     });
 
-    if (shouldOpenDrawer && drawer && !drawer.classList.contains('open')) {
+    panel.dataset.lqsRenderedAiSlug = slug || '';
+    panel.dataset.lqsRenderedAiVerdictLen = String(resultObj.verdict.length);
+
+    // Если пользователь вручную закрыл спойлер («▴ Скрыть»), НЕ открываем его повторно при фоновых мутациях!
+    const userManuallyClosed = Boolean(slug && userManualDrawerStateBySlug.get(slug) === false);
+    if (shouldOpenDrawer && (!userManuallyClosed || isExplicitUserAiClick) && drawer && !drawer.classList.contains('open')) {
       drawer.classList.add('open');
       if (slug) drawerOpenBySlug.set(slug, true);
+      if (isExplicitUserAiClick && slug) userManualDrawerStateBySlug.set(slug, true);
     }
 
     const smart = analyzeProductQuality(meta);
@@ -2016,7 +2253,10 @@
     }
 
     aiBox.classList.add('visible');
-    aiContent.innerHTML = formatAiTextToHtml(resultObj.verdict);
+    const nextAiHtml = formatAiTextToHtml(resultObj.verdict);
+    if (aiContent.innerHTML !== nextAiHtml) {
+      aiContent.innerHTML = nextAiHtml;
+    }
     const sourceLinks = Array.isArray(resultObj.sources)
       ? resultObj.sources
           .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
@@ -2025,7 +2265,10 @@
       : '';
 
     const modeBadge = `<span style="color:#0369a1;font-size:11px;font-weight:600;">⚡ ${escapeHtml(resultObj.mode || 'Автопилот ИИ')}</span>`;
-    aiSources.innerHTML = sourceLinks ? `${modeBadge} ${sourceLinks}` : modeBadge;
+    const nextSourcesHtml = sourceLinks ? `${modeBadge} ${sourceLinks}` : modeBadge;
+    if (aiSources.innerHTML !== nextSourcesHtml) {
+      aiSources.innerHTML = nextSourcesHtml;
+    }
   }
 
   function syncExistingPanelUI(panel, review, meta) {
@@ -2144,7 +2387,7 @@
     }
   }
 
-  async function requestAiProductReview(meta, panel, forceRefresh = false, isZeroClickAuto = false, retryCount = 0) {
+  async function requestAiProductReview(meta, panel, forceRefresh = false, isZeroClickAuto = false, retryCount = 0, isManualUserClick = false) {
     const drawer = panel.querySelector('#lqs-drawer');
     const aiBox = panel.querySelector('#lqs-ai-box');
     const aiContent = panel.querySelector('#lqs-ai-content');
@@ -2154,7 +2397,12 @@
     const slug = panel.dataset.slug || extractSlugFromUrl(window.location.href);
     const settings = await getSettings();
 
-    if (!isZeroClickAuto || settings.autoOpenDrawerOnAi !== false) {
+    if (isManualUserClick && slug) {
+      userManualDrawerStateBySlug.set(slug, true);
+    }
+    const userManuallyClosed = Boolean(slug && userManualDrawerStateBySlug.get(slug) === false);
+
+    if (isManualUserClick || (!isZeroClickAuto && !userManuallyClosed) || (settings.autoOpenDrawerOnAi !== false && !userManuallyClosed)) {
       drawer.classList.add('open');
       if (slug) drawerOpenBySlug.set(slug, true);
     }
@@ -2225,7 +2473,8 @@
                 piecesCount: smart.piecesCount,
                 proteinPer100g: smart.proteinPer100g,
                 pricePer100gProtein: smart.pricePer100gProtein,
-                forceRefresh: Boolean(forceRefresh)
+                forceRefresh: Boolean(forceRefresh),
+                isManualUserClick: Boolean(isManualUserClick)
               }
             },
             (resp) => {
@@ -2253,7 +2502,14 @@
             'OK',
             `Ответ через [${modeLabel}] за ${dt} мс (источников: ${(bgResult.sources || []).length})`
           );
-          renderAiVerdictIntoPanel(panel, slug, meta, bgResult, !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false);
+          renderAiVerdictIntoPanel(
+            panel,
+            slug,
+            meta,
+            bgResult,
+            !isZeroClickAuto || settings.autoOpenDrawerOnAi !== false,
+            Boolean(isManualUserClick)
+          );
           return;
         }
 
@@ -2324,8 +2580,17 @@
     const latestMeta = extractProductPageMetadata();
     const cachedEntry = findAiCacheInMemory(slug, latestMeta.title, latestMeta.imageKey);
     if (cachedEntry && cachedEntry.verdict) {
+      const aiBox = panel.querySelector('#lqs-ai-box');
+      if (
+        panel.dataset.lqsRenderedAiSlug === slug &&
+        panel.dataset.lqsRenderedAiVerdictLen === String(cachedEntry.verdict.length) &&
+        aiBox &&
+        aiBox.classList.contains('visible')
+      ) {
+        return;
+      }
       getSettings().then((settings) => {
-        renderAiVerdictIntoPanel(panel, slug, latestMeta, cachedEntry, settings.autoOpenDrawerOnAi !== false);
+        renderAiVerdictIntoPanel(panel, slug, latestMeta, cachedEntry, settings.autoOpenDrawerOnAi !== false, false);
       });
       return;
     }
@@ -2565,14 +2830,14 @@
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel, false, false, 0);
+        requestAiProductReview(latestMeta, panel, false, false, 0, true);
       });
 
       panel.querySelector('#lqs-ai-refresh').addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();
-        requestAiProductReview(latestMeta, panel, true, false, 0);
+        requestAiProductReview(latestMeta, panel, true, false, 0, true);
       });
 
       panel.querySelectorAll('.lqs-tag-chip').forEach((chip) => {

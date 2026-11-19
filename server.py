@@ -1,6 +1,6 @@
 """
-Lavka Quality Shield v2.5.2 — Локальный FastAPI сервер (127.0.0.1:8765)
-Что исправлено и улучшено в v2.5.2:
+Lavka Quality Shield v2.6.0 — Локальный FastAPI сервер (127.0.0.1:8765)
+Что исправлено и улучшено в v2.6.0:
 1. Точный поиск идентичных продуктов (Exact Product & Modifier Matcher):
    - Полное сохранение названия товара, включая модификаторы «без сахара» / «Zero», вкус, жирность и объём/вес (например, «1,5 л»).
    - Жёсткая фильтрация результатов DuckDuckGo: обычная Кола с сахаром больше никогда не попадёт в цены/ссылки для «Колы без сахара» (и наоборот), а цены за баночку 0,33 л не смешаются с бутылкой 1,5 л.
@@ -19,9 +19,13 @@ sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 shutil.rmtree(os.path.join(os.path.dirname(os.path.abspath(__file__)), "__pycache__"), ignore_errors=True)
 
+import base64
+import ctypes
+import hmac
 import re
 import json
 import sqlite3
+from ctypes import wintypes
 import time
 import urllib.parse
 from collections import deque
@@ -38,35 +42,102 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
+APP_DATA_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+    "LavkaQualityShield",
+)
+os.makedirs(APP_DATA_DIR, exist_ok=True)
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.5.2")
+DB_PATH = os.path.join(APP_DATA_DIR, "lavka_ai_cache.db")
+LEGACY_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavka_ai_cache.db")
+if not os.path.exists(DB_PATH) and os.path.exists(LEGACY_DB_PATH):
+    shutil.copy2(LEGACY_DB_PATH, DB_PATH)
 
-# Разрешаем CORS только для расширения Chrome, страниц Яндекса и локального хоста (защита от чтения куки/паролей сторонними сайтами)
+DPAPI_PREFIX = "dpapi:"
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [
+        ("cbData", wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_char)),
+    ]
+
+
+def _protect_field(plaintext: str) -> str:
+    if not plaintext:
+        return ""
+    if os.name != "nt":
+        return plaintext
+    raw = plaintext.encode("utf-8")
+    buf = ctypes.create_string_buffer(raw, len(raw))
+    in_blob = _DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out_blob = _DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    if not crypt32.CryptProtectData(ctypes.byref(in_blob), "LQS", None, None, None, 0, ctypes.byref(out_blob)):
+        raise RuntimeError("Windows DPAPI CryptProtectData failed")
+    try:
+        encrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        return DPAPI_PREFIX + base64.b64encode(encrypted).decode("ascii")
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+
+def _unprotect_field(stored: Optional[str]) -> str:
+    if not stored:
+        return ""
+    if not stored.startswith(DPAPI_PREFIX):
+        return stored
+    if os.name != "nt":
+        raise RuntimeError("DPAPI-protected record cannot be read outside Windows")
+    raw = base64.b64decode(stored[len(DPAPI_PREFIX):])
+    buf = ctypes.create_string_buffer(raw, len(raw))
+    in_blob = _DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out_blob = _DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+        raise RuntimeError("Windows DPAPI CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData).decode("utf-8")
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+
+app = FastAPI(title="Lavka Quality Shield Backend", version="2.6.0")
+
+ALLOWED_EXT_ID = (os.environ.get("LQS_EXTENSION_ID") or "").strip().lower()
+EXT_ORIGIN_RE = (
+    rf"^chrome-extension://{re.escape(ALLOWED_EXT_ID)}$"
+    if ALLOWED_EXT_ID
+    else r"^chrome-extension://[a-p]{32}$"
+)
+EXT_ORIGIN_PATTERN = re.compile(EXT_ORIGIN_RE)
+
+# Строгий CORS только для расширения Chrome (без сторонних доменов и произвольных локальных портов)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^(chrome-extension://.*|https://([a-z0-9-]+\.)?yandex\.ru|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?)$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=EXT_ORIGIN_RE,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-LQS-Client", "Authorization"],
 )
 
 
 def verify_trusted_extension_request(request: Request) -> None:
-    """Блокирует запросы к сейфу паролей/куки со сторонних веб-страниц."""
+    """Пропускает запросы к локальному хранилищу аккаунтов строго от доверенного расширения."""
     origin = (request.headers.get("origin") or "").strip().lower()
     lqs_header = (request.headers.get("x-lqs-client") or "").strip().lower()
-    if lqs_header == "lavka-quality-shield":
-        if not origin or origin.startswith("chrome-extension://") or "yandex.ru" in origin or "127.0.0.1" in origin or "localhost" in origin:
-            return
-    if origin.startswith("chrome-extension://"):
-        return
-    if not origin and lqs_header == "lavka-quality-shield":
-        return
-    raise HTTPException(
-        status_code=403,
-        detail="Forbidden: access to Account Vault is restricted to Lavka Quality Shield extension.",
-    )
+    if not origin or not EXT_ORIGIN_PATTERN.match(origin):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: invalid or missing Chrome extension Origin.",
+        )
+    if not hmac.compare_digest(lqs_header, "lavka-quality-shield"):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: missing or invalid X-LQS-Client header.",
+        )
 
 
 REVIEW_SEARCH_SITES: List[Dict[str, str]] = [
@@ -74,8 +145,17 @@ REVIEW_SEARCH_SITES: List[Dict[str, str]] = [
     {"domain": "irecommend.ru", "name": "IRecommend"},
     {"domain": "rskrf.ru", "name": "Роскачество"},
     {"domain": "roscontrol.com", "name": "Росконтроль"},
+    {"domain": "magnit.ru", "name": "Магнит"},
+    {"domain": "5ka.ru", "name": "Пятёрочка"},
     {"domain": "vkusvill.ru", "name": "ВкусВилл"},
     {"domain": "perekrestok.ru", "name": "Перекрёсток"},
+    {"domain": "auchan.ru", "name": "Ашан"},
+    {"domain": "metro-cc.ru", "name": "МЕТРО"},
+    {"domain": "globus.ru", "name": "Глобус"},
+    {"domain": "mgnl.ru", "name": "Магнолия"},
+    {"domain": "dixy.ru", "name": "Дикси"},
+    {"domain": "chizhik.club", "name": "Чижик"},
+    {"domain": "okeydostavka.ru", "name": "О’КЕЙ"},
     {"domain": "vprok.ru", "name": "Перекрёсток Впрок"},
     {"domain": "av.ru", "name": "Азбука Вкуса"},
     {"domain": "lenta.com", "name": "Лента"},
@@ -187,7 +267,7 @@ def init_db() -> None:
         )
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
         conn.commit()
-    log_event("INIT", "SQLite v2.5.2 initialized (Exact Product Match + Secure Account Vault)")
+    log_event("INIT", "SQLite v2.6.0 initialized (Exact Product Match + Secure Account Vault)")
 
 
 init_db()
@@ -462,7 +542,7 @@ async def health_check():
         log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.5.2",
+        "version": "2.6.0",
         "cachedItems": cached_count,
         "trackedPrices": tracked_prices,
         "savedCarts": saved_carts_count,
@@ -476,7 +556,7 @@ async def health_check():
 async def get_server_logs():
     return {
         "status": "ok",
-        "version": "2.5.2",
+        "version": "2.6.0",
         "logs": list(SERVER_LOGS),
     }
 
@@ -497,12 +577,12 @@ async def save_account_vault_endpoint(req: AccountVaultItemModel, request: Reque
                 req.accountId,
                 req.label,
                 req.login or "",
-                req.password or "",
+                _protect_field(req.password or ""),
                 req.note or "",
                 req.yandexLogin or "",
                 int(req.cookieCount or len(req.cookies or [])),
-                json.dumps(req.cookies or [], ensure_ascii=False),
-                json.dumps(req.localStorageData or {}, ensure_ascii=False),
+                _protect_field(json.dumps(req.cookies or [], ensure_ascii=False)),
+                _protect_field(json.dumps(req.localStorageData or {}, ensure_ascii=False)),
                 now_iso,
             ),
         )
@@ -530,12 +610,12 @@ async def list_saved_accounts_endpoint(request: Request):
                     "accountId": r[0],
                     "label": r[1],
                     "login": r[2],
-                    "password": r[3],
+                    "password": _unprotect_field(r[3]),
                     "note": r[4],
                     "yandexLogin": r[5],
                     "cookieCount": r[6],
-                    "cookies": json.loads(r[7] or "[]"),
-                    "localStorageData": json.loads(r[8] or "{}"),
+                    "cookies": json.loads(_unprotect_field(r[7]) or "[]"),
+                    "localStorageData": json.loads(_unprotect_field(r[8]) or "{}"),
                     "updatedAt": r[9],
                 }
             )

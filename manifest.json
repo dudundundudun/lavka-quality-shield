@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lavka Quality Shield — Анти-Шулер Цен, Менеджер Аккаунтов (Куки/Пароли), Корзина и Zero-Click ИИ",
-  "version": "2.5.2",
-  "description": "Zero-Click ИИ-ревизор (с защитой от зависаний MV3), точный поиск идентичных товаров (с учётом «без сахара», вкуса и объёма), менеджер аккаунтов Лавки (куки + пароли в 1 клик), аудит корзины и авто-сборщик.",
+  "name": "Lavka Quality Shield — Радар 16 Магазинов (Лавка + Магнит + Сети), Сейф Аккаунтов и Zero-Click ИИ",
+  "version": "2.6.0",
+  "description": "Сравнение цен товара и корзины по 16 торговым сетям (Пятёрочка, Магнит, Перекрёсток, ВкусВилл, Ашан, МЕТРО, Глобус, Лента, Магнолия, Дикси, Чижик, Ozon, Купер), нативный парсер Магнита, менеджер аккаунтов и Zero-Click ИИ.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -17,13 +17,15 @@
   ],
   "host_permissions": [
     "https://lavka.yandex.ru/*",
-    "https://*.yandex.ru/*",
     "https://yandex.ru/*",
     "https://passport.yandex.ru/*",
     "https://id.yandex.ru/*",
+    "https://market.yandex.ru/*",
+    "https://magnit.ru/*",
+    "https://*.magnit.ru/*",
+    "https://vkusvill.ru/*",
+    "https://*.vkusvill.ru/*",
     "https://gemini.google.com/*",
-    "https://*.google.com/*",
-    "https://google.com/*",
     "https://html.duckduckgo.com/*",
     "https://lite.duckduckgo.com/*",
     "http://127.0.0.1:8765/*",
@@ -36,7 +38,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.5.2 — Exact Product Match, Account Switcher, Cart Audit & Zero-Click AI",
+    "default_title": "Lavka Quality Shield v2.6.0 — 16-Store Price Radar, Magnit Parser, Account Vault & Zero-Click AI",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -49,7 +51,9 @@
       "matches": [
         "https://lavka.yandex.ru/*",
         "https://passport.yandex.ru/*",
-        "https://id.yandex.ru/*"
+        "https://id.yandex.ru/*",
+        "https://magnit.ru/*",
+        "https://*.magnit.ru/*"
       ],
       "css": [
         "styles.css"
