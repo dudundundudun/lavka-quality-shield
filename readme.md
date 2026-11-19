@@ -14,9 +14,10 @@ lavka-quality-shield/
 │   ├── shared/utils.js         # Общие утилиты (escapeHtml, safeHttpUrl, fetchWithTimeout, настройки, поиск)
 │   ├── data/seed-magnit.json   # Внешние seed-данные Магнита (fallback)
 │   ├── tests/                  # Юнит-тесты парсера, общих утилит и security-guards (node --test)
-│   ├── background.js           # Service Worker (ref-counted keep-alive, circuit breaker, радар)
+│   ├── background.js           # Service Worker (keep-alive, оркестрация анализа, клонирование корзины, onMessage)
 │   ├── bg/accounts-vault.js    # Сейф аккаунтов, куки-сессии, 1-клик свитчер и автозаполнение
 │   ├── bg/gemini-tab.js        # Вкладка Gemini, куки Google, автопрогрев и очередь промптов
+│   ├── bg/price-radar.js       # Радар 16 сетей, история цен, парсер карточки Лавки и circuit breaker
 │   ├── content.js              # UI-панель, аудит корзины, нативный парсер Магнита
 │   ├── popup.html / popup.js   # Попап: история цен, клонирование корзины, статус 16 сетей
 │   ├── styles.css
@@ -43,7 +44,7 @@ lavka-quality-shield/
 * **Безопасность сейфа и API**: автогенерация 32-байтного `secret.key`, обязательный `X-LQS-Token` и пиннинг `Origin` расширения при первом подключении (`/api/auth/pair`), fail-closed DPAPI без отката в plaintext, защита всех API-маршрутов и SSRF-валидация `aiBaseUrl`, полная очистка паролей и куки из `chrome.storage.local`.
 * **Усиленный SQLite и конфиги**: `WAL`, `busy_timeout=5000`, 6 индексов (включая `norm_title`), версионирование схемы через `PRAGMA user_version`, единая версия `2.7.0` и динамическая подгрузка моделей ИИ из `${aiBaseUrl}/models`.
 * **Стабильный Service Worker и радар**: ref-counted `startSwKeepAlive()`, внешний `extension/data/seed-magnit.json`, персистентный circuit breaker (пауза 15 мин после 3 ошибок или капчи) и компактный статус 16 сетей в настройках попапа.
-* **Модульный бэкенд, чистые JS-парсеры и CI**: разделение `server.py` на `db.py` и `routers/`, чистый модуль `shared/price-parser.js` с тестами `node --test`, интеграционные тесты `test_api_crud.py` и GitHub Actions CI.
+* **Модульный бэкенд, чистые JS-парсеры и CI**: разделение `server.py` на `db.py` и `routers/`, модульная декомпозиция `background.js` (`bg/accounts-vault.js`, `bg/gemini-tab.js`, `bg/price-radar.js`), чистый модуль `shared/price-parser.js` с тестами `node --test`, интеграционные тесты `test_api_crud.py` и GitHub Actions CI.
 
 ## 🚀 Быстрый старт (Windows 11 + Google Chrome)
 
