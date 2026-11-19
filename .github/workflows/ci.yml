@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: pip install -r server/requirements.txt
+      - name: Syntax check & run Python unit tests
+        run: |
+          python -m py_compile server/security.py server/matcher.py server/db.py server/server.py server/routers/*.py
+          python -m unittest discover -s server/tests -v
+
+  js-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Validate JSON & JS syntax
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8')); JSON.parse(require('fs').readFileSync('extension/data/seed-magnit.json', 'utf8'));"
+          node --check extension/shared/config.js
+          node --check extension/shared/price-parser.js
+          node --check extension/background.js
+          node --check extension/content.js
+          node --check extension/popup.js
+      - name: Run JS parser tests (node --test)
+        run: node --test extension/tests/*.test.js

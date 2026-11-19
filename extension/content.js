@@ -1732,6 +1732,9 @@
   }
 
   function parseWeightAndPiecesFromString(rawStr) {
+    if (globalThis.LQS_PRICE_PARSER && typeof globalThis.LQS_PRICE_PARSER.parseWeightAndPieces === 'function') {
+      return globalThis.LQS_PRICE_PARSER.parseWeightAndPieces(rawStr);
+    }
     if (!rawStr) return { weightGrams: null, unitLabel: 'кг', piecesCount: null, pieceUnitLabel: 'шт' };
     const text = String(rawStr).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
 

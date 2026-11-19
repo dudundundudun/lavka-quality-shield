@@ -20,7 +20,7 @@
 
 'use strict';
 
-importScripts('shared/config.js');
+importScripts('shared/config.js', 'shared/price-parser.js');
 
 const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER, TOKEN_HEADER_NAME = 'X-LQS-Token' } = globalThis.LQS_CONFIG;
 const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;

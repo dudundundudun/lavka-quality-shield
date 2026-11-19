@@ -232,8 +232,8 @@ class TestBackendSecurityAndVault(unittest.TestCase):
             )
             self.assertEqual(r.status_code, 400, f"SSRF URL should be rejected: {bad_url}")
 
-    @patch.object(server, "_unprotect_field", side_effect=_mock_unprotect)
-    @patch.object(server, "_protect_field", side_effect=_mock_protect)
+    @patch.object(security, "_unprotect_field", side_effect=_mock_unprotect)
+    @patch.object(security, "_protect_field", side_effect=_mock_protect)
     def test_vault_save_partial_update_and_delete_roundtrip(self, _mock_enc, _mock_dec):
         headers = self._pair_primary_extension()
         payload = {
