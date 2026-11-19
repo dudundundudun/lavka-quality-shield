@@ -4500,10 +4500,29 @@ function isPassportOrPopupSender(sender) {
   return u.startsWith('https://passport.yandex.ru/') || u.startsWith('https://id.yandex.ru/');
 }
 
+function isTrustedMagnitSender(sender) {
+  const u = sender && typeof sender.url === 'string' ? sender.url : '';
+  if (!u) return false;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === 'https:' && (parsed.hostname === 'magnit.ru' || parsed.hostname.endsWith('.magnit.ru'));
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedExternalStoreSender(sender) {
+  return isTrustedLavkaOrPopupSender(sender) || isTrustedMagnitSender(sender);
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return false;
 
   if (msg.type === 'LQS_ANALYZE_PRODUCT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     orchestrateProductAnalysis(msg.payload || {})
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4511,6 +4530,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_RECORD_PRICES') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     recordPricesBatch(msg.accountId, msg.items || [])
       .then((summaries) => sendResponse({ ok: true, summaries }))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4518,6 +4541,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_RECORD_EXTERNAL_STORE_OFFERS') {
+    if (!isTrustedExternalStoreSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     recordExternalStoreOffers(msg.store || 'Магнит', msg.offers || [])
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4525,6 +4552,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_PRICE_INTEL') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     getProductPriceIntelligence(
       msg.slug,
       msg.title,
@@ -4542,6 +4573,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_AUDIT_CART_COMPETITORS') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     auditCartCompetitorsAndAccounts(msg.accountId, msg.items || [], Boolean(msg.forceNetworkSearch))
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4549,6 +4584,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_SAVE_CART_SNAPSHOT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     saveCartSnapshot(msg.accountId, msg.items || [], msg.totalPrice || 0)
       .then((snapshot) => sendResponse({ ok: true, snapshot }))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4556,6 +4595,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_SAVED_CARTS') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     getSavedCartsState()
       .then((state) => sendResponse({ ok: true, ...state }))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4563,6 +4606,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_COMPARE_CART_PRICES') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     compareSavedCartOnCurrentAccount(msg.accountId)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4570,6 +4617,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_AUTO_BUILD_CART') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     autoBuildCartInBrowser(msg.items || null)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4596,6 +4647,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_RADAR_STATUS') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     getRadar16StoresStatus()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4603,6 +4658,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_RESET_CIRCUIT_BREAKER') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     resetCircuitBreakers()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4632,6 +4691,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_ACCOUNTS_VAULT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     getAccountsVaultStatus()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4694,6 +4757,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_CACHED_AI_VERDICT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     getLocalAiCacheEntry(msg.slug, msg.title, msg.imageKey || null)
       .then((entry) => sendResponse({ ok: Boolean(entry), entry: entry || null }))
       .catch(() => sendResponse({ ok: false, entry: null }));
@@ -4701,6 +4768,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_CLEAR_AI_CACHE') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     clearLocalAiCache()
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4708,6 +4779,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_WARMUP_AUTOPILOT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     ensureAutopilotWarmup('content-script-boot')
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: false }));
@@ -4715,6 +4790,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_CHECK_AI_STATUS') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     checkAllConnections()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4722,6 +4801,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_SELECT_GEMINI_ACCOUNT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     (async () => {
       try {
         const patch = {
@@ -4751,6 +4834,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_AUTO_CONNECT_GEMINI_TAB') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     (async () => {
       try {
         if (msg.accountIndex !== undefined || msg.preferredTabId !== undefined) {

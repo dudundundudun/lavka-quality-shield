@@ -1073,10 +1073,23 @@ async function fetchBackendLogsTail() {
   });
 }
 
+function sanitizeDiagnosticsText(text, aiApiKey = '') {
+  let out = String(text || '');
+  out = out
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{6,}/gi, '$1[REDACTED]')
+    .replace(/("?(?:aiApiKey|apiKey|api_key|backendToken|X-LQS-Token)"?\s*[:=]\s*"?)([^",\s}\]]+)/gi, '$1[REDACTED]');
+  const key = String(aiApiKey || '').trim();
+  if (key.length >= 4) {
+    out = out.split(key).join('[REDACTED]');
+  }
+  return out;
+}
+
 async function refreshDiagnosticsView() {
   const box = document.getElementById('diag-report-box');
   box.textContent = 'Собираю бортовой журнал...';
   const backendTail = await fetchBackendLogsTail();
+  const currentAiKey = (document.getElementById('inp-ai-key')?.value || '').trim();
 
   return new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -1088,13 +1101,14 @@ async function refreshDiagnosticsView() {
           (resp) => {
             if (!chrome.runtime.lastError && resp && resp.reportText) {
               renderModulePills(resp.modules);
-              box.textContent = resp.reportText + backendTail;
+              box.textContent = sanitizeDiagnosticsText(resp.reportText + backendTail, currentAiKey);
               resolve(box.textContent);
               return;
             }
             chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
               const snap = res && res[FLIGHT_LOG_KEY];
-              box.textContent = (snap && snap.reportText ? snap.reportText : 'Нажми F5 на вкладке Лавки') + backendTail;
+              const raw = (snap && snap.reportText ? snap.reportText : 'Нажми F5 на вкладке Лавки') + backendTail;
+              box.textContent = sanitizeDiagnosticsText(raw, currentAiKey);
               resolve(box.textContent);
             });
           }
@@ -1102,7 +1116,8 @@ async function refreshDiagnosticsView() {
       } else {
         chrome.storage.local.get([FLIGHT_LOG_KEY], (res) => {
           const snap = res && res[FLIGHT_LOG_KEY];
-          box.textContent = (snap && snap.reportText ? snap.reportText : 'Открой вкладку Лавки') + backendTail;
+          const raw = (snap && snap.reportText ? snap.reportText : 'Открой вкладку Лавки') + backendTail;
+          box.textContent = sanitizeDiagnosticsText(raw, currentAiKey);
           resolve(box.textContent);
         });
       }

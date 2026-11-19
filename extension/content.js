@@ -599,9 +599,17 @@
       this.persistThrottled();
     },
 
+    redactSecrets(text) {
+      if (typeof text !== 'string' || !text) return text;
+      return text
+        .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{6,}/gi, '$1[REDACTED]')
+        .replace(/("?(?:aiApiKey|apiKey|api_key|backendToken|X-LQS-Token)"?\s*[:=]\s*"?)([^",\s}\]]+)/gi, '$1[REDACTED]');
+    },
+
     record(category, message, payload = null) {
       const now = new Date();
       const ts = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+      const safeMessage = this.redactSecrets(String(message || ''));
       let cleanPayload = '';
       if (payload !== null && payload !== undefined) {
         if (typeof payload === 'string') {
@@ -614,6 +622,7 @@
           }
         }
       }
+      cleanPayload = this.redactSecrets(cleanPayload);
       if (cleanPayload.length > 360) {
         cleanPayload = cleanPayload.slice(0, 360) + '…';
       }
@@ -622,7 +631,7 @@
         ts,
         url: window.location.pathname,
         cat: category,
-        msg: message,
+        msg: safeMessage,
         data: cleanPayload
       });
 
