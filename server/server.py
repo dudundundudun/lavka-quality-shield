@@ -1,6 +1,6 @@
 """
-Lavka Quality Shield v2.6.0 — Локальный FastAPI сервер (127.0.0.1:8765)
-Что исправлено и улучшено в v2.6.0:
+Lavka Quality Shield v2.7.0 — Локальный FastAPI сервер (127.0.0.1:8765)
+Что исправлено и улучшено в v2.7.0:
 1. Точный поиск идентичных продуктов (Exact Product & Modifier Matcher):
    - Полное сохранение названия товара, включая модификаторы «без сахара» / «Zero», вкус, жирность и объём/вес (например, «1,5 л»).
    - Жёсткая фильтрация результатов DuckDuckGo: обычная Кола с сахаром больше никогда не попадёт в цены/ссылки для «Колы без сахара» (и наоборот), а цены за баночку 0,33 л не смешаются с бутылкой 1,5 л.
@@ -62,9 +62,11 @@ from matcher import (
     parse_volume_or_weight_grams,
 )
 
+APP_VERSION = "2.7.0"
+SCHEMA_VERSION = 2
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 
-app = FastAPI(title="Lavka Quality Shield Backend", version="2.6.0")
+app = FastAPI(title="Lavka Quality Shield Backend", version=APP_VERSION)
 
 # Автогенерация 32-байтного локального секретного токена при старте сервера
 load_or_create_secret_token()
@@ -102,13 +104,29 @@ def log_event(level: str, msg: str) -> None:
     SERVER_LOGS.appendleft({"ts": now_str, "level": level, "msg": msg})
 
 
+def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path or DB_PATH, timeout=5.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS product_ai_cache (
                 slug TEXT PRIMARY KEY,
                 title TEXT,
+                norm_title TEXT,
                 verdict TEXT,
                 sources_json TEXT,
                 updated_at TEXT
@@ -130,13 +148,11 @@ def init_db() -> None:
             """
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_price_obs_slug ON price_observations(slug)"
-        )
-        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS product_price_summary (
                 slug TEXT PRIMARY KEY,
                 title TEXT,
+                norm_title TEXT,
                 amount TEXT,
                 min_price REAL,
                 max_price REAL,
@@ -152,11 +168,6 @@ def init_db() -> None:
             )
             """
         )
-        try:
-            conn.execute("ALTER TABLE product_price_summary ADD COLUMN competitor_offers_json TEXT")
-        except Exception:
-            pass
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS saved_carts (
@@ -184,9 +195,48 @@ def init_db() -> None:
             )
             """
         )
+
+        # Schema migrations via PRAGMA user_version
+        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        if current_version < 1:
+            _ensure_column(conn, "product_price_summary", "competitor_offers_json", "TEXT")
+            conn.execute("PRAGMA user_version = 1")
+            current_version = 1
+
+        if current_version < 2:
+            _ensure_column(conn, "product_ai_cache", "norm_title", "TEXT")
+            _ensure_column(conn, "product_price_summary", "norm_title", "TEXT")
+
+            # Backfill norm_title for existing rows
+            for table in ("product_ai_cache", "product_price_summary"):
+                rows = conn.execute(
+                    f"SELECT slug, title FROM {table} WHERE norm_title IS NULL OR norm_title = ''"
+                ).fetchall()
+                for slug_val, title_val in rows:
+                    nt = normalize_title_for_match(title_val or "")
+                    conn.execute(f"UPDATE {table} SET norm_title = ? WHERE slug = ?", (nt, slug_val))
+
+            conn.execute("PRAGMA user_version = 2")
+
+        # Indexes for fast cache & price lookups
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_price_obs_slug ON price_observations(slug)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_obs_slug_observed ON price_observations(slug, observed_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_norm_title ON product_ai_cache(norm_title, updated_at DESC)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_cache_updated_at ON product_ai_cache(updated_at DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_summary_norm_title ON product_price_summary(norm_title, updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_summary_updated_at ON product_price_summary(updated_at DESC)"
+        )
+
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
         conn.commit()
-    log_event("INIT", "SQLite v2.6.0 initialized (Exact Product Match + Secure Account Vault)")
+    log_event("INIT", f"SQLite v{APP_VERSION} (schema v{SCHEMA_VERSION}, WAL) initialized")
 
 
 init_db()
@@ -213,7 +263,7 @@ class AnalyzeRequest(BaseModel):
     pricingSummary: Optional[str] = None
     aiBaseUrl: str = "http://localhost:8083/v1"
     aiApiKey: str = ""
-    aiModel: str = "gemini-4-argon"
+    aiModel: str = ""
     forceRefresh: bool = False
 
 
@@ -290,10 +340,10 @@ def find_existing_summary_row_by_slug_or_title(
             SELECT slug, title, amount, min_price, max_price, avg_price, last_price, guest_price,
                    competitor_min_price, competitor_summary, competitor_offers_json, accounts_json, history_json, updated_at
             FROM product_price_summary
-            WHERE LOWER(title) = ?
+            WHERE norm_title = ? OR LOWER(title) = ?
             ORDER BY updated_at DESC LIMIT 1
             """,
-            (norm_title,),
+            (norm_title, norm_title),
         ).fetchone()
         if rows:
             return rows
@@ -400,14 +450,15 @@ def upsert_price_observation_sync(
     conn.execute(
         """
         INSERT OR REPLACE INTO product_price_summary (
-            slug, title, amount, min_price, max_price, avg_price, last_price,
+            slug, title, norm_title, amount, min_price, max_price, avg_price, last_price,
             guest_price, competitor_min_price, competitor_summary, competitor_offers_json,
             accounts_json, history_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             clean_slug,
             cur_title,
+            normalize_title_for_match(cur_title),
             cur_amount,
             min_p,
             max_p,
@@ -447,8 +498,10 @@ async def health_check():
     tracked_prices = 0
     saved_carts_count = 0
     saved_accounts_count = 0
+    schema_version = 0
+    journal_mode = "unknown"
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with get_db_connection() as conn:
             row1 = conn.execute("SELECT COUNT(*) FROM product_ai_cache").fetchone()
             cached_count = row1[0] if row1 else 0
             row2 = conn.execute("SELECT COUNT(*) FROM product_price_summary").fetchone()
@@ -457,11 +510,15 @@ async def health_check():
             saved_carts_count = row3[0] if row3 else 0
             row4 = conn.execute("SELECT COUNT(*) FROM saved_accounts").fetchone()
             saved_accounts_count = row4[0] if row4 else 0
+            schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+            journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "unknown")
     except Exception as exc:
         log_event("ERROR", f"Health check DB error: {exc}")
     return {
         "status": "ok",
-        "version": "2.6.0",
+        "version": APP_VERSION,
+        "schemaVersion": schema_version,
+        "journalMode": journal_mode,
         "cachedItems": cached_count,
         "trackedPrices": tracked_prices,
         "savedCarts": saved_carts_count,
@@ -483,7 +540,7 @@ async def auth_pair_endpoint(request: Request):
 async def get_server_logs():
     return {
         "status": "ok",
-        "version": "2.6.0",
+        "version": APP_VERSION,
         "logs": list(SERVER_LOGS),
     }
 
@@ -491,7 +548,7 @@ async def get_server_logs():
 @app.post("/api/accounts/save", dependencies=[Depends(verify_trusted_extension_request)])
 async def save_account_vault_endpoint(req: AccountVaultItemModel):
     now_iso = req.updatedAt or datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         existing = conn.execute(
             "SELECT password, cookie_count, cookies_json, local_storage_json FROM saved_accounts WHERE account_id = ?",
             (req.accountId,),
@@ -542,7 +599,7 @@ async def save_account_vault_endpoint(req: AccountVaultItemModel):
 @app.get("/api/accounts/list", dependencies=[Depends(verify_trusted_extension_request)])
 async def list_saved_accounts_endpoint():
     accounts = []
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         rows = conn.execute(
             """
             SELECT account_id, label, login, password, note, yandex_login,
@@ -571,7 +628,7 @@ async def list_saved_accounts_endpoint():
 
 @app.delete("/api/accounts/{account_id}", dependencies=[Depends(verify_trusted_extension_request)])
 async def delete_saved_account_endpoint(account_id: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         conn.execute("DELETE FROM saved_accounts WHERE account_id = ?", (account_id,))
         conn.commit()
     log_event("ACCOUNT_VAULT", f"Deleted account profile '{account_id}'")
@@ -583,7 +640,7 @@ async def record_prices_endpoint(req: RecordPricesRequest):
     if not req.items:
         return {"status": "empty", "updated": 0, "summaries": {}}
     summaries: Dict[str, Any] = {}
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         for item in req.items:
             if not item.slug or item.price <= 0:
                 continue
@@ -609,7 +666,7 @@ async def record_prices_endpoint(req: RecordPricesRequest):
 @app.get("/api/price/product/{slug}", dependencies=[Depends(verify_trusted_extension_request)])
 async def get_product_price_summary(slug: str, title: Optional[str] = None):
     clean_slug = slug.strip().lower()
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
         if not row:
             return {"status": "not_found", "slug": clean_slug}
@@ -637,7 +694,7 @@ async def get_product_price_summary(slug: str, title: Optional[str] = None):
 @app.get("/api/price/list", dependencies=[Depends(verify_trusted_extension_request)])
 async def list_tracked_prices(limit: int = 200):
     items = []
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         rows = conn.execute(
             """
             SELECT slug, title, amount, min_price, max_price, avg_price, last_price,
@@ -679,7 +736,7 @@ async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
     calc_total = round(sum((i.price or 0) * (i.qty or 1) for i in req.items), 2)
     final_total = req.totalPrice if req.totalPrice > 0 else calc_total
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         for cid in ("latest", f"cart_{acc}"):
             conn.execute(
                 """
@@ -706,7 +763,7 @@ async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
 
 @app.get("/api/cart/latest", dependencies=[Depends(verify_trusted_extension_request)])
 async def get_latest_cart_snapshot():
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         row = conn.execute(
             "SELECT cart_id, account_id, items_json, total_price, updated_at FROM saved_carts WHERE cart_id = 'latest'"
         ).fetchone()
@@ -759,15 +816,16 @@ async def save_cache_endpoint(req: SaveCacheRequest):
     cache_key = (req.slug or req.title).strip().lower()
     if not cache_key or not req.verdict.strip():
         return {"status": "ignored"}
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO product_ai_cache (slug, title, verdict, sources_json, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO product_ai_cache (slug, title, norm_title, verdict, sources_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 cache_key,
                 req.title,
+                normalize_title_for_match(req.title),
                 req.verdict.strip(),
                 json.dumps(req.sources or [], ensure_ascii=False),
                 datetime.now(timezone.utc).isoformat(),
@@ -1033,21 +1091,34 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_sum
     if req.aiApiKey:
         headers["Authorization"] = f"Bearer {req.aiApiKey}"
 
-    payload = {
-        "model": req.aiModel or "gemini-4-argon",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
-
     t0 = time.perf_counter()
     timeout_cfg = httpx.Timeout(18.0, connect=1.5)
     async with httpx.AsyncClient(timeout=timeout_cfg, trust_env=not is_local) as client:
+        model_id = (req.aiModel or "").strip()
+        if not model_id:
+            m_resp = await client.get(f"{base_url}/models", headers=headers)
+            m_resp.raise_for_status()
+            m_data = m_resp.json()
+            models_arr = m_data.get("data", []) if isinstance(m_data, dict) else (m_data if isinstance(m_data, list) else [])
+            for m in models_arr:
+                cand = m.get("id") if isinstance(m, dict) else (str(m) if isinstance(m, str) else "")
+                if cand:
+                    model_id = cand
+                    break
+        if not model_id:
+            raise ValueError("AI model is not configured and /models returned an empty list.")
+
+        payload = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+        }
         resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
         dt_ms = int((time.perf_counter() - t0) * 1000)
         resp.raise_for_status()
         data = resp.json()
         reply = data["choices"][0]["message"]["content"].strip()
-        log_event("LLM_OK", f"Model '{req.aiModel}' @ {base_url} replied in {dt_ms}ms ({len(reply)} chars)")
+        log_event("LLM_OK", f"Model '{model_id}' @ {base_url} replied in {dt_ms}ms ({len(reply)} chars)")
         return reply
 
 
@@ -1060,15 +1131,15 @@ async def analyze_product(req: AnalyzeRequest):
 
     # Сначала проверяем кэш ИИ (включая поиск по нормализованному названию для связки SEO-slug <-> HEX-ID)
     if not req.forceRefresh:
-        with sqlite3.connect(DB_PATH) as conn:
+        with get_db_connection() as conn:
             row = conn.execute(
                 "SELECT verdict, sources_json FROM product_ai_cache WHERE slug = ?",
                 (cache_key,),
             ).fetchone()
             if not row and norm_title:
                 row = conn.execute(
-                    "SELECT verdict, sources_json FROM product_ai_cache WHERE LOWER(title) = ? ORDER BY updated_at DESC LIMIT 1",
-                    (norm_title,),
+                    "SELECT verdict, sources_json FROM product_ai_cache WHERE norm_title = ? OR LOWER(title) = ? ORDER BY updated_at DESC LIMIT 1",
+                    (norm_title, norm_title),
                 ).fetchone()
             if row and row[0] and not str(row[0]).startswith("⚠️"):
                 s_row = find_existing_summary_row_by_slug_or_title(conn, cache_key, req.title)
@@ -1105,7 +1176,7 @@ async def analyze_product(req: AnalyzeRequest):
     )
 
     price_summary = None
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         if req.price and req.price > 0:
             price_summary = upsert_price_observation_sync(
                 conn=conn,
@@ -1137,15 +1208,16 @@ async def analyze_product(req: AnalyzeRequest):
         )
 
     if ai_ok:
-        with sqlite3.connect(DB_PATH) as conn:
+        with get_db_connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO product_ai_cache (slug, title, verdict, sources_json, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO product_ai_cache (slug, title, norm_title, verdict, sources_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cache_key,
                     req.title,
+                    norm_title,
                     verdict,
                     json.dumps(sources, ensure_ascii=False),
                     datetime.now(timezone.utc).isoformat(),

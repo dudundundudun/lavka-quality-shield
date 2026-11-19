@@ -6,7 +6,7 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.6.0',
+    VERSION: '2.7.0',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
@@ -32,7 +32,7 @@
       backendUrl: 'http://127.0.0.1:8765',
       aiBaseUrl: 'http://localhost:8083/v1',
       aiApiKey: '',
-      aiModel: 'gemini-4-argon',
+      aiModel: '',
       preferBrowserGeminiTab: true,
       useDirectBrowserAiFallback: true,
       geminiAccountIndex: 'auto',

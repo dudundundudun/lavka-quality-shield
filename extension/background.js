@@ -271,6 +271,23 @@ async function getBackendAuthHeaders(backendUrl, extraHeaders = {}) {
   return headers;
 }
 
+async function fetchAiModelsList(aiBaseUrl, aiApiKey = '') {
+  const cleanUrl = String(aiBaseUrl || '').trim().replace(/\/$/, '');
+  if (!cleanUrl) return [];
+  const headers = {};
+  if (aiApiKey) headers.Authorization = `Bearer ${aiApiKey}`;
+  const resp = await fetchWithTimeout(`${cleanUrl}/models`, { method: 'GET', headers }, 2500);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  const rawList = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
+  const ids = [];
+  for (const item of rawList) {
+    const id = typeof item === 'string' ? item.trim() : String(item?.id || '').trim();
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 function sanitizeAccountForLocalStorage(acc) {
   if (!acc || typeof acc !== 'object') return null;
   return {
@@ -3911,7 +3928,15 @@ async function checkAllConnections() {
     const r2 = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 1000);
     if (r2.ok) {
       bridgeOfflineUntilTs = 0;
-      bridgeStatus = { ok: true, msg: `ОК (${settings.aiModel})` };
+      let activeModelLabel = settings.aiModel || 'авто';
+          try {
+            const mJson = await r2.json();
+            const firstId = Array.isArray(mJson?.data) && mJson.data[0]?.id ? mJson.data[0].id : '';
+            if (!settings.aiModel && firstId) activeModelLabel = firstId;
+          } catch {
+            // ignore
+          }
+          bridgeStatus = { ok: true, msg: `ОК (${activeModelLabel})` };
     } else {
       bridgeStatus = { ok: false, msg: `HTTP ${r2.status} (проверь ключ)` };
     }
@@ -4105,13 +4130,21 @@ async function orchestrateProductAnalysisInternal(payload) {
         if (settings.aiApiKey) {
           headers.Authorization = `Bearer ${settings.aiApiKey}`;
         }
+        let resolvedModel = (settings.aiModel || '').trim();
+        if (!resolvedModel) {
+          const availableModels = await fetchAiModelsList(aiBaseUrl, settings.aiApiKey).catch(() => []);
+          resolvedModel = availableModels[0] || '';
+        }
+        if (!resolvedModel) {
+          throw new Error('No AI model configured or returned by /models');
+        }
         const directResp = await fetchWithTimeout(
           `${aiBaseUrl}/chat/completions`,
           {
             method: 'POST',
             headers,
             body: JSON.stringify({
-              model: settings.aiModel || 'gemini-4-argon',
+              model: resolvedModel,
               messages: [{ role: 'user', content: promptForBridge }],
               temperature: 0.2
             })
@@ -4125,7 +4158,7 @@ async function orchestrateProductAnalysisInternal(payload) {
           const reply = json.choices?.[0]?.message?.content;
           if (reply) {
             const cleanReply = reply.trim();
-            const modeLabel = `Мост ${settings.aiModel} (${aiBaseUrl})`;
+            const modeLabel = `Мост ${resolvedModel} (${aiBaseUrl})`;
             await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, cleanReply, webSources, modeLabel, payload.imageKey);
             if (backendOnline) {
               saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, cleanReply, webSources);
@@ -4367,6 +4400,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     })()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_FETCH_AI_MODELS') {
+    fetchAiModelsList(msg.aiBaseUrl, msg.aiApiKey)
+      .then((models) => sendResponse({ ok: true, models }))
+      .catch((err) => sendResponse({ ok: false, models: [], error: err.message || String(err) }));
     return true;
   }
 

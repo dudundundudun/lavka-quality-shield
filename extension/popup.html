@@ -742,8 +742,13 @@
       <input type="password" id="inp-ai-key" placeholder="Ключ для :8083 или DeepSeek...">
     </div>
     <div class="field">
-      <label>Название модели (Model ID):</label>
-      <input type="text" id="inp-ai-model" placeholder="gemini-4-argon">
+      <label>Название модели (Model ID — подгружается из /models):</label>
+      <div class="mini-row">
+        <input type="text" id="inp-ai-model" list="ai-models-datalist" placeholder="Автовыбор из /models или введи вручную">
+        <button type="button" class="icon-btn" id="refresh-ai-models-btn" title="Подгрузить список моделей с aiBaseUrl/models">🔄</button>
+      </div>
+      <datalist id="ai-models-datalist"></datalist>
+      <div id="ai-models-hint" style="font-size:10px;color:#7a7875;margin-top:2px;"></div>
     </div>
     <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки</button>
     <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:5px;"></div>

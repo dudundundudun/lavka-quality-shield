@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableExtensions
-title Lavka Quality Shield v2.6.0 - Windows Silent Autostart Installer
+title Lavka Quality Shield v2.7.0 - Windows Silent Autostart Installer
 cd /d "%~dp0"
 
 set "PYTHONDONTWRITEBYTECODE=1"
@@ -16,7 +16,7 @@ set "VENV_PYTHONW=%VENV_DIR%\Scripts\pythonw.exe"
 if not exist "%LQS_DATA_DIR%" mkdir "%LQS_DATA_DIR%"
 
 echo ============================================================
-echo   Lavka Quality Shield v2.6.0 - ZERO-CLICK WINDOWS AUTOSTART
+echo   Lavka Quality Shield v2.7.0 - ZERO-CLICK WINDOWS AUTOSTART
 echo ============================================================
 echo [1/3] Подготовка изолированного Python-окружения (.venv)...
 if not exist "%VENV_PYTHON%" (

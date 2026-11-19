@@ -899,6 +899,7 @@ function switchTab(activeId) {
     loadPricesAndCartTab();
   } else if (activeId === 'tab-settings-btn') {
     refreshAiRadar();
+    fetchAndPopulateAiModels(true);
   }
 }
 
@@ -911,19 +912,55 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   loadReviews();
 });
 
+function fetchAndPopulateAiModels(silent = false) {
+  const aiBaseUrl = document.getElementById('inp-ai-url').value.trim();
+  const aiApiKey = document.getElementById('inp-ai-key').value.trim();
+  const hintEl = document.getElementById('ai-models-hint');
+  const dl = document.getElementById('ai-models-datalist');
+  const modelInp = document.getElementById('inp-ai-model');
+  if (!aiBaseUrl || !dl) return;
+  if (!silent && hintEl) hintEl.textContent = '⏳ Загружаю список моделей из /models...';
+
+  chrome.runtime.sendMessage({ type: 'LQS_FETCH_AI_MODELS', aiBaseUrl, aiApiKey }, (resp) => {
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      if (!silent && hintEl) {
+        hintEl.textContent = `⚪ Не удалось получить /models (${resp?.error || 'сервер недоступен'})`;
+      }
+      return;
+    }
+    const models = Array.isArray(resp.models) ? resp.models : [];
+    dl.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
+    if (models.length > 0 && !modelInp.value.trim()) {
+      modelInp.value = models[0];
+    }
+    if (hintEl) {
+      hintEl.textContent = models.length > 0
+        ? `✅ Найдено моделей в /models: ${models.length}`
+        : '⚪ Эндпоинт /models вернул пустой список';
+    }
+  });
+}
+
+document.getElementById('refresh-ai-models-btn').addEventListener('click', () => {
+  fetchAndPopulateAiModels(false);
+});
+
 document.getElementById('preset-argon').addEventListener('click', () => {
   document.getElementById('inp-ai-url').value = 'http://localhost:8083/v1';
-  document.getElementById('inp-ai-model').value = 'gemini-4-argon';
+  document.getElementById('inp-ai-model').value = '';
+  fetchAndPopulateAiModels(false);
 });
 
 document.getElementById('preset-deepseek').addEventListener('click', () => {
   document.getElementById('inp-ai-url').value = 'https://api.deepseek.com/v1';
   document.getElementById('inp-ai-model').value = 'deepseek-chat';
+  fetchAndPopulateAiModels(true);
 });
 
 document.getElementById('preset-ollama').addEventListener('click', () => {
   document.getElementById('inp-ai-url').value = 'http://127.0.0.1:11434/v1';
-  document.getElementById('inp-ai-model').value = 'qwen2.5:14b';
+  document.getElementById('inp-ai-model').value = '';
+  fetchAndPopulateAiModels(false);
 });
 
 document.getElementById('save-ai-btn').addEventListener('click', () => {
@@ -931,7 +968,7 @@ document.getElementById('save-ai-btn').addEventListener('click', () => {
     backendUrl: document.getElementById('inp-backend').value.trim() || DEFAULT_SETTINGS.backendUrl,
     aiBaseUrl: document.getElementById('inp-ai-url').value.trim() || DEFAULT_SETTINGS.aiBaseUrl,
     aiApiKey: document.getElementById('inp-ai-key').value.trim(),
-    aiModel: document.getElementById('inp-ai-model').value.trim() || DEFAULT_SETTINGS.aiModel,
+    aiModel: document.getElementById('inp-ai-model').value.trim(),
     autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
     autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
     autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked,

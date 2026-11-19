@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Радар 16 Магазинов (Лавка + Магнит + Сети), Сейф Аккаунтов и Zero-Click ИИ",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Сравнение цен товара и корзины по 16 торговым сетям (Пятёрочка, Магнит, Перекрёсток, ВкусВилл, Ашан, МЕТРО, Глобус, Лента, Магнолия, Дикси, Чижик, Ozon, Купер), нативный парсер Магнита, менеджер аккаунтов и Zero-Click ИИ.",
   "icons": {
     "16": "icons/icon16.png",
@@ -38,7 +38,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.6.0 — 16-Store Price Radar, Magnit Parser, Account Vault & Zero-Click AI",
+    "default_title": "Lavka Quality Shield v2.7.0 — 16-Store Price Radar, Magnit Parser, Account Vault & Zero-Click AI",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

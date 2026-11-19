@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title Lavka Quality Shield v2.6.0 - Local AI Review Server
+title Lavka Quality Shield v2.7.0 - Local AI Review Server
 cd /d "%~dp0"
 
 set "PYTHONDONTWRITEBYTECODE=1"
@@ -13,7 +13,7 @@ set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 if not exist "%LQS_DATA_DIR%" mkdir "%LQS_DATA_DIR%"
 
 echo ============================================================
-echo   Lavka Quality Shield v2.6.0 - Local FastAPI Backend
+echo   Lavka Quality Shield v2.7.0 - Local FastAPI Backend
 echo   Listening on: http://127.0.0.1:8765
 echo   Healthcheck : http://127.0.0.1:8765/api/health
 echo   Venv path   : %VENV_DIR%
