@@ -22,8 +22,18 @@ def log_event(level: str, msg: str) -> None:
     SERVER_LOGS.appendleft({"ts": now_str, "level": level, "msg": msg})
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """sqlite3.Connection subclass that commits/rolls back AND closes on context exit."""
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self.close()
+
+
 def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or DB_PATH, timeout=5.0)
+    conn = sqlite3.connect(db_path or DB_PATH, timeout=5.0, factory=_ClosingConnection)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -275,11 +285,12 @@ def upsert_price_observation_sync(
         }
 
     all_prices = [float(h["price"]) for h in history_list if h.get("price") and float(h["price"]) > 0]
-    for a_val in accounts_map.values():
-        if isinstance(a_val, dict) and a_val.get("price"):
-            all_prices.append(float(a_val["price"]))
-    if price and price > 0:
-        all_prices.append(float(price))
+    if not all_prices:
+        for a_val in accounts_map.values():
+            if isinstance(a_val, dict) and a_val.get("price") and float(a_val["price"]) > 0:
+                all_prices.append(float(a_val["price"]))
+        if not all_prices and price and price > 0:
+            all_prices.append(float(price))
 
     if all_prices:
         min_p = round(min(all_prices), 2)

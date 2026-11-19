@@ -62,7 +62,7 @@ class SaveCacheRequest(BaseModel):
 
 
 @router.post("/api/save-cache", dependencies=[Depends(verify_trusted_extension_request)])
-async def save_cache_endpoint(req: SaveCacheRequest):
+def save_cache_endpoint(req: SaveCacheRequest):
     cache_key = (req.slug or req.title).strip().lower()
     if not cache_key or not req.verdict.strip():
         return {"status": "ignored"}

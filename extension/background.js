@@ -4105,7 +4105,6 @@ async function checkAllConnections() {
       ok: cookieInfo.ok,
       count: cookieInfo.cookiesCount,
       hasSecure1PSID: cookieInfo.hasSecure1PSID,
-      headerString: cookieInfo.headerString
     },
     backend: backendStatus,
     bridge: bridgeStatus,
@@ -4444,7 +4443,28 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+function isPopupSender(sender) {
+  const popupPrefix = chrome.runtime.getURL('popup.html');
+  return Boolean(sender && typeof sender.url === 'string' && sender.url.startsWith(popupPrefix));
+}
+
+function isTrustedLavkaOrPopupSender(sender) {
+  if (isPopupSender(sender)) return true;
+  const u = sender && typeof sender.url === 'string' ? sender.url : '';
+  return (
+    u.startsWith('https://lavka.yandex.ru/') ||
+    u.startsWith('https://passport.yandex.ru/') ||
+    u.startsWith('https://id.yandex.ru/')
+  );
+}
+
+function isPassportOrPopupSender(sender) {
+  if (isPopupSender(sender)) return true;
+  const u = sender && typeof sender.url === 'string' ? sender.url : '';
+  return u.startsWith('https://passport.yandex.ru/') || u.startsWith('https://id.yandex.ru/');
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return false;
 
   if (msg.type === 'LQS_ANALYZE_PRODUCT') {
@@ -4521,8 +4541,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_ACCOUNT_SECRET_FOR_POPUP') {
-    const popupPrefix = chrome.runtime.getURL('popup.html');
-    if (!sender || !sender.url || !sender.url.startsWith(popupPrefix)) {
+    if (!isPopupSender(sender)) {
       sendResponse({ ok: false, error: 'Доступ к секретам сейфа разрешён только из popup расширения.' });
       return true;
     }
@@ -4556,6 +4575,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_FETCH_AI_MODELS') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, models: [], error: 'Forbidden' });
+      return true;
+    }
     fetchAiModelsList(msg.aiBaseUrl, msg.aiApiKey)
       .then((models) => sendResponse({ ok: true, models }))
       .catch((err) => sendResponse({ ok: false, models: [], error: err.message || String(err) }));
@@ -4563,8 +4586,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_SET_BACKEND_TOKEN') {
-    const popupPrefix = chrome.runtime.getURL('popup.html');
-    if (!sender || !sender.url || !sender.url.startsWith(popupPrefix)) {
+    if (!isPopupSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }
@@ -4582,6 +4604,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_SAVE_ACCOUNT_TO_VAULT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     saveAccountToVault(msg.payload || {})
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4589,6 +4615,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_DELETE_ACCOUNT_FROM_VAULT') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     deleteAccountFromVault(msg.accountId)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4596,6 +4626,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_SWITCH_LAVKA_ACCOUNT') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     switchLavkaAccountInOneClick(msg.payload || {})
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4603,6 +4637,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_LOGOUT_CLEAN_LAVKA_SESSION') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     logoutToCleanLavkaSession()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4610,6 +4648,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_AUTOFILL_YANDEX_LOGIN') {
+    if (!isPassportOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
     autofillYandexPassportTab(msg.accountId)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
@@ -4709,6 +4751,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_GEMINI_COOKIE_HEADER') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Доступ к куки Google разрешён только из popup расширения.' });
+      return true;
+    }
     inspectGeminiCookies()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));

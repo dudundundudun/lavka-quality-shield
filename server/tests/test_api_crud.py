@@ -97,6 +97,7 @@ class TestApiCrudEndpoints(unittest.TestCase):
         summary = r_get.json()["summary"]
         self.assertEqual(summary["minPrice"], 149.0)
         self.assertEqual(summary["maxPrice"], 179.0)
+        self.assertEqual(summary["avgPrice"], 164.0)
         self.assertEqual(summary["lastPrice"], 149.0)
         self.assertEqual(summary["guestPrice"], 159.0)
 

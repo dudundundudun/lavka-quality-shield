@@ -224,6 +224,9 @@ class TestBackendSecurityAndVault(unittest.TestCase):
             "http://192.168.1.1/v1",
             "file:///etc/passwd",
             "https://169.254.169.254/v1",
+            "https://192.168.1.1/v1",
+            "https://127.0.0.1:8765/v1",
+            "https://localhost/v1",
         ]:
             r = self.client.post(
                 "/api/analyze-product",

@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.get("/api/health")
-async def health_check():
+def health_check():
     cached_count = 0
     tracked_prices = 0
     saved_carts_count = 0
@@ -55,14 +55,14 @@ async def health_check():
 
 
 @router.post("/api/auth/pair")
-async def auth_pair_endpoint(request: Request):
+def auth_pair_endpoint(request: Request):
     res = pair_extension_request(request)
     db.log_event("AUTH", f"Extension paired: id={res['extensionId'][:8]}... (already={res['alreadyPaired']})")
     return res
 
 
 @router.get("/api/logs", dependencies=[Depends(verify_trusted_extension_request)])
-async def get_server_logs():
+def get_server_logs():
     return {
         "status": "ok",
         "version": db.APP_VERSION,

@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import urllib.parse
 from ctypes import wintypes
 from typing import Optional
@@ -194,13 +195,34 @@ def validate_ai_base_url(url: str) -> str:
             )
         return clean
 
-    # https:// — reject private/link-local/loopback/reserved raw IPs (e.g. cloud metadata 169.254.169.254)
+    # https:// — reject private/link-local/loopback/reserved raw IPs and DNS records pointing to them
+    def _is_forbidden_ip(ip_obj) -> bool:
+        return (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_unspecified
+            or ip_obj.is_reserved
+        )
+
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+        if _is_forbidden_ip(ip):
             raise HTTPException(status_code=400, detail="Invalid aiBaseUrl: forbidden IP address.")
     except ValueError:
-        pass
+        if host in ("localhost", "localhost.localdomain"):
+            raise HTTPException(status_code=400, detail="Invalid aiBaseUrl: localhost is only allowed over http://.")
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+            for info in infos:
+                resolved_ip = ipaddress.ip_address(info[4][0])
+                if _is_forbidden_ip(resolved_ip):
+                    raise HTTPException(status_code=400, detail="Invalid aiBaseUrl: host resolves to forbidden IP.")
+        except HTTPException:
+            raise
+        except OSError:
+            pass
     return clean
 
 

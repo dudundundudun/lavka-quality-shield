@@ -127,6 +127,12 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
 
         self.assertEqual(server.APP_VERSION, expected)
 
+    def test_db_connection_closes_on_context_exit(self):
+        with server.get_db_connection() as conn:
+            self.assertEqual(conn.execute("SELECT 1").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
     def test_no_hardcoded_gemini_4_argon_in_defaults(self):
         config_js = (Path(REPO_ROOT) / "extension" / "shared" / "config.js").read_text(encoding="utf-8")
         self.assertNotIn("gemini-4-argon", config_js)

@@ -72,6 +72,12 @@
       .replace(/'/g, '&#39;');
   }
 
+  function safeHttpUrl(url) {
+    if (typeof url !== 'string') return '';
+    const trimmed = url.trim();
+    return /^https?:\/\//i.test(trimmed) ? trimmed : '';
+  }
+
   function normalizeTitle(raw) {
     if (!raw) return '';
     return String(raw)
@@ -1350,11 +1356,11 @@
 
         const foundOffersHtml = Array.isArray(it.competitorOffers)
           ? it.competitorOffers
-              .filter((o) => o && o.url)
+              .filter((o) => o && safeHttpUrl(o.url))
               .map((o) => {
                 const isCheaper = o.price && o.price < it.price - 2;
                 const priceTag = o.price ? `: ~${o.price} ₽` : '';
-                return `<a href="${escapeHtml(o.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link ${isCheaper ? 'is-cheaper' : ''}" title="${escapeHtml(o.title || o.store)}">🏪 ${escapeHtml(o.store)}${priceTag} ↗</a>`;
+                return `<a href="${escapeHtml(safeHttpUrl(o.url))}" target="_blank" rel="noopener noreferrer" class="lqs-store-link ${isCheaper ? 'is-cheaper' : ''}" title="${escapeHtml(o.title || o.store)}">🏪 ${escapeHtml(o.store)}${priceTag} ↗</a>`;
               })
               .join('')
           : '';
@@ -2055,8 +2061,9 @@
                 const oldStr = row.oldPrice && row.oldPrice > (row.price || 0)
                   ? ` <s style="color:#94a3b8;font-size:10.5px;">${row.oldPrice} ₽</s>`
                   : '';
-                const nameHtml = row.url
-                  ? `<a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;font-weight:700;text-decoration:underline;" title="${escapeHtml(row.offerTitle || row.source)}">${escapeHtml(row.source)} ↗</a>`
+                const safeRowUrl = safeHttpUrl(row.url);
+                const nameHtml = safeRowUrl
+                  ? `<a href="${escapeHtml(safeRowUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;font-weight:700;text-decoration:underline;" title="${escapeHtml(row.offerTitle || row.source)}">${escapeHtml(row.source)} ↗</a>`
                   : `<span style="font-weight:600;">${escapeHtml(row.source)}</span>`;
                 return `
                   <div class="lqs-price-matrix-row ${isBest ? 'is-best-price' : ''}">

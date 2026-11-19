@@ -50,7 +50,7 @@ class SaveCartSnapshotRequest(BaseModel):
 
 
 @router.post("/api/price/record", dependencies=[Depends(verify_trusted_extension_request)])
-async def record_prices_endpoint(req: RecordPricesRequest):
+def record_prices_endpoint(req: RecordPricesRequest):
     if not req.items:
         return {"status": "empty", "updated": 0, "summaries": {}}
     summaries: Dict[str, Any] = {}
@@ -78,7 +78,7 @@ async def record_prices_endpoint(req: RecordPricesRequest):
 
 
 @router.get("/api/price/product/{slug}", dependencies=[Depends(verify_trusted_extension_request)])
-async def get_product_price_summary(slug: str, title: Optional[str] = None):
+def get_product_price_summary(slug: str, title: Optional[str] = None):
     clean_slug = slug.strip().lower()
     with db.get_db_connection() as conn:
         row = db.find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
@@ -106,7 +106,7 @@ async def get_product_price_summary(slug: str, title: Optional[str] = None):
 
 
 @router.get("/api/price/list", dependencies=[Depends(verify_trusted_extension_request)])
-async def list_tracked_prices(limit: int = 200):
+def list_tracked_prices(limit: int = 200):
     items = []
     with db.get_db_connection() as conn:
         rows = conn.execute(
@@ -143,10 +143,10 @@ async def list_tracked_prices(limit: int = 200):
 
 
 @router.post("/api/cart/save", dependencies=[Depends(verify_trusted_extension_request)])
-async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
+def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
     now_iso = datetime.now(timezone.utc).isoformat()
     acc = (req.accountId or "Аккаунт #1").strip()
-    items_list = [i.model_dump() for i in req.items]
+    items_list = [i.model_dump() if hasattr(i, 'model_dump') else i.dict() for i in req.items]
     calc_total = round(sum((i.price or 0) * (i.qty or 1) for i in req.items), 2)
     final_total = req.totalPrice if req.totalPrice > 0 else calc_total
 
@@ -176,7 +176,7 @@ async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
 
 
 @router.get("/api/cart/latest", dependencies=[Depends(verify_trusted_extension_request)])
-async def get_latest_cart_snapshot():
+def get_latest_cart_snapshot():
     with db.get_db_connection() as conn:
         row = conn.execute(
             "SELECT cart_id, account_id, items_json, total_price, updated_at FROM saved_carts WHERE cart_id = 'latest'"

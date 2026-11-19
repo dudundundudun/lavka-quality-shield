@@ -34,7 +34,6 @@ echo [2/3] Создание тихого фонового автозапуска
 (
   echo Set WshShell = CreateObject^("WScript.Shell"^)
   echo WshShell.CurrentDirectory = "%APP_DIR:~0,-1%"
-  echo WshShell.Run "cmd /c docker start gemini-argon >nul 2>&1", 0, False
   echo WshShell.Run """%VENV_PYTHONW%"" -B server.py", 0, False
 ) > "%VBS_PATH%"
 

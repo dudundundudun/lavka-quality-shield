@@ -31,7 +31,7 @@ class AccountVaultItemModel(BaseModel):
 
 
 @router.post("/api/accounts/save", dependencies=[Depends(verify_trusted_extension_request)])
-async def save_account_vault_endpoint(req: AccountVaultItemModel):
+def save_account_vault_endpoint(req: AccountVaultItemModel):
     now_iso = req.updatedAt or datetime.now(timezone.utc).isoformat()
     with db.get_db_connection() as conn:
         existing = conn.execute(
@@ -82,7 +82,7 @@ async def save_account_vault_endpoint(req: AccountVaultItemModel):
 
 
 @router.get("/api/accounts/list", dependencies=[Depends(verify_trusted_extension_request)])
-async def list_saved_accounts_endpoint():
+def list_saved_accounts_endpoint():
     accounts = []
     with db.get_db_connection() as conn:
         rows = conn.execute(
@@ -112,7 +112,7 @@ async def list_saved_accounts_endpoint():
 
 
 @router.delete("/api/accounts/{account_id}", dependencies=[Depends(verify_trusted_extension_request)])
-async def delete_saved_account_endpoint(account_id: str):
+def delete_saved_account_endpoint(account_id: str):
     with db.get_db_connection() as conn:
         conn.execute("DELETE FROM saved_accounts WHERE account_id = ?", (account_id,))
         conn.commit()
