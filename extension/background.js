@@ -20,34 +20,22 @@
 
 'use strict';
 
-const SETTINGS_KEY = 'lqs_settings_v2';
-const AI_CACHE_KEY = 'lqs_ai_cache_v1';
-const PRICE_DB_KEY = 'lqs_price_db_v1';
-const EXT_STORE_DB_KEY = 'lqs_ext_store_prices_v1';
-const SAVED_CARTS_KEY = 'lqs_saved_carts_v1';
-const CART_LOCKS_KEY = 'lqs_cart_locks_v1';
-const ACCOUNTS_VAULT_KEY = 'lqs_accounts_vault_v1';
-const DELETED_ACCOUNTS_KEY = 'lqs_deleted_accounts_v1';
+importScripts('shared/config.js');
 
-const MAX_LOCAL_AI_CACHE_ITEMS = 500;
-const MAX_LOCAL_PRICE_DB_ITEMS = 1500;
+const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER } = globalThis.LQS_CONFIG;
+const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
+const AI_CACHE_KEY = STORAGE_KEYS.AI_CACHE;
+const PRICE_DB_KEY = STORAGE_KEYS.PRICE_DB;
+const EXT_STORE_DB_KEY = STORAGE_KEYS.EXT_STORE_DB;
+const SAVED_CARTS_KEY = STORAGE_KEYS.SAVED_CARTS;
+const CART_LOCKS_KEY = STORAGE_KEYS.CART_LOCKS;
+const ACCOUNTS_VAULT_KEY = STORAGE_KEYS.ACCOUNTS_VAULT;
+const DELETED_ACCOUNTS_KEY = STORAGE_KEYS.DELETED_ACCOUNTS;
 
-const LQS_CLIENT_HEADER = { 'X-LQS-Client': 'lavka-quality-shield' };
+const MAX_LOCAL_AI_CACHE_ITEMS = LIMITS.MAX_LOCAL_AI_CACHE_ITEMS;
+const MAX_LOCAL_PRICE_DB_ITEMS = LIMITS.MAX_LOCAL_PRICE_DB_ITEMS;
 
-const DEFAULT_SETTINGS = {
-  backendUrl: 'http://127.0.0.1:8765',
-  aiBaseUrl: 'http://localhost:8083/v1',
-  aiApiKey: '',
-  aiModel: 'gemini-4-argon',
-  preferBrowserGeminiTab: true,
-  geminiAccountIndex: 'auto',
-  preferredGeminiTabId: null,
-  autoRunAiOnProductPage: true,
-  autoOpenDrawerOnAi: true,
-  autoWarmupGeminiTab: true,
-  lavkaAccountLabel: 'Аккаунт #1 (Основной)',
-  enableGuestPriceProbe: true
-};
+const DEFAULT_SETTINGS = { ...globalThis.LQS_CONFIG.DEFAULT_SETTINGS };
 
 const DEFAULT_ACCOUNT_PROFILES = [
   {

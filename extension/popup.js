@@ -1,22 +1,10 @@
-const STORAGE_KEY = 'lqs_reviews_v1';
-const SETTINGS_KEY = 'lqs_settings_v2';
-const FLIGHT_LOG_KEY = 'lqs_flight_log_v1';
-const PRICE_DB_KEY = 'lqs_price_db_v1';
+const { STORAGE_KEYS } = globalThis.LQS_CONFIG;
+const STORAGE_KEY = STORAGE_KEYS.REVIEWS;
+const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
+const FLIGHT_LOG_KEY = STORAGE_KEYS.FLIGHT_LOG;
+const PRICE_DB_KEY = STORAGE_KEYS.PRICE_DB;
 
-const DEFAULT_SETTINGS = {
-  backendUrl: 'http://127.0.0.1:8765',
-  aiBaseUrl: 'http://localhost:8083/v1',
-  aiApiKey: '',
-  aiModel: 'gemini-4-argon',
-  preferBrowserGeminiTab: true,
-  geminiAccountIndex: 'auto',
-  preferredGeminiTabId: null,
-  autoRunAiOnProductPage: true,
-  autoOpenDrawerOnAi: true,
-  autoWarmupGeminiTab: true,
-  lavkaAccountLabel: 'Аккаунт #1 (Основной)',
-  enableGuestPriceProbe: true
-};
+const DEFAULT_SETTINGS = { ...globalThis.LQS_CONFIG.DEFAULT_SETTINGS };
 
 let currentFilter = 'all';
 let searchQuery = '';
