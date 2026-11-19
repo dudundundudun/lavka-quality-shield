@@ -424,6 +424,33 @@ async function fetchBackendVaultAccounts(backendUrl) {
   return null;
 }
 
+async function fetchBackendAccountSecrets(backendUrl, accountId) {
+  const cleanUrl = (backendUrl || '').replace(/\/$/, '');
+  if (!cleanUrl || !accountId || Date.now() < backendOfflineUntilTs) return null;
+  try {
+    const headers = await getBackendAuthHeaders(cleanUrl);
+    const r = await fetchWithTimeout(
+      `${cleanUrl}/api/accounts/${encodeURIComponent(accountId)}/secrets`,
+      { method: 'GET', headers },
+      1500
+    );
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.status === 'ok') {
+        return {
+          accountId: j.accountId || accountId,
+          password: j.password || '',
+          cookies: Array.isArray(j.cookies) ? j.cookies : [],
+          localStorageData: j.localStorageData && typeof j.localStorageData === 'object' ? j.localStorageData : {}
+        };
+      }
+    }
+  } catch {
+    backendOfflineUntilTs = Date.now() + 10000;
+  }
+  return null;
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -1240,14 +1267,18 @@ async function autofillYandexPassportTab(accountId) {
   const settings = await getSettings();
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   const map = await getAccountsVaultMap();
-  const metaAcc = map[accountId] || Object.values(map).find((a) => a.label === accountId);
-  const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
-  const srvAcc = Array.isArray(srvAccounts)
-    ? srvAccounts.find((a) => a.accountId === (metaAcc?.accountId || accountId) || a.label === accountId)
-    : null;
-  const acc = srvAcc ? { ...(metaAcc || {}), ...srvAcc } : metaAcc;
+  let metaAcc = map[accountId] || Object.values(map).find((a) => a.label === accountId);
+  if (!metaAcc) {
+    const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
+    if (Array.isArray(srvAccounts)) {
+      metaAcc = srvAccounts.find((a) => a.accountId === accountId || a.label === accountId) || null;
+    }
+  }
+  const targetAccountId = metaAcc?.accountId || accountId;
+  const secrets = await fetchBackendAccountSecrets(backendUrl, targetAccountId);
+  const acc = secrets ? { ...(metaAcc || {}), ...secrets } : metaAcc;
   if (!acc || (!acc.login && !acc.password)) {
-    const hint = !srvAccounts ? ' Убедись, что локальный сервер (:8765) запущен.' : '';
+    const hint = !secrets ? ' Убедись, что локальный сервер (:8765) запущен.' : '';
     return { ok: false, error: `Для этого профиля ещё не указаны логин и пароль.${hint}` };
   }
 
@@ -1391,14 +1422,19 @@ async function switchLavkaAccountInOneClick(options = {}) {
     }
   }
 
-  const targetMeta =
+  let targetMeta =
     (accountId && map[accountId]) ||
     Object.values(map).find((a) => a.label === label || a.accountId === accountId);
-  const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
-  const targetSrv = Array.isArray(srvAccounts) && targetMeta
-    ? srvAccounts.find((a) => a.accountId === targetMeta.accountId)
+  if (!targetMeta) {
+    const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
+    if (Array.isArray(srvAccounts)) {
+      targetMeta = srvAccounts.find((a) => a.accountId === accountId || (label && a.label === label)) || null;
+    }
+  }
+  const targetSecrets = targetMeta
+    ? await fetchBackendAccountSecrets(backendUrl, targetMeta.accountId)
     : null;
-  const targetAcc = targetSrv ? { ...targetMeta, ...targetSrv } : targetMeta;
+  const targetAcc = targetSecrets ? { ...targetMeta, ...targetSecrets } : targetMeta;
 
   if (!targetAcc) {
     if (label) {
@@ -4548,12 +4584,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const settings = await getSettings();
       const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
-      const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
-      if (!Array.isArray(srvAccounts)) {
-        return { ok: false, error: 'Локальный сервер (:8765) недоступен.' };
+      const secrets = await fetchBackendAccountSecrets(backendUrl, msg.accountId);
+      if (!secrets) {
+        return { ok: false, error: 'Не удалось получить секрет с локального сервера (:8765).' };
       }
-      const found = srvAccounts.find((a) => a.accountId === msg.accountId);
-      return { ok: true, password: found?.password || '' };
+      return { ok: true, password: secrets.password || '' };
     })()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));

@@ -2,6 +2,7 @@
 Lavka Quality Shield — AI Review Cache & Product Analysis Router
 """
 
+import asyncio
 import json
 import re
 import time
@@ -372,83 +373,129 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_sum
         return reply
 
 
+def _lookup_cached_analysis_sync(cache_key: str, norm_title: str, title: str) -> Optional[Dict[str, Any]]:
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT verdict, sources_json FROM product_ai_cache WHERE slug = ?",
+            (cache_key,),
+        ).fetchone()
+        if not row and norm_title:
+            row = conn.execute(
+                "SELECT verdict, sources_json FROM product_ai_cache WHERE norm_title = ? OR LOWER(title) = ? ORDER BY updated_at DESC LIMIT 1",
+                (norm_title, norm_title),
+            ).fetchone()
+        if row and row[0] and not str(row[0]).startswith("⚠️"):
+            s_row = db.find_existing_summary_row_by_slug_or_title(conn, cache_key, title)
+            cached_summary = None
+            if s_row:
+                cached_summary = {
+                    "slug": s_row[0],
+                    "title": s_row[1],
+                    "amount": s_row[2],
+                    "minPrice": s_row[3],
+                    "maxPrice": s_row[4],
+                    "avgPrice": s_row[5],
+                    "lastPrice": s_row[6],
+                    "guestPrice": s_row[7],
+                    "competitorMinPrice": s_row[8],
+                    "competitorSummary": s_row[9],
+                    "competitorOffers": json.loads(s_row[10] or "[]"),
+                    "accounts": json.loads(s_row[11] or "{}"),
+                    "history": json.loads(s_row[12] or "[]"),
+                    "updatedAt": s_row[13],
+                }
+            db.log_event("CACHE_HIT", f"Returned SQLite cached verdict for '{cache_key}'")
+            return {
+                "cached": True,
+                "aiOk": True,
+                "verdict": row[0],
+                "sources": json.loads(row[1] or "[]"),
+                "priceSummary": cached_summary,
+            }
+    return None
+
+
+def _record_analysis_price_sync(
+    cache_key: str,
+    req: AnalyzeRequest,
+    comp_min: Optional[float],
+    comp_sum: Optional[str],
+    comp_offers: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not (req.price and req.price > 0):
+        return None
+    with db.get_db_connection() as conn:
+        price_summary = db.upsert_price_observation_sync(
+            conn=conn,
+            slug=cache_key,
+            title=req.title,
+            account_id=req.accountId or "Аккаунт #1",
+            price=req.price,
+            old_price=req.oldPrice,
+            amount=req.amount or "",
+            guest_price=req.guestPrice,
+            competitor_min=comp_min,
+            competitor_summary=comp_sum,
+            competitor_offers=comp_offers,
+        )
+        conn.commit()
+        return price_summary
+
+
+def _save_ai_cache_sync(
+    cache_key: str, title: str, norm_title: str, verdict: str, sources: List[Dict[str, Any]]
+) -> None:
+    with db.get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO product_ai_cache (slug, title, norm_title, verdict, sources_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cache_key,
+                title,
+                norm_title,
+                verdict,
+                json.dumps(sources, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+
+
 @router.post("/api/analyze-product", dependencies=[Depends(verify_trusted_extension_request)])
 async def analyze_product(req: AnalyzeRequest):
     validate_ai_base_url(req.aiBaseUrl)
     cache_key = (req.slug or req.title).strip().lower()
     norm_title = normalize_title_for_match(req.title)
-    db.log_event("REQ", f"Analyze request for slug='{cache_key}' title='{req.title[:35]}' (force={req.forceRefresh})")
+    await asyncio.to_thread(
+        db.log_event,
+        "REQ",
+        f"Analyze request for slug='{cache_key}' title='{req.title[:35]}' (force={req.forceRefresh})",
+    )
 
     # Сначала проверяем кэш ИИ (включая поиск по нормализованному названию для связки SEO-slug <-> HEX-ID)
     if not req.forceRefresh:
-        with db.get_db_connection() as conn:
-            row = conn.execute(
-                "SELECT verdict, sources_json FROM product_ai_cache WHERE slug = ?",
-                (cache_key,),
-            ).fetchone()
-            if not row and norm_title:
-                row = conn.execute(
-                    "SELECT verdict, sources_json FROM product_ai_cache WHERE norm_title = ? OR LOWER(title) = ? ORDER BY updated_at DESC LIMIT 1",
-                    (norm_title, norm_title),
-                ).fetchone()
-            if row and row[0] and not str(row[0]).startswith("⚠️"):
-                s_row = db.find_existing_summary_row_by_slug_or_title(conn, cache_key, req.title)
-                cached_summary = None
-                if s_row:
-                    cached_summary = {
-                        "slug": s_row[0],
-                        "title": s_row[1],
-                        "amount": s_row[2],
-                        "minPrice": s_row[3],
-                        "maxPrice": s_row[4],
-                        "avgPrice": s_row[5],
-                        "lastPrice": s_row[6],
-                        "guestPrice": s_row[7],
-                        "competitorMinPrice": s_row[8],
-                        "competitorSummary": s_row[9],
-                        "competitorOffers": json.loads(s_row[10] or "[]"),
-                        "accounts": json.loads(s_row[11] or "{}"),
-                        "history": json.loads(s_row[12] or "[]"),
-                        "updatedAt": s_row[13],
-                    }
-                db.log_event("CACHE_HIT", f"Returned SQLite cached verdict for '{cache_key}'")
-                return {
-                    "cached": True,
-                    "aiOk": True,
-                    "verdict": row[0],
-                    "sources": json.loads(row[1] or "[]"),
-                    "priceSummary": cached_summary,
-                }
+        cached_resp = await asyncio.to_thread(_lookup_cached_analysis_sync, cache_key, norm_title, req.title)
+        if cached_resp:
+            return cached_resp
 
     sources = await search_web_reviews(req.title, req.brand, req.amount)
     comp_min, comp_sum, comp_offers = extract_competitor_prices_from_sources(
         sources, req.price, req.title, req.amount
     )
 
-    price_summary = None
-    with db.get_db_connection() as conn:
-        if req.price and req.price > 0:
-            price_summary = db.upsert_price_observation_sync(
-                conn=conn,
-                slug=cache_key,
-                title=req.title,
-                account_id=req.accountId or "Аккаунт #1",
-                price=req.price,
-                old_price=req.oldPrice,
-                amount=req.amount or "",
-                guest_price=req.guestPrice,
-                competitor_min=comp_min,
-                competitor_summary=comp_sum,
-                competitor_offers=comp_offers,
-            )
-            conn.commit()
+    price_summary = await asyncio.to_thread(
+        _record_analysis_price_sync, cache_key, req, comp_min, comp_sum, comp_offers
+    )
 
     ai_ok = True
     try:
         verdict = await call_ai_model(req, sources, price_summary)
     except Exception as exc:
         ai_ok = False
-        db.log_event(
+        await asyncio.to_thread(
+            db.log_event,
             "LLM_ERR",
             f"AI call failed ({req.aiModel} @ {req.aiBaseUrl}): {exc} -> handing off to Browser Gemini Tab",
         )
@@ -458,22 +505,7 @@ async def analyze_product(req: AnalyzeRequest):
         )
 
     if ai_ok:
-        with db.get_db_connection() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO product_ai_cache (slug, title, norm_title, verdict, sources_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cache_key,
-                    req.title,
-                    norm_title,
-                    verdict,
-                    json.dumps(sources, ensure_ascii=False),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            conn.commit()
+        await asyncio.to_thread(_save_ai_cache_sync, cache_key, req.title, norm_title, verdict, sources)
 
     return {
         "cached": False,

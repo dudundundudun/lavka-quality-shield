@@ -188,6 +188,7 @@ class TestBackendSecurityAndVault(unittest.TestCase):
         endpoints = [
             ("GET", "/api/logs", None),
             ("GET", "/api/accounts/list", None),
+            ("GET", "/api/accounts/acc_test_1/secrets", None),
             ("GET", "/api/price/list", None),
             ("GET", "/api/cart/latest", None),
             ("POST", "/api/save-cache", {"slug": "test", "title": "Test", "verdict": "ok"}),
@@ -270,15 +271,65 @@ class TestBackendSecurityAndVault(unittest.TestCase):
         self.assertEqual(r_list.status_code, 200)
         accounts = r_list.json().get("accounts", [])
         self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["accountId"], "acc_test_1")
         self.assertEqual(accounts[0]["label"], "Test Account Renamed")
-        self.assertEqual(accounts[0]["password"], "sample-value")
-        self.assertEqual(accounts[0]["cookies"][0]["name"], "Session_id")
+        self.assertEqual(accounts[0]["cookieCount"], 1)
+        self.assertTrue(accounts[0]["hasPassword"])
+        self.assertNotIn("password", accounts[0])
+        self.assertNotIn("cookies", accounts[0])
+        self.assertNotIn("localStorageData", accounts[0])
+
+        # Secrets must be fetched on demand from the dedicated endpoint
+        r_secrets = self.client.get("/api/accounts/acc_test_1/secrets", headers=headers)
+        self.assertEqual(r_secrets.status_code, 200)
+        sec_data = r_secrets.json()
+        self.assertEqual(sec_data["password"], "sample-value")
+        self.assertEqual(sec_data["cookies"][0]["name"], "Session_id")
+        self.assertEqual(sec_data["localStorageData"], {"theme": "dark"})
+
+        r_missing = self.client.get("/api/accounts/nonexistent/secrets", headers=headers)
+        self.assertEqual(r_missing.status_code, 404)
 
         r_del = self.client.delete("/api/accounts/acc_test_1", headers=headers)
         self.assertEqual(r_del.status_code, 200)
 
         r_list_after = self.client.get("/api/accounts/list", headers=headers)
         self.assertEqual(r_list_after.json().get("accounts", []), [])
+
+    def test_vault_dpapi_runtime_error_returns_503(self):
+        headers = self._pair_primary_extension()
+        with patch.object(security, "_protect_field", side_effect=RuntimeError("DPAPI unavailable")):
+            r_save = self.client.post(
+                "/api/accounts/save",
+                json={"accountId": "acc_503", "label": "Fail Test", "password": "secret"},
+                headers=headers,
+            )
+            self.assertEqual(r_save.status_code, 503)
+            self.assertIn("DPAPI unavailable", r_save.json().get("detail", ""))
+
+        with patch.object(security, "_protect_field", side_effect=_mock_protect):
+            r_ok = self.client.post(
+                "/api/accounts/save",
+                json={"accountId": "acc_503", "label": "Fail Test", "password": "secret"},
+                headers=headers,
+            )
+            self.assertEqual(r_ok.status_code, 200)
+
+        with patch.object(security, "_unprotect_field", side_effect=RuntimeError("DPAPI decrypt failed")):
+            r_sec = self.client.get("/api/accounts/acc_503/secrets", headers=headers)
+            self.assertEqual(r_sec.status_code, 503)
+            self.assertIn("DPAPI decrypt failed", r_sec.json().get("detail", ""))
+
+    def test_validate_ai_base_url_rejects_unresolvable_host(self):
+        headers = self._pair_primary_extension()
+        with patch.object(security.socket, "getaddrinfo", side_effect=OSError("Name or service not known")):
+            r = self.client.post(
+                "/api/analyze-product",
+                json={"title": "Молоко 1л", "aiBaseUrl": "https://nonexistent.invalid/v1"},
+                headers=headers,
+            )
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.json().get("detail"), "Invalid aiBaseUrl: host could not be resolved.")
 
 
 if __name__ == "__main__":

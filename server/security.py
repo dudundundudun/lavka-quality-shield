@@ -222,7 +222,10 @@ def validate_ai_base_url(url: str) -> str:
         except HTTPException:
             raise
         except OSError:
-            pass
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid aiBaseUrl: host could not be resolved.",
+            )
     return clean
 
 

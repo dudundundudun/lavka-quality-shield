@@ -1,7 +1,9 @@
 import os
 import sys
+import base64
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -185,6 +187,75 @@ class TestApiCrudEndpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "ok")
         self.assertIsInstance(r.json()["logs"], list)
+
+    def test_price_and_cart_validation_limits(self):
+        r_low = self.client.get("/api/price/list?limit=0", headers=self.headers)
+        self.assertEqual(r_low.status_code, 422)
+
+        r_high = self.client.get("/api/price/list?limit=2001", headers=self.headers)
+        self.assertEqual(r_high.status_code, 422)
+
+        too_many_prices = [{"slug": f"item_{i}", "title": f"Item {i}", "price": 100.0} for i in range(501)]
+        r_rec = self.client.post(
+            "/api/price/record",
+            json={"accountId": "Аккаунт #1", "items": too_many_prices},
+            headers=self.headers,
+        )
+        self.assertEqual(r_rec.status_code, 422)
+
+        too_many_cart = [{"slug": f"item_{i}", "title": f"Item {i}", "qty": 1, "price": 100.0} for i in range(501)]
+        r_cart = self.client.post(
+            "/api/cart/save",
+            json={"accountId": "Аккаунт #1", "items": too_many_cart, "totalPrice": 50100.0},
+            headers=self.headers,
+        )
+        self.assertEqual(r_cart.status_code, 422)
+
+    def test_accounts_list_returns_metadata_and_secrets_endpoint_returns_secrets(self):
+        def _enc(val: str) -> str:
+            return "dpapi:" + base64.b64encode(val.encode("utf-8")).decode("ascii") if val else ""
+
+        def _dec(val):
+            if not val:
+                return ""
+            return base64.b64decode(val[len("dpapi:"):]).decode("utf-8") if val.startswith("dpapi:") else val
+
+        with patch.object(security, "_protect_field", side_effect=_enc), patch.object(
+            security, "_unprotect_field", side_effect=_dec
+        ):
+            r_save = self.client.post(
+                "/api/accounts/save",
+                json={
+                    "accountId": "acc_crud_1",
+                    "label": "CRUD Account",
+                    "login": "crud_user",
+                    "password": "crud-secret-password",
+                    "note": "crud test",
+                    "yandexLogin": "crud@yandex.ru",
+                    "cookies": [{"name": "yandexuid", "value": "999"}],
+                    "localStorageData": {"k": "v"},
+                },
+                headers=self.headers,
+            )
+            self.assertEqual(r_save.status_code, 200)
+
+            r_list = self.client.get("/api/accounts/list", headers=self.headers)
+            self.assertEqual(r_list.status_code, 200)
+            accs = r_list.json()["accounts"]
+            self.assertEqual(len(accs), 1)
+            self.assertEqual(accs[0]["accountId"], "acc_crud_1")
+            self.assertEqual(accs[0]["cookieCount"], 1)
+            self.assertTrue(accs[0]["hasPassword"])
+            self.assertNotIn("password", accs[0])
+            self.assertNotIn("cookies", accs[0])
+            self.assertNotIn("localStorageData", accs[0])
+
+            r_sec = self.client.get("/api/accounts/acc_crud_1/secrets", headers=self.headers)
+            self.assertEqual(r_sec.status_code, 200)
+            sec = r_sec.json()
+            self.assertEqual(sec["password"], "crud-secret-password")
+            self.assertEqual(sec["cookies"], [{"name": "yandexuid", "value": "999"}])
+            self.assertEqual(sec["localStorageData"], {"k": "v"})
 
 
 if __name__ == "__main__":

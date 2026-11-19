@@ -12,6 +12,8 @@ test('background.js onMessage uses declared sender parameter and guards sensitiv
   assert.match(bg, /LQS_GET_GEMINI_COOKIE_HEADER'[\s\S]{0,160}isPopupSender\(sender\)/);
   assert.match(bg, /LQS_DELETE_ACCOUNT_FROM_VAULT'[\s\S]{0,160}isPopupSender\(sender\)/);
   assert.doesNotMatch(bg, /headerString:\s*cookieInfo\.headerString/);
+  assert.match(bg, /async function fetchBackendAccountSecrets\(backendUrl, accountId\)/);
+  assert.match(bg, /\/api\/accounts\/\$\{encodeURIComponent\(accountId\)\}\/secrets/);
 });
 
 test('content.js validates competitor href URLs with safeHttpUrl', () => {

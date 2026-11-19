@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import db
@@ -14,6 +14,26 @@ import security
 from security import verify_trusted_extension_request
 
 router = APIRouter()
+
+
+def _safe_protect_field(plaintext: str) -> str:
+    try:
+        return security._protect_field(plaintext)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Account vault encryption unavailable: {exc}",
+        )
+
+
+def _safe_unprotect_field(stored: Optional[str]) -> str:
+    try:
+        return security._unprotect_field(stored)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Account vault decryption unavailable: {exc}",
+        )
 
 
 class AccountVaultItemModel(BaseModel):
@@ -42,19 +62,19 @@ def save_account_vault_endpoint(req: AccountVaultItemModel):
         if req.password is None:
             protected_password = existing[0] if existing else ""
         else:
-            protected_password = security._protect_field(req.password)
+            protected_password = _safe_protect_field(req.password)
 
         if req.cookies is None:
             protected_cookies = existing[2] if existing else ""
             cookie_count = int(req.cookieCount) if req.cookieCount is not None else (existing[1] if existing else 0)
         else:
-            protected_cookies = security._protect_field(json.dumps(req.cookies, ensure_ascii=False))
+            protected_cookies = _safe_protect_field(json.dumps(req.cookies, ensure_ascii=False))
             cookie_count = int(req.cookieCount if req.cookieCount is not None else len(req.cookies))
 
         if req.localStorageData is None:
             protected_ls = existing[3] if existing else ""
         else:
-            protected_ls = security._protect_field(json.dumps(req.localStorageData, ensure_ascii=False))
+            protected_ls = _safe_protect_field(json.dumps(req.localStorageData, ensure_ascii=False))
 
         conn.execute(
             """
@@ -88,7 +108,7 @@ def list_saved_accounts_endpoint():
         rows = conn.execute(
             """
             SELECT account_id, label, login, password, note, yandex_login,
-                   cookie_count, cookies_json, local_storage_json, updated_at
+                   cookie_count, updated_at
             FROM saved_accounts
             ORDER BY updated_at DESC
             """
@@ -99,16 +119,40 @@ def list_saved_accounts_endpoint():
                     "accountId": r[0],
                     "label": r[1],
                     "login": r[2],
-                    "password": security._unprotect_field(r[3]),
                     "note": r[4],
                     "yandexLogin": r[5],
                     "cookieCount": r[6],
-                    "cookies": json.loads(security._unprotect_field(r[7]) or "[]"),
-                    "localStorageData": json.loads(security._unprotect_field(r[8]) or "{}"),
-                    "updatedAt": r[9],
+                    "hasPassword": bool(r[3]),
+                    "updatedAt": r[7],
                 }
             )
     return {"status": "ok", "accounts": accounts}
+
+
+@router.get("/api/accounts/{account_id}/secrets", dependencies=[Depends(verify_trusted_extension_request)])
+def get_account_secrets_endpoint(account_id: str):
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT password, cookies_json, local_storage_json
+            FROM saved_accounts
+            WHERE account_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
+
+    password = _safe_unprotect_field(row[0])
+    cookies_raw = _safe_unprotect_field(row[1])
+    ls_raw = _safe_unprotect_field(row[2])
+    return {
+        "status": "ok",
+        "accountId": account_id,
+        "password": password,
+        "cookies": json.loads(cookies_raw or "[]"),
+        "localStorageData": json.loads(ls_raw or "{}"),
+    }
 
 
 @router.delete("/api/accounts/{account_id}", dependencies=[Depends(verify_trusted_extension_request)])

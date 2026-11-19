@@ -6,8 +6,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
+
+_ITEMS_MAX_KW = {"max_length": 500} if hasattr(BaseModel, "model_validate") else {"max_items": 500}
 
 import db
 from security import verify_trusted_extension_request
@@ -29,7 +31,7 @@ class PriceItemInput(BaseModel):
 
 class RecordPricesRequest(BaseModel):
     accountId: str = "Аккаунт #1"
-    items: List[PriceItemInput] = []
+    items: List[PriceItemInput] = Field(default_factory=list, **_ITEMS_MAX_KW)
 
 
 class CartItemModel(BaseModel):
@@ -44,7 +46,7 @@ class CartItemModel(BaseModel):
 
 class SaveCartSnapshotRequest(BaseModel):
     accountId: str = "Аккаунт #1"
-    items: List[CartItemModel] = []
+    items: List[CartItemModel] = Field(default_factory=list, **_ITEMS_MAX_KW)
     totalPrice: float = 0.0
 
 
@@ -106,7 +108,7 @@ def get_product_price_summary(slug: str, title: Optional[str] = None):
 
 
 @router.get("/api/price/list", dependencies=[Depends(verify_trusted_extension_request)])
-def list_tracked_prices(limit: int = 200):
+def list_tracked_prices(limit: int = Query(200, ge=1, le=2000)):
     items = []
     with db.get_db_connection() as conn:
         rows = conn.execute(
