@@ -17,7 +17,8 @@
       SAVED_CARTS: 'lqs_saved_carts_v1',
       CART_LOCKS: 'lqs_cart_locks_v1',
       ACCOUNTS_VAULT: 'lqs_accounts_vault_v1',
-      DELETED_ACCOUNTS: 'lqs_deleted_accounts_v1'
+      DELETED_ACCOUNTS: 'lqs_deleted_accounts_v1',
+      BACKEND_TOKEN: 'lqs_backend_token_v1'
     }),
     LIMITS: Object.freeze({
       MAX_LOCAL_AI_CACHE_ITEMS: 500,
@@ -26,6 +27,7 @@
     CLIENT_HEADER: Object.freeze({
       'X-LQS-Client': 'lavka-quality-shield'
     }),
+    TOKEN_HEADER_NAME: 'X-LQS-Token',
     DEFAULT_SETTINGS: Object.freeze({
       backendUrl: 'http://127.0.0.1:8765',
       aiBaseUrl: 'http://localhost:8083/v1',

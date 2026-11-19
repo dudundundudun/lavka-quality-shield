@@ -598,7 +598,7 @@
       <!-- РАСКРЫВАЮЩИЙСЯ БЛОК ЛОГИНА И ПАРОЛЯ -->
       <div class="creds-box" id="account-creds-box">
         <div style="font-weight:700;font-size:11px;color:#1e3a8a;margin-bottom:4px;">
-          🔑 Учётные данные выбранного профиля (хранятся локально):
+          🔑 Учётные данные выбранного профиля (пароли и куки — только в DPAPI-сейфе :8765):
         </div>
         <div class="mini-row">
           <input type="text" id="acc-label-input" placeholder="Название профиля (напр. Аккаунт #2 Скидка)">
@@ -728,6 +728,10 @@
     <div class="field">
       <label>Локальный сервер базы цен и отзывов (FastAPI):</label>
       <input type="text" id="inp-backend" placeholder="http://127.0.0.1:8765">
+    </div>
+    <div class="field">
+      <label>Токен локального сервера (X-LQS-Token, авто-привязка из secret.key):</label>
+      <input type="password" id="inp-backend-token" placeholder="Заполняется автоматически при первом подключении">
     </div>
     <div class="field">
       <label>Base URL ИИ (мост :8083 или OpenAI API):</label>

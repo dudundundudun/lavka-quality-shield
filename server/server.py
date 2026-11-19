@@ -30,19 +30,22 @@ os.environ["no_proxy"] = "127.0.0.1,localhost"
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from security import (
-    ALLOWED_EXT_ID,
+    ALLOWED_CORS_HEADERS,
+    ALLOWED_CORS_METHODS,
     APP_DATA_DIR,
     DEFAULT_DB_PATH,
-    EXT_ORIGIN_PATTERN,
-    EXT_ORIGIN_RE,
     _protect_field,
     _unprotect_field,
+    get_pinned_extension_id,
+    is_allowed_extension_origin,
+    load_or_create_secret_token,
     migrate_legacy_db_if_needed,
+    pair_extension_request,
+    validate_ai_base_url,
     verify_trusted_extension_request,
 )
 from matcher import (
@@ -63,14 +66,34 @@ DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 
 app = FastAPI(title="Lavka Quality Shield Backend", version="2.6.0")
 
-# Строгий CORS только для расширения Chrome (без сторонних доменов и произвольных локальных портов)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=EXT_ORIGIN_RE,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-LQS-Client", "Authorization"],
-)
+# Автогенерация 32-байтного локального секретного токена при старте сервера
+load_or_create_secret_token()
+
+
+# Динамический строгий CORS: разрешает только закреплённый Origin расширения (или любой валидный до первого /api/auth/pair)
+@app.middleware("http")
+async def dynamic_extension_cors_middleware(request: Request, call_next):
+    origin = (request.headers.get("origin") or "").strip()
+    origin_allowed = is_allowed_extension_origin(origin) if origin else False
+
+    if request.method == "OPTIONS":
+        if origin and not origin_allowed:
+            return Response(status_code=403, content="Forbidden CORS origin")
+        resp = Response(status_code=204)
+        if origin_allowed:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Methods"] = ALLOWED_CORS_METHODS
+            resp.headers["Access-Control-Allow-Headers"] = ALLOWED_CORS_HEADERS
+            resp.headers["Vary"] = "Origin"
+        return resp
+
+    response = await call_next(request)
+    if origin_allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = ALLOWED_CORS_METHODS
+        response.headers["Access-Control-Allow-Headers"] = ALLOWED_CORS_HEADERS
+        response.headers["Vary"] = "Origin"
+    return response
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
 
 
@@ -238,12 +261,12 @@ class AccountVaultItemModel(BaseModel):
     accountId: str
     label: str
     login: Optional[str] = ""
-    password: Optional[str] = ""
+    password: Optional[str] = None
     note: Optional[str] = ""
     yandexLogin: Optional[str] = ""
-    cookieCount: int = 0
-    cookies: List[Dict[str, Any]] = []
-    localStorageData: Dict[str, Any] = {}
+    cookieCount: Optional[int] = None
+    cookies: Optional[List[Dict[str, Any]]] = None
+    localStorageData: Optional[Dict[str, Any]] = None
     updatedAt: Optional[str] = None
 
 
@@ -443,12 +466,20 @@ async def health_check():
         "trackedPrices": tracked_prices,
         "savedCarts": saved_carts_count,
         "savedAccounts": saved_accounts_count,
+        "paired": bool(get_pinned_extension_id()),
         "reviewSites": [s["domain"] for s in REVIEW_SEARCH_SITES],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
-@app.get("/api/logs")
+@app.post("/api/auth/pair")
+async def auth_pair_endpoint(request: Request):
+    res = pair_extension_request(request)
+    log_event("AUTH", f"Extension paired: id={res['extensionId'][:8]}... (already={res['alreadyPaired']})")
+    return res
+
+
+@app.get("/api/logs", dependencies=[Depends(verify_trusted_extension_request)])
 async def get_server_logs():
     return {
         "status": "ok",
@@ -457,11 +488,32 @@ async def get_server_logs():
     }
 
 
-@app.post("/api/accounts/save")
-async def save_account_vault_endpoint(req: AccountVaultItemModel, request: Request):
-    verify_trusted_extension_request(request)
+@app.post("/api/accounts/save", dependencies=[Depends(verify_trusted_extension_request)])
+async def save_account_vault_endpoint(req: AccountVaultItemModel):
     now_iso = req.updatedAt or datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
+        existing = conn.execute(
+            "SELECT password, cookie_count, cookies_json, local_storage_json FROM saved_accounts WHERE account_id = ?",
+            (req.accountId,),
+        ).fetchone()
+
+        if req.password is None:
+            protected_password = existing[0] if existing else ""
+        else:
+            protected_password = _protect_field(req.password)
+
+        if req.cookies is None:
+            protected_cookies = existing[2] if existing else ""
+            cookie_count = int(req.cookieCount) if req.cookieCount is not None else (existing[1] if existing else 0)
+        else:
+            protected_cookies = _protect_field(json.dumps(req.cookies, ensure_ascii=False))
+            cookie_count = int(req.cookieCount if req.cookieCount is not None else len(req.cookies))
+
+        if req.localStorageData is None:
+            protected_ls = existing[3] if existing else ""
+        else:
+            protected_ls = _protect_field(json.dumps(req.localStorageData, ensure_ascii=False))
+
         conn.execute(
             """
             INSERT OR REPLACE INTO saved_accounts (
@@ -473,23 +525,22 @@ async def save_account_vault_endpoint(req: AccountVaultItemModel, request: Reque
                 req.accountId,
                 req.label,
                 req.login or "",
-                _protect_field(req.password or ""),
+                protected_password,
                 req.note or "",
                 req.yandexLogin or "",
-                int(req.cookieCount or len(req.cookies or [])),
-                _protect_field(json.dumps(req.cookies or [], ensure_ascii=False)),
-                _protect_field(json.dumps(req.localStorageData or {}, ensure_ascii=False)),
+                cookie_count,
+                protected_cookies,
+                protected_ls,
                 now_iso,
             ),
         )
         conn.commit()
-    log_event("ACCOUNT_VAULT", f"Saved account profile '{req.label}' ({req.cookieCount} cookies)")
-    return {"status": "ok", "accountId": req.accountId, "updatedAt": now_iso}
+    log_event("ACCOUNT_VAULT", f"Saved account profile '{req.label}' ({cookie_count} cookies)")
+    return {"status": "ok", "accountId": req.accountId, "cookieCount": cookie_count, "updatedAt": now_iso}
 
 
-@app.get("/api/accounts/list")
-async def list_saved_accounts_endpoint(request: Request):
-    verify_trusted_extension_request(request)
+@app.get("/api/accounts/list", dependencies=[Depends(verify_trusted_extension_request)])
+async def list_saved_accounts_endpoint():
     accounts = []
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
@@ -518,9 +569,8 @@ async def list_saved_accounts_endpoint(request: Request):
     return {"status": "ok", "accounts": accounts}
 
 
-@app.delete("/api/accounts/{account_id}")
-async def delete_saved_account_endpoint(account_id: str, request: Request):
-    verify_trusted_extension_request(request)
+@app.delete("/api/accounts/{account_id}", dependencies=[Depends(verify_trusted_extension_request)])
+async def delete_saved_account_endpoint(account_id: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM saved_accounts WHERE account_id = ?", (account_id,))
         conn.commit()
@@ -528,7 +578,7 @@ async def delete_saved_account_endpoint(account_id: str, request: Request):
     return {"status": "ok"}
 
 
-@app.post("/api/price/record")
+@app.post("/api/price/record", dependencies=[Depends(verify_trusted_extension_request)])
 async def record_prices_endpoint(req: RecordPricesRequest):
     if not req.items:
         return {"status": "empty", "updated": 0, "summaries": {}}
@@ -556,7 +606,7 @@ async def record_prices_endpoint(req: RecordPricesRequest):
     return {"status": "ok", "updated": len(summaries), "summaries": summaries}
 
 
-@app.get("/api/price/product/{slug}")
+@app.get("/api/price/product/{slug}", dependencies=[Depends(verify_trusted_extension_request)])
 async def get_product_price_summary(slug: str, title: Optional[str] = None):
     clean_slug = slug.strip().lower()
     with sqlite3.connect(DB_PATH) as conn:
@@ -584,7 +634,7 @@ async def get_product_price_summary(slug: str, title: Optional[str] = None):
         }
 
 
-@app.get("/api/price/list")
+@app.get("/api/price/list", dependencies=[Depends(verify_trusted_extension_request)])
 async def list_tracked_prices(limit: int = 200):
     items = []
     with sqlite3.connect(DB_PATH) as conn:
@@ -621,7 +671,7 @@ async def list_tracked_prices(limit: int = 200):
     return {"status": "ok", "count": len(items), "items": items}
 
 
-@app.post("/api/cart/save")
+@app.post("/api/cart/save", dependencies=[Depends(verify_trusted_extension_request)])
 async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
     now_iso = datetime.now(timezone.utc).isoformat()
     acc = (req.accountId or "Аккаунт #1").strip()
@@ -654,7 +704,7 @@ async def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
     return {"status": "ok", "accountId": acc, "itemsCount": len(items_list), "totalPrice": final_total}
 
 
-@app.get("/api/cart/latest")
+@app.get("/api/cart/latest", dependencies=[Depends(verify_trusted_extension_request)])
 async def get_latest_cart_snapshot():
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -704,7 +754,7 @@ async def get_latest_cart_snapshot():
         }
 
 
-@app.post("/api/save-cache")
+@app.post("/api/save-cache", dependencies=[Depends(verify_trusted_extension_request)])
 async def save_cache_endpoint(req: SaveCacheRequest):
     cache_key = (req.slug or req.title).strip().lower()
     if not cache_key or not req.verdict.strip():
@@ -976,7 +1026,7 @@ def build_ai_prompt(req: AnalyzeRequest, web_snippets: List[dict], price_summary
 async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_summary: Optional[Dict[str, Any]] = None) -> str:
     prompt = build_ai_prompt(req, web_snippets, price_summary)
 
-    base_url = req.aiBaseUrl.rstrip("/")
+    base_url = validate_ai_base_url(req.aiBaseUrl)
     is_local = "localhost" in base_url or "127.0.0.1" in base_url
 
     headers = {"Content-Type": "application/json"}
@@ -1001,8 +1051,9 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_sum
         return reply
 
 
-@app.post("/api/analyze-product")
+@app.post("/api/analyze-product", dependencies=[Depends(verify_trusted_extension_request)])
 async def analyze_product(req: AnalyzeRequest):
+    validate_ai_base_url(req.aiBaseUrl)
     cache_key = (req.slug or req.title).strip().lower()
     norm_title = normalize_title_for_match(req.title)
     log_event("REQ", f"Analyze request for slug='{cache_key}' title='{req.title[:35]}' (force={req.forceRefresh})")

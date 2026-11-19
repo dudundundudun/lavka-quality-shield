@@ -2,6 +2,19 @@ const { STORAGE_KEYS } = globalThis.LQS_CONFIG;
 const STORAGE_KEY = STORAGE_KEYS.REVIEWS;
 const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
 const FLIGHT_LOG_KEY = STORAGE_KEYS.FLIGHT_LOG;
+const BACKEND_TOKEN_KEY = STORAGE_KEYS.BACKEND_TOKEN || 'lqs_backend_token_v1';
+const TOKEN_HEADER_NAME = globalThis.LQS_CONFIG.TOKEN_HEADER_NAME || 'X-LQS-Token';
+
+async function getPopupBackendHeaders() {
+  const token = await new Promise((resolve) => {
+    chrome.storage.local.get([BACKEND_TOKEN_KEY], (res) => {
+      resolve(typeof res?.[BACKEND_TOKEN_KEY] === 'string' ? res[BACKEND_TOKEN_KEY].trim() : '');
+    });
+  });
+  const headers = { 'X-LQS-Client': 'lavka-quality-shield' };
+  if (token) headers[TOKEN_HEADER_NAME] = token;
+  return headers;
+}
 const PRICE_DB_KEY = STORAGE_KEYS.PRICE_DB;
 
 const DEFAULT_SETTINGS = { ...globalThis.LQS_CONFIG.DEFAULT_SETTINGS };
@@ -143,12 +156,16 @@ function syncSelectedAccountFields() {
 
   document.getElementById('acc-label-input').value = acc.label || '';
   document.getElementById('acc-login-input').value = acc.login || acc.yandexLogin || '';
-  document.getElementById('acc-password-input').value = acc.password || '';
+  const passInp = document.getElementById('acc-password-input');
+  passInp.value = '';
+  passInp.placeholder = acc.hasPassword
+    ? '🔒 Пароль в DPAPI-сейфе (введите новый для замены)'
+    : 'Пароль от аккаунта';
   document.getElementById('acc-note-input').value = acc.note || '';
 
   const cookieInfo = acc.cookieCount > 0 ? `🍪 Сохранено куки: <b>${acc.cookieCount}</b>` : '⚪ Куки ещё не сохранены';
   const loginInfo = acc.login || acc.yandexLogin ? ` • 🔑 Логин: <b>${escapeHtml(acc.login || acc.yandexLogin)}</b>` : '';
-  const passInfo = acc.password ? ' • 🔒 Пароль сохранён' : '';
+  const passInfo = acc.hasPassword ? ' • 🔒 Пароль в DPAPI-сейфе' : '';
   if (metaEl) {
     metaEl.innerHTML = `${cookieInfo}${loginInfo}${passInfo}`;
   }
@@ -306,7 +323,7 @@ document.getElementById('save-creds-btn').addEventListener('click', () => {
   const acc = getSelectedVaultAccountObj();
   const label = document.getElementById('acc-label-input').value.trim() || document.getElementById('lavka-account-select').value;
   const login = document.getElementById('acc-login-input').value.trim();
-  const password = document.getElementById('acc-password-input').value;
+  const rawPassword = document.getElementById('acc-password-input').value;
   const note = document.getElementById('acc-note-input').value.trim();
 
   chrome.runtime.sendMessage(
@@ -316,15 +333,18 @@ document.getElementById('save-creds-btn').addEventListener('click', () => {
         accountId: acc ? acc.accountId : undefined,
         label,
         login,
-        password,
+        password: rawPassword ? rawPassword : undefined,
         note,
         captureCookies: true
       }
     },
     (resp) => {
+      if (resp && resp.vaultStatus) renderAccountsVaultUI(resp.vaultStatus);
       if (resp && resp.ok) {
-        renderAccountsVaultUI(resp.vaultStatus);
-        showAccountStatusMsg(`✅ Логин, пароль и куки сохранены для «${escapeHtml(label)}»!`);
+        document.getElementById('acc-password-input').value = '';
+        showAccountStatusMsg(`✅ Профиль «${escapeHtml(label)}» сохранён в DPAPI-сейф!`);
+      } else {
+        showAccountStatusMsg(`⚠️ ${escapeHtml(resp?.error || 'Не удалось сохранить профиль')}`, true);
       }
     }
   );
@@ -335,7 +355,7 @@ document.getElementById('autofill-passport-btn').addEventListener('click', () =>
   if (!acc) return;
   // Сначала сохраним введённые поля, если пользователь их только что вписал
   const login = document.getElementById('acc-login-input').value.trim();
-  const password = document.getElementById('acc-password-input').value;
+  const rawPassword = document.getElementById('acc-password-input').value;
   chrome.runtime.sendMessage(
     {
       type: 'LQS_SAVE_ACCOUNT_TO_VAULT',
@@ -343,7 +363,7 @@ document.getElementById('autofill-passport-btn').addEventListener('click', () =>
         accountId: acc.accountId,
         label: document.getElementById('acc-label-input').value.trim() || acc.label,
         login,
-        password,
+        password: rawPassword ? rawPassword : undefined,
         note: document.getElementById('acc-note-input').value.trim(),
         captureCookies: false
       }
@@ -389,11 +409,25 @@ document.getElementById('copy-login-btn').addEventListener('click', async () => 
 });
 
 document.getElementById('copy-pass-btn').addEventListener('click', async () => {
-  const val = document.getElementById('acc-password-input').value;
-  if (val) {
-    await navigator.clipboard.writeText(val);
+  const typedVal = document.getElementById('acc-password-input').value;
+  if (typedVal) {
+    await navigator.clipboard.writeText(typedVal);
     showAccountStatusMsg('📋 Пароль скопирован в буфер обмена!');
+    return;
   }
+  const acc = getSelectedVaultAccountObj();
+  if (!acc || !acc.hasPassword) {
+    showAccountStatusMsg('⚠️ Пароль для этого профиля не задан.', true);
+    return;
+  }
+  chrome.runtime.sendMessage({ type: 'LQS_GET_ACCOUNT_SECRET_FOR_POPUP', accountId: acc.accountId }, async (resp) => {
+    if (resp && resp.ok && resp.password) {
+      await navigator.clipboard.writeText(resp.password);
+      showAccountStatusMsg('📋 Пароль из DPAPI-сейфа скопирован в буфер обмена!');
+    } else {
+      showAccountStatusMsg(`⚠️ ${escapeHtml(resp?.error || 'Не удалось получить пароль с сервера :8765')}`, true);
+    }
+  });
 });
 
 function hasPriceDiscrepancy(entry) {
@@ -430,7 +464,7 @@ function loadPricesAndCartTab() {
     const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
 
     try {
-      const r = await fetchWithTimeout(`${cfg.backendUrl.replace(/\/$/, '')}/api/price/list?limit=300`, { method: 'GET', headers: { 'X-LQS-Client': 'lavka-quality-shield' } }, 1200);
+      const r = await fetchWithTimeout(`${cfg.backendUrl.replace(/\/$/, '')}/api/price/list?limit=300`, { method: 'GET', headers: await getPopupBackendHeaders() }, 1200);
       if (r.ok) {
         const j = await r.json();
         if (j && Array.isArray(j.items)) {
@@ -631,9 +665,11 @@ document.querySelectorAll('[data-pfilter]').forEach((btn) => {
 // ВКЛАДКА 3: НАСТРОЙКИ И АВТОПИЛОТ ИИ
 // ==========================================================================
 function loadSettings() {
-  chrome.storage.local.get([SETTINGS_KEY], (res) => {
+  chrome.storage.local.get([SETTINGS_KEY, BACKEND_TOKEN_KEY], (res) => {
     const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
     document.getElementById('inp-backend').value = cfg.backendUrl;
+    const tokEl = document.getElementById('inp-backend-token');
+    if (tokEl) tokEl.value = typeof res?.[BACKEND_TOKEN_KEY] === 'string' ? res[BACKEND_TOKEN_KEY] : '';
     document.getElementById('inp-ai-url').value = cfg.aiBaseUrl;
     document.getElementById('inp-ai-key').value = cfg.aiApiKey;
     document.getElementById('inp-ai-model').value = cfg.aiModel;
@@ -902,6 +938,10 @@ document.getElementById('save-ai-btn').addEventListener('click', () => {
     enableGuestPriceProbe: document.getElementById('chk-guest-probe').checked,
     lavkaAccountLabel: document.getElementById('lavka-account-select').value
   };
+  const tokEl = document.getElementById('inp-backend-token');
+  if (tokEl) {
+    chrome.runtime.sendMessage({ type: 'LQS_SET_BACKEND_TOKEN', token: tokEl.value.trim() });
+  }
   saveSettingsPatch(patch, () => {
     const st = document.getElementById('ai-save-status');
     st.textContent = '✅ Настройки сохранены!';
@@ -979,7 +1019,7 @@ async function fetchBackendLogsTail() {
       const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
       const backendUrl = cfg.backendUrl.replace(/\/$/, '');
       try {
-        const r = await fetchWithTimeout(`${backendUrl}/api/logs`, { method: 'GET', headers: { 'X-LQS-Client': 'lavka-quality-shield' } }, 1500);
+        const r = await fetchWithTimeout(`${backendUrl}/api/logs`, { method: 'GET', headers: await getPopupBackendHeaders() }, 1500);
         if (r.ok) {
           const data = await r.json();
           if (data && Array.isArray(data.logs) && data.logs.length > 0) {

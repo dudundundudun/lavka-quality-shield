@@ -22,7 +22,7 @@
 
 importScripts('shared/config.js');
 
-const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER } = globalThis.LQS_CONFIG;
+const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER, TOKEN_HEADER_NAME = 'X-LQS-Token' } = globalThis.LQS_CONFIG;
 const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
 const AI_CACHE_KEY = STORAGE_KEYS.AI_CACHE;
 const PRICE_DB_KEY = STORAGE_KEYS.PRICE_DB;
@@ -31,6 +31,7 @@ const SAVED_CARTS_KEY = STORAGE_KEYS.SAVED_CARTS;
 const CART_LOCKS_KEY = STORAGE_KEYS.CART_LOCKS;
 const ACCOUNTS_VAULT_KEY = STORAGE_KEYS.ACCOUNTS_VAULT;
 const DELETED_ACCOUNTS_KEY = STORAGE_KEYS.DELETED_ACCOUNTS;
+const BACKEND_TOKEN_KEY = STORAGE_KEYS.BACKEND_TOKEN || 'lqs_backend_token_v1';
 
 const MAX_LOCAL_AI_CACHE_ITEMS = LIMITS.MAX_LOCAL_AI_CACHE_ITEMS;
 const MAX_LOCAL_PRICE_DB_ITEMS = LIMITS.MAX_LOCAL_PRICE_DB_ITEMS;
@@ -42,36 +43,30 @@ const DEFAULT_ACCOUNT_PROFILES = [
     accountId: 'acc_1',
     label: 'Аккаунт #1 (Основной)',
     login: '',
-    password: '',
-    note: 'Основной профиль',
+    note: '',
     yandexLogin: '',
+    hasPassword: false,
     cookieCount: 0,
-    cookies: [],
-    localStorageData: {},
     updatedAt: null
   },
   {
     accountId: 'acc_2',
-    label: 'Аккаунт #2 (Новичок / Семья)',
+    label: 'Аккаунт #2 (Скидка)',
     login: '',
-    password: '',
-    note: 'Второй аккаунт для проверки скидок',
+    note: '',
     yandexLogin: '',
+    hasPassword: false,
     cookieCount: 0,
-    cookies: [],
-    localStorageData: {},
     updatedAt: null
   },
   {
     accountId: 'acc_3',
     label: 'Аккаунт #3 (Запасной)',
     login: '',
-    password: '',
-    note: 'Запасной профиль',
+    note: '',
     yandexLogin: '',
+    hasPassword: false,
     cookieCount: 0,
-    cookies: [],
-    localStorageData: {},
     updatedAt: null
   }
 ];
@@ -218,6 +213,92 @@ async function saveSettingsPatch(patch) {
   return new Promise((resolve) => {
     chrome.storage.local.set({ [SETTINGS_KEY]: next }, () => resolve(next));
   });
+}
+
+async function getStoredBackendToken() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([BACKEND_TOKEN_KEY], (res) => {
+      resolve(typeof res?.[BACKEND_TOKEN_KEY] === 'string' ? res[BACKEND_TOKEN_KEY].trim() : '');
+    });
+  });
+}
+
+async function saveStoredBackendToken(token) {
+  const clean = String(token || '').trim();
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [BACKEND_TOKEN_KEY]: clean }, () => resolve(clean));
+  });
+}
+
+let pairingInFlightPromise = null;
+
+async function ensureBackendPairedToken(backendUrl) {
+  const existing = await getStoredBackendToken();
+  if (existing) return existing;
+  const cleanUrl = (backendUrl || '').replace(/\/$/, '');
+  if (!cleanUrl || Date.now() < backendOfflineUntilTs) return '';
+  if (pairingInFlightPromise) return pairingInFlightPromise;
+
+  pairingInFlightPromise = (async () => {
+    try {
+      const r = await fetchWithTimeout(
+        `${cleanUrl}/api/auth/pair`,
+        { method: 'POST', headers: { ...LQS_CLIENT_HEADER } },
+        1500
+      );
+      if (r.ok) {
+        const data = await r.json();
+        if (data && data.token) {
+          return await saveStoredBackendToken(data.token);
+        }
+      }
+    } catch {
+      backendOfflineUntilTs = Date.now() + 10000;
+    } finally {
+      pairingInFlightPromise = null;
+    }
+    return '';
+  })();
+  return pairingInFlightPromise;
+}
+
+async function getBackendAuthHeaders(backendUrl, extraHeaders = {}) {
+  const token = await ensureBackendPairedToken(backendUrl);
+  const headers = { ...LQS_CLIENT_HEADER, ...extraHeaders };
+  if (token) {
+    headers[TOKEN_HEADER_NAME] = token;
+  }
+  return headers;
+}
+
+function sanitizeAccountForLocalStorage(acc) {
+  if (!acc || typeof acc !== 'object') return null;
+  return {
+    accountId: String(acc.accountId || ''),
+    label: String(acc.label || ''),
+    login: String(acc.login || ''),
+    note: String(acc.note || ''),
+    yandexLogin: String(acc.yandexLogin || ''),
+    hasPassword: Boolean(acc.hasPassword || acc.password),
+    cookieCount: Array.isArray(acc.cookies) ? acc.cookies.length : Number(acc.cookieCount || 0),
+    updatedAt: acc.updatedAt || null
+  };
+}
+
+async function fetchBackendVaultAccounts(backendUrl) {
+  const cleanUrl = (backendUrl || '').replace(/\/$/, '');
+  if (!cleanUrl || Date.now() < backendOfflineUntilTs) return null;
+  try {
+    const headers = await getBackendAuthHeaders(cleanUrl);
+    const r = await fetchWithTimeout(`${cleanUrl}/api/accounts/list`, { method: 'GET', headers }, 1500);
+    if (r.ok) {
+      const j = await r.json();
+      if (j && Array.isArray(j.accounts)) return j.accounts;
+    }
+  } catch {
+    backendOfflineUntilTs = Date.now() + 10000;
+  }
+  return null;
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 1500) {
@@ -633,19 +714,40 @@ async function getAccountsVaultMap() {
     });
   });
 
-  const map = localMap ? { ...localMap } : {};
+  const map = {};
+  let needsScrubWrite = false;
+  if (localMap) {
+    for (const [k, raw] of Object.entries(localMap)) {
+      if (!raw || typeof raw !== 'object') continue;
+      if ('password' in raw || 'cookies' in raw || 'localStorageData' in raw) {
+        needsScrubWrite = true;
+      }
+      const clean = sanitizeAccountForLocalStorage(raw);
+      if (clean && clean.accountId) map[k] = clean;
+    }
+  }
+
   if (Object.keys(map).length === 0) {
     DEFAULT_ACCOUNT_PROFILES.forEach((p) => {
       map[p.accountId] = { ...p };
     });
+    needsScrubWrite = true;
+  }
+
+  if (needsScrubWrite) {
     await new Promise((r) => chrome.storage.local.set({ [ACCOUNTS_VAULT_KEY]: map }, r));
   }
   return map;
 }
 
 async function saveAccountsVaultMap(map) {
+  const sanitized = {};
+  for (const [k, v] of Object.entries(map || {})) {
+    const clean = sanitizeAccountForLocalStorage(v);
+    if (clean && clean.accountId) sanitized[k] = clean;
+  }
   return new Promise((resolve) => {
-    chrome.storage.local.set({ [ACCOUNTS_VAULT_KEY]: map }, () => resolve(map));
+    chrome.storage.local.set({ [ACCOUNTS_VAULT_KEY]: sanitized }, () => resolve(sanitized));
   });
 }
 
@@ -845,34 +947,22 @@ async function getAccountsVaultStatus() {
   const deletedSet = await getDeletedAccountIdsSet();
 
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
-  if (backendUrl && Date.now() > backendOfflineUntilTs) {
-    try {
-      const r = await fetchWithTimeout(
-        `${backendUrl}/api/accounts/list`,
-        { method: 'GET', headers: LQS_CLIENT_HEADER },
-        1100
-      );
-      if (r.ok) {
-        const j = await r.json();
-        if (j && Array.isArray(j.accounts)) {
-          let changed = false;
-          for (const srvAcc of j.accounts) {
-            if (!srvAcc || !srvAcc.accountId) continue;
-            if (deletedSet.has(srvAcc.accountId)) continue;
-            const loc = map[srvAcc.accountId];
-            const srvTime = String(srvAcc.updatedAt || '');
-            const locTime = String(loc?.updatedAt || '');
-            if (!loc || (srvTime > locTime && srvAcc.cookieCount >= (loc.cookieCount || 0))) {
-              map[srvAcc.accountId] = { ...(loc || {}), ...srvAcc };
-              changed = true;
-            }
-          }
-          if (changed) await saveAccountsVaultMap(map);
-        }
+  const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
+  if (Array.isArray(srvAccounts)) {
+    let changed = false;
+    for (const srvAcc of srvAccounts) {
+      if (!srvAcc || !srvAcc.accountId) continue;
+      if (deletedSet.has(srvAcc.accountId)) continue;
+      const loc = map[srvAcc.accountId];
+      const srvTime = String(srvAcc.updatedAt || '');
+      const locTime = String(loc?.updatedAt || '');
+      const srvMeta = sanitizeAccountForLocalStorage(srvAcc);
+      if (!loc || srvTime >= locTime) {
+        map[srvAcc.accountId] = { ...(loc || {}), ...srvMeta };
+        changed = true;
       }
-    } catch {
-      backendOfflineUntilTs = Date.now() + 10000;
     }
+    if (changed) await saveAccountsVaultMap(map);
   }
 
   const liveSession = await captureCurrentYandexCookies();
@@ -890,10 +980,10 @@ async function getAccountsVaultStatus() {
       accountId: a.accountId,
       label: a.label,
       login: a.login || '',
-      password: a.password || '',
+      hasPassword: Boolean(a.hasPassword),
       note: a.note || '',
       yandexLogin: a.yandexLogin || '',
-      cookieCount: Array.isArray(a.cookies) ? a.cookies.length : (a.cookieCount || 0),
+      cookieCount: Number(a.cookieCount || 0),
       updatedAt: a.updatedAt || null
     }))
   };
@@ -918,69 +1008,83 @@ async function saveAccountToVault(payload = {}) {
     accountId,
     label,
     login: '',
-    password: '',
     note: '',
     yandexLogin: '',
+    hasPassword: false,
     cookieCount: 0,
-    cookies: [],
-    localStorageData: {},
     updatedAt: nowIso
   };
 
-  let cookies = existing.cookies || [];
-  let localStorageData = existing.localStorageData || {};
+  let capturedCookies = null;
+  let capturedLs = null;
   let yandexLogin = existing.yandexLogin || '';
 
   if (payload.captureCookies !== false) {
     const captured = await captureCurrentYandexCookies();
     if (captured.cookies.length > 0) {
-      cookies = captured.cookies;
-      localStorageData = captured.localStorageData || {};
+      capturedCookies = captured.cookies;
+      capturedLs = captured.localStorageData || {};
       if (captured.yandexLogin) yandexLogin = captured.yandexLogin;
     }
   }
 
-  const updated = {
-    ...existing,
+  const hasNewPassword = payload.password !== undefined && String(payload.password).length > 0;
+  const wantsSecretSave = hasNewPassword || (capturedCookies && capturedCookies.length > 0);
+
+  const backendPayload = {
     accountId,
     label: label || existing.label,
     login: payload.login !== undefined ? String(payload.login).trim() : (existing.login || yandexLogin || ''),
-    password: payload.password !== undefined ? String(payload.password) : (existing.password || ''),
     note: payload.note !== undefined ? String(payload.note).trim() : (existing.note || ''),
     yandexLogin,
-    cookieCount: cookies.length,
-    cookies,
-    localStorageData,
     updatedAt: nowIso
   };
-
-  map[accountId] = updated;
-  await saveAccountsVaultMap(map);
-  await saveSettingsPatch({ lavkaAccountLabel: updated.label });
+  if (hasNewPassword) backendPayload.password = String(payload.password);
+  if (capturedCookies) {
+    backendPayload.cookies = capturedCookies;
+    backendPayload.cookieCount = capturedCookies.length;
+    backendPayload.localStorageData = capturedLs || {};
+  }
 
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  let backendSaved = false;
   if (backendUrl && Date.now() > backendOfflineUntilTs) {
     try {
-      await fetchWithTimeout(
+      const headers = await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' });
+      const r = await fetchWithTimeout(
         `${backendUrl}/api/accounts/save`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...LQS_CLIENT_HEADER },
-          body: JSON.stringify(updated)
-        },
+        { method: 'POST', headers, body: JSON.stringify(backendPayload) },
         2000
       );
+      backendSaved = r.ok;
     } catch {
       backendOfflineUntilTs = Date.now() + 10000;
     }
   }
 
+  const localMeta = sanitizeAccountForLocalStorage({
+    ...existing,
+    ...backendPayload,
+    hasPassword: backendSaved ? (hasNewPassword || Boolean(existing.hasPassword)) : Boolean(existing.hasPassword),
+    cookieCount: backendSaved && capturedCookies ? capturedCookies.length : Number(existing.cookieCount || 0)
+  });
+
+  map[accountId] = localMeta;
+  await saveAccountsVaultMap(map);
+  await saveSettingsPatch({ lavkaAccountLabel: localMeta.label });
+
+  if (wantsSecretSave && !backendSaved) {
+    return {
+      ok: false,
+      error: 'Локальный сервер (:8765) недоступен — метаданные обновлены, но пароли и куки сохраняются только в зашифрованном DPAPI-сейфе сервера.',
+      account: localMeta,
+      vaultStatus: await getAccountsVaultStatus()
+    };
+  }
+
   return {
     ok: true,
-    account: {
-      ...updated,
-      cookies: undefined
-    },
+    account: localMeta,
     vaultStatus: await getAccountsVaultStatus()
   };
 }
@@ -996,9 +1100,10 @@ async function deleteAccountFromVault(accountId) {
   const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   if (backendUrl && Date.now() > backendOfflineUntilTs) {
     try {
+      const headers = await getBackendAuthHeaders(backendUrl);
       await fetchWithTimeout(
         `${backendUrl}/api/accounts/${encodeURIComponent(accountId)}`,
-        { method: 'DELETE', headers: LQS_CLIENT_HEADER },
+        { method: 'DELETE', headers },
         1500
       );
     } catch {
@@ -1009,10 +1114,18 @@ async function deleteAccountFromVault(accountId) {
 }
 
 async function autofillYandexPassportTab(accountId) {
+  const settings = await getSettings();
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   const map = await getAccountsVaultMap();
-  const acc = map[accountId] || Object.values(map).find((a) => a.label === accountId);
+  const metaAcc = map[accountId] || Object.values(map).find((a) => a.label === accountId);
+  const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
+  const srvAcc = Array.isArray(srvAccounts)
+    ? srvAccounts.find((a) => a.accountId === (metaAcc?.accountId || accountId) || a.label === accountId)
+    : null;
+  const acc = srvAcc ? { ...(metaAcc || {}), ...srvAcc } : metaAcc;
   if (!acc || (!acc.login && !acc.password)) {
-    return { ok: false, error: 'Для этого профиля ещё не указаны логин и пароль.' };
+    const hint = !srvAccounts ? ' Убедись, что локальный сервер (:8765) запущен.' : '';
+    return { ok: false, error: `Для этого профиля ещё не указаны логин и пароль.${hint}` };
   }
 
   await saveSettingsPatch({ lavkaAccountLabel: acc.label });
@@ -1110,6 +1223,7 @@ async function switchLavkaAccountInOneClick(options = {}) {
   const settings = await getSettings();
   const map = await getAccountsVaultMap();
 
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
   if (autoBackupCurrent) {
     const currentLive = await captureCurrentYandexCookies();
     if (currentLive.isLoggedIn && currentLive.cookies.length > 0) {
@@ -1118,20 +1232,50 @@ async function switchLavkaAccountInOneClick(options = {}) {
         (a) => a.label === curLabel || (currentLive.yandexLogin && a.yandexLogin === currentLive.yandexLogin)
       );
       if (curEntry) {
-        curEntry.cookies = currentLive.cookies;
+        const nowIso = new Date().toISOString();
+        if (backendUrl && Date.now() > backendOfflineUntilTs) {
+          try {
+            const headers = await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' });
+            await fetchWithTimeout(
+              `${backendUrl}/api/accounts/save`,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  accountId: curEntry.accountId,
+                  label: curEntry.label,
+                  login: curEntry.login || '',
+                  note: curEntry.note || '',
+                  yandexLogin: currentLive.yandexLogin || curEntry.yandexLogin || '',
+                  cookieCount: currentLive.cookies.length,
+                  cookies: currentLive.cookies,
+                  localStorageData: currentLive.localStorageData || {},
+                  updatedAt: nowIso
+                })
+              },
+              2000
+            );
+          } catch {
+            backendOfflineUntilTs = Date.now() + 10000;
+          }
+        }
         curEntry.cookieCount = currentLive.cookies.length;
-        curEntry.localStorageData = currentLive.localStorageData || {};
         if (currentLive.yandexLogin) curEntry.yandexLogin = currentLive.yandexLogin;
-        curEntry.updatedAt = new Date().toISOString();
-        map[curEntry.accountId] = curEntry;
+        curEntry.updatedAt = nowIso;
+        map[curEntry.accountId] = sanitizeAccountForLocalStorage(curEntry);
         await saveAccountsVaultMap(map);
       }
     }
   }
 
-  const targetAcc =
+  const targetMeta =
     (accountId && map[accountId]) ||
     Object.values(map).find((a) => a.label === label || a.accountId === accountId);
+  const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
+  const targetSrv = Array.isArray(srvAccounts) && targetMeta
+    ? srvAccounts.find((a) => a.accountId === targetMeta.accountId)
+    : null;
+  const targetAcc = targetSrv ? { ...targetMeta, ...targetSrv } : targetMeta;
 
   if (!targetAcc) {
     if (label) {
@@ -1416,7 +1560,7 @@ async function recordPricesBatch(accountId, items) {
         `${backendUrl}/api/price/record`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...LQS_CLIENT_HEADER },
+          headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
           body: JSON.stringify({ accountId: acc, items })
         },
         1800
@@ -1672,7 +1816,7 @@ async function getProductPriceIntelligence(slug, title = '', currentPrice = null
       const qTitle = fullCardTitle ? `?title=${encodeURIComponent(fullCardTitle)}` : '';
       const r = await fetchWithTimeout(
         `${backendUrl}/api/price/product/${encodeURIComponent(cleanSlug)}${qTitle}`,
-        { method: 'GET', headers: LQS_CLIENT_HEADER },
+        { method: 'GET', headers: await getBackendAuthHeaders(backendUrl) },
         1000
       );
       if (r.ok) {
@@ -2137,7 +2281,7 @@ async function getSavedCartsState() {
     try {
       const r = await fetchWithTimeout(
         `${backendUrl}/api/cart/latest`,
-        { method: 'GET', headers: LQS_CLIENT_HEADER },
+        { method: 'GET', headers: await getBackendAuthHeaders(backendUrl) },
         1200
       );
       if (r.ok) {
@@ -2226,7 +2370,7 @@ async function saveCartSnapshot(accountId, items, totalPrice = 0) {
         `${backendUrl}/api/cart/save`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...LQS_CLIENT_HEADER },
+          headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             accountId: acc,
             items: cleanItems,
@@ -3744,7 +3888,7 @@ async function checkAllConnections() {
 
   let backendStatus = { ok: false, cachedItems: 0, trackedPrices: trackedPricesCount, msg: 'Выкл (локальная БД)' };
   try {
-    const r1 = await fetchWithTimeout(`${backendUrl}/api/health`, { method: 'GET', headers: LQS_CLIENT_HEADER }, 1000);
+    const r1 = await fetchWithTimeout(`${backendUrl}/api/health`, { method: 'GET', headers: await getBackendAuthHeaders(backendUrl) }, 1000);
     if (r1.ok) {
       backendOfflineUntilTs = 0;
       const j = await r1.json().catch(() => ({}));
@@ -3815,7 +3959,7 @@ async function saveVerdictToBackendCache(backendUrl, slug, title, verdict, sourc
       `${backendUrl}/api/save-cache`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...LQS_CLIENT_HEADER },
+        headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           slug: slug || title,
           title,
@@ -3875,7 +4019,7 @@ async function orchestrateProductAnalysisInternal(payload) {
       try {
         const healthResp = await fetchWithTimeout(
           `${backendUrl}/api/health`,
-          { method: 'GET', headers: LQS_CLIENT_HEADER },
+          { method: 'GET', headers: await getBackendAuthHeaders(backendUrl) },
           800
         );
         if (healthResp.ok) {
@@ -3884,7 +4028,7 @@ async function orchestrateProductAnalysisInternal(payload) {
             `${backendUrl}/api/analyze-product`,
             {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', ...LQS_CLIENT_HEADER },
+              headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
               body: JSON.stringify({
                 ...payload,
                 title: authoritativeTitle,
@@ -4201,6 +4345,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'LQS_AUTO_BUILD_CART') {
     autoBuildCartInBrowser(msg.items || null)
       .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_ACCOUNT_SECRET_FOR_POPUP') {
+    const popupPrefix = chrome.runtime.getURL('popup.html');
+    if (!sender || !sender.url || !sender.url.startsWith(popupPrefix)) {
+      sendResponse({ ok: false, error: 'Доступ к секретам сейфа разрешён только из popup расширения.' });
+      return true;
+    }
+    (async () => {
+      const settings = await getSettings();
+      const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+      const srvAccounts = await fetchBackendVaultAccounts(backendUrl);
+      if (!Array.isArray(srvAccounts)) {
+        return { ok: false, error: 'Локальный сервер (:8765) недоступен.' };
+      }
+      const found = srvAccounts.find((a) => a.accountId === msg.accountId);
+      return { ok: true, password: found?.password || '' };
+    })()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_SET_BACKEND_TOKEN') {
+    const popupPrefix = chrome.runtime.getURL('popup.html');
+    if (!sender || !sender.url || !sender.url.startsWith(popupPrefix)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    saveStoredBackendToken(msg.token || '')
+      .then((tok) => sendResponse({ ok: true, hasToken: Boolean(tok) }))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
   }
