@@ -18,7 +18,8 @@
       CART_LOCKS: 'lqs_cart_locks_v1',
       ACCOUNTS_VAULT: 'lqs_accounts_vault_v1',
       DELETED_ACCOUNTS: 'lqs_deleted_accounts_v1',
-      BACKEND_TOKEN: 'lqs_backend_token_v1'
+      BACKEND_TOKEN: 'lqs_backend_token_v1',
+      CIRCUIT_BREAKER: 'lqs_circuit_breaker_v1'
     }),
     LIMITS: Object.freeze({
       MAX_LOCAL_AI_CACHE_ITEMS: 500,

@@ -753,6 +753,20 @@
     <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки</button>
     <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:5px;"></div>
 
+    <details class="debug-spoiler" id="radar-stores-spoiler">
+      <summary>
+        <span>📡 Статус радара 16 сетей</span>
+        <span id="radar-stores-summary-badge" style="font-size:10px;color:#15803d;">ОК ▾</span>
+      </summary>
+      <div class="debug-body">
+        <div class="module-pills" id="radar-providers-pills"></div>
+        <div class="module-pills" id="radar-16-stores-pills" style="margin-top:6px;"></div>
+        <button type="button" class="action-btn" id="reset-cb-btn" style="margin-top:6px;width:100%;">
+          🔄 Сбросить паузу провайдеров (Circuit Breaker)
+        </button>
+      </div>
+    </details>
+
     <details class="debug-spoiler" id="debug-spoiler">
       <summary>
         <span>🛠️ Бортовой журнал для ИИ (Дебаггинг)</span>

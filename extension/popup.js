@@ -900,6 +900,7 @@ function switchTab(activeId) {
   } else if (activeId === 'tab-settings-btn') {
     refreshAiRadar();
     fetchAndPopulateAiModels(true);
+    refreshRadar16StoresStatus();
   }
 }
 
@@ -1156,3 +1157,58 @@ loadReviews();
 loadSettings();
 loadAccountsVault();
 refreshAiRadar();
+
+
+function renderRadar16StoresStatus(resp) {
+  if (!resp || !resp.ok) return;
+  const badge = document.getElementById('radar-stores-summary-badge');
+  const provBox = document.getElementById('radar-providers-pills');
+  const storesBox = document.getElementById('radar-16-stores-pills');
+  if (!provBox || !storesBox) return;
+
+  const providers = Array.isArray(resp.providers) ? resp.providers : [];
+  const stores = Array.isArray(resp.stores) ? resp.stores : [];
+  const pausedCount = providers.filter((p) => p.status === 'PAUSED').length;
+
+  if (badge) {
+    badge.textContent = pausedCount > 0 ? `⏸ Пауза (${pausedCount}) ▾` : '🟢 16 сетей ОК ▾';
+    badge.style.color = pausedCount > 0 ? '#b91c1c' : '#15803d';
+  }
+
+  provBox.innerHTML = providers
+    .map((p) => {
+      const cls = p.status === 'PAUSED' ? 'err' : (p.status === 'WARN' ? 'warn' : 'ok');
+      const label = p.status === 'PAUSED'
+        ? `${escapeHtml(p.label)}: ⏸ ${p.pausedMin} мин`
+        : (p.status === 'WARN' ? `${escapeHtml(p.label)}: ⚠️ ${p.failures}/3` : `${escapeHtml(p.label)}: ОК`);
+      return `<span class="mod-pill ${cls}" title="${escapeHtml(p.lastReason || 'Работает штатно')}">${label}</span>`;
+    })
+    .join('');
+
+  storesBox.innerHTML = stores
+    .map((s) => {
+      const cls = s.status === 'PAUSED' ? 'err' : (s.cachedOffers > 0 ? 'ok' : '');
+      const suffix = s.status === 'PAUSED' ? ' ⏸' : (s.cachedOffers > 0 ? ` (${s.cachedOffers})` : '');
+      return `<span class="mod-pill ${cls}" title="${escapeHtml(s.mode)}">${escapeHtml(s.name)}${suffix}</span>`;
+    })
+    .join('');
+}
+
+function refreshRadar16StoresStatus() {
+  chrome.runtime.sendMessage({ type: 'LQS_GET_RADAR_STATUS' }, (resp) => {
+    if (!chrome.runtime.lastError && resp && resp.ok) {
+      renderRadar16StoresStatus(resp);
+    }
+  });
+}
+
+const resetCbBtn = document.getElementById('reset-cb-btn');
+if (resetCbBtn) {
+  resetCbBtn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'LQS_RESET_CIRCUIT_BREAKER' }, (resp) => {
+      if (!chrome.runtime.lastError && resp && resp.ok) {
+        renderRadar16StoresStatus(resp);
+      }
+    });
+  });
+}

@@ -1,0 +1,78 @@
+{
+  "seededAt": "2026-11-18",
+  "note": "Эталонные ориентировочные цены из технического дампа Магнита (fallback при отсутствии живых данных)",
+  "offers": [
+    {
+      "goodId": "1000475610",
+      "store": "Магнит",
+      "title": "Напиток Добрый Cola без сахара 1,5 л",
+      "amount": "1,5 л",
+      "price": 144,
+      "oldPrice": null,
+      "url": "https://magnit.ru/product/1000475610-dobryy_napitok_kola_b_sakh_b_a_s_g_1_5l_pl_but_multon?shopCode=411717&shopType=express"
+    },
+    {
+      "goodId": "1000135692",
+      "store": "Магнит",
+      "title": "Мороженое Магнат Шоколадный трюфель эскимо 67 г",
+      "amount": "67 г",
+      "price": 139,
+      "oldPrice": 190,
+      "url": "https://magnit.ru/product/1000135692-morozhenoe_magnat_shokolad_i_tryufel_eskimo_72g?shopCode=411717&shopType=express"
+    },
+    {
+      "goodId": "1000484117",
+      "store": "Магнит",
+      "title": "Газированный напиток Кола Evervess 1 л",
+      "amount": "1 л",
+      "price": 100,
+      "oldPrice": null,
+      "url": "https://magnit.ru/product/1000484117-gazirovannyy_napitok_kola_evervess_1l"
+    },
+    {
+      "goodId": "1000485813",
+      "store": "Магнит",
+      "title": "Сосиски Велком с сыром 450 г",
+      "amount": "450 г",
+      "price": 240,
+      "oldPrice": 359,
+      "url": "https://magnit.ru/product/1000485813-sosiski_velkom_s_syrom_450g"
+    },
+    {
+      "goodId": "2400008824",
+      "store": "Магнит",
+      "title": "Лапша Доширак Квисти со вкусом курицы 70 г",
+      "amount": "70 г",
+      "price": 31,
+      "oldPrice": null,
+      "url": "https://magnit.ru/product/2400008824-lapsha_doshirak_kvisti_so_vkusom_kuritsy_70g"
+    },
+    {
+      "goodId": "1000438044",
+      "store": "Магнит",
+      "title": "Энергетический напиток Adrenaline Rush Silver Energy Zero Sugar без сахара 449 мл",
+      "amount": "449 мл",
+      "price": 117,
+      "oldPrice": null,
+      "url": "https://magnit.ru/product/1000438044-energeticheskiy_napitok_adrenaline_rush_silver_energy_zero_sugar_449ml"
+    },
+    {
+      "goodId": "1000310698",
+      "store": "Магнит",
+      "title": "Мороженое Maxiduo Страчателла брикет 92 г",
+      "amount": "92 г",
+      "price": 99,
+      "oldPrice": 120,
+      "url": "https://magnit.ru/product/1000310698-morozhenoe_maxiduo_strachatella_briket_92g"
+    },
+    {
+      "goodId": "1000320440",
+      "store": "Магнит",
+      "title": "Мороженое Milka Эскимо Ванильное с молочным шоколадом 62 г",
+      "amount": "62 г",
+      "price": 129,
+      "oldPrice": 150,
+      "url": "https://magnit.ru/product/1000320440-morozhenoe_milka_eskimo_vanilnoe_s_molochnym_shokoladom_62g"
+    }
+  ]
+}

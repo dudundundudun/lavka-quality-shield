@@ -32,6 +32,7 @@ const CART_LOCKS_KEY = STORAGE_KEYS.CART_LOCKS;
 const ACCOUNTS_VAULT_KEY = STORAGE_KEYS.ACCOUNTS_VAULT;
 const DELETED_ACCOUNTS_KEY = STORAGE_KEYS.DELETED_ACCOUNTS;
 const BACKEND_TOKEN_KEY = STORAGE_KEYS.BACKEND_TOKEN || 'lqs_backend_token_v1';
+const CIRCUIT_BREAKER_KEY = STORAGE_KEYS.CIRCUIT_BREAKER || 'lqs_circuit_breaker_v1';
 
 const MAX_LOCAL_AI_CACHE_ITEMS = LIMITS.MAX_LOCAL_AI_CACHE_ITEMS;
 const MAX_LOCAL_PRICE_DB_ITEMS = LIMITS.MAX_LOCAL_PRICE_DB_ITEMS;
@@ -99,81 +100,166 @@ const REVIEW_SEARCH_SITES = [
   { domain: 'eda.yandex.ru', name: 'Яндекс Лавка / Еда' }
 ];
 
-// Эталонные цены и прямые карточки из технического дампа Магнита (site-recon-magnit.ru)
-const MAGNIT_RECON_SEED_OFFERS = [
-  {
-    goodId: '1000475610',
-    store: 'Магнит',
-    title: 'Напиток Добрый Cola без сахара 1,5 л',
-    amount: '1,5 л',
-    price: 144,
-    oldPrice: null,
-    url: 'https://magnit.ru/product/1000475610-dobryy_napitok_kola_b_sakh_b_a_s_g_1_5l_pl_but_multon?shopCode=411717&shopType=express'
-  },
-  {
-    goodId: '1000135692',
-    store: 'Магнит',
-    title: 'Мороженое Магнат Шоколадный трюфель эскимо 67 г',
-    amount: '67 г',
-    price: 139,
-    oldPrice: 190,
-    url: 'https://magnit.ru/product/1000135692-morozhenoe_magnat_shokolad_i_tryufel_eskimo_72g?shopCode=411717&shopType=express'
-  },
-  {
-    goodId: '1000484117',
-    store: 'Магнит',
-    title: 'Газированный напиток Кола Evervess 1 л',
-    amount: '1 л',
-    price: 100,
-    oldPrice: null,
-    url: 'https://magnit.ru/product/1000484117-gazirovannyy_napitok_kola_evervess_1l'
-  },
-  {
-    goodId: '1000485813',
-    store: 'Магнит',
-    title: 'Сосиски Велком с сыром 450 г',
-    amount: '450 г',
-    price: 240,
-    oldPrice: 359,
-    url: 'https://magnit.ru/product/1000485813-sosiski_velkom_s_syrom_450g'
-  },
-  {
-    goodId: '2400008824',
-    store: 'Магнит',
-    title: 'Лапша Доширак Квисти со вкусом курицы 70 г',
-    amount: '70 г',
-    price: 31,
-    oldPrice: null,
-    url: 'https://magnit.ru/product/2400008824-lapsha_doshirak_kvisti_so_vkusom_kuritsy_70g'
-  },
-  {
-    goodId: '1000438044',
-    store: 'Магнит',
-    title: 'Энергетический напиток Adrenaline Rush Silver Energy Zero Sugar без сахара 449 мл',
-    amount: '449 мл',
-    price: 117,
-    oldPrice: null,
-    url: 'https://magnit.ru/product/1000438044-energeticheskiy_napitok_adrenaline_rush_silver_energy_zero_sugar_449ml'
-  },
-  {
-    goodId: '1000310698',
-    store: 'Магнит',
-    title: 'Мороженое Maxiduo Страчателла брикет 92 г',
-    amount: '92 г',
-    price: 99,
-    oldPrice: 120,
-    url: 'https://magnit.ru/product/1000310698-morozhenoe_maxiduo_strachatella_briket_92g'
-  },
-  {
-    goodId: '1000320440',
-    store: 'Магнит',
-    title: 'Мороженое Milka Эскимо Ванильное с молочным шоколадом 62 г',
-    amount: '62 г',
-    price: 129,
-    oldPrice: 150,
-    url: 'https://magnit.ru/product/1000320440-morozhenoe_milka_eskimo_vanilnoe_s_molochnym_shokoladom_62g'
+// Ленивая подгрузка эталонных seed-офферов Магнита из extension/data/seed-magnit.json
+let magnitSeedCache = null;
+
+async function getMagnitSeedOffers() {
+  if (Array.isArray(magnitSeedCache)) return magnitSeedCache;
+  try {
+    const url = chrome.runtime.getURL('data/seed-magnit.json');
+    const resp = await fetch(url);
+    if (resp.ok) {
+      const data = await resp.json();
+      const seededAt = data?.seededAt || '';
+      const raw = Array.isArray(data?.offers) ? data.offers : [];
+      magnitSeedCache = raw.map((o) => ({ ...o, isSeedFallback: true, seededAt }));
+      return magnitSeedCache;
+    }
+  } catch {
+    // ignore
   }
+  magnitSeedCache = [];
+  return magnitSeedCache;
+}
+
+// Per-provider / per-store Circuit Breaker (3 подряд ошибки или капча -> пауза 15 минут)
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+const CIRCUIT_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
+const RADAR_16_STORES_CATALOG = [
+  { name: 'Магнит', provider: 'magnit_dom', mode: 'DOM + Seed' },
+  { name: 'ВкусВилл', provider: 'vkusvill', mode: 'Прямой + DDG' },
+  { name: 'Пятёрочка', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Перекрёсток', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Ашан', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'МЕТРО', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Глобус', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Лента', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Магнолия', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Дикси', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Чижик', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'О’КЕЙ', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Азбука Вкуса', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Самокат', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Ozon', provider: 'duckduckgo', mode: 'DDG Радар' },
+  { name: 'Купер', provider: 'duckduckgo', mode: 'DDG Радар' }
 ];
+
+async function getCircuitBreakerState() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([CIRCUIT_BREAKER_KEY], (res) => {
+      resolve(res && res[CIRCUIT_BREAKER_KEY] && typeof res[CIRCUIT_BREAKER_KEY] === 'object' ? { ...res[CIRCUIT_BREAKER_KEY] } : {});
+    });
+  });
+}
+
+async function saveCircuitBreakerState(state) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [CIRCUIT_BREAKER_KEY]: state }, () => resolve(state));
+  });
+}
+
+function isCaptchaOrBlockHtml(html) {
+  if (!html || typeof html !== 'string') return false;
+  return /(captcha|showcaptcha|smartcaptcha|ddos-guard|cloudflare|anomaly-modal|are you a robot|вы не робот|подозрительный трафик)/i.test(
+    html.slice(0, 6000)
+  );
+}
+
+async function isCircuitOpen(providerKey) {
+  const state = await getCircuitBreakerState();
+  const entry = state[providerKey];
+  if (!entry || !entry.openUntil) return false;
+  if (Date.now() < entry.openUntil) return true;
+  // Cooldown expired -> half-open reset
+  entry.openUntil = 0;
+  entry.failures = 0;
+  state[providerKey] = entry;
+  await saveCircuitBreakerState(state);
+  return false;
+}
+
+async function recordCircuitSuccess(providerKey) {
+  const state = await getCircuitBreakerState();
+  state[providerKey] = {
+    failures: 0,
+    openUntil: 0,
+    lastReason: '',
+    lastOkAt: new Date().toISOString()
+  };
+  await saveCircuitBreakerState(state);
+}
+
+async function recordCircuitFailure(providerKey, reason = 'error', immediateOpen = false) {
+  const state = await getCircuitBreakerState();
+  const prev = state[providerKey] || { failures: 0, openUntil: 0, lastOkAt: null };
+  const failures = immediateOpen ? CIRCUIT_BREAKER_THRESHOLD : (Number(prev.failures || 0) + 1);
+  const openUntil = failures >= CIRCUIT_BREAKER_THRESHOLD ? Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS : 0;
+  state[providerKey] = {
+    ...prev,
+    failures,
+    openUntil,
+    lastReason: String(reason || 'error').slice(0, 80),
+    lastFailAt: new Date().toISOString()
+  };
+  await saveCircuitBreakerState(state);
+}
+
+async function resetCircuitBreakers() {
+  await saveCircuitBreakerState({});
+  return await getRadar16StoresStatus();
+}
+
+async function getRadar16StoresStatus() {
+  const cb = await getCircuitBreakerState();
+  const extOffers = await getExternalStoreOffersList();
+  const now = Date.now();
+
+  const liveCountsByStore = {};
+  for (const o of extOffers) {
+    if (!o || !o.store || o.isSeedFallback) continue;
+    liveCountsByStore[o.store] = (liveCountsByStore[o.store] || 0) + 1;
+  }
+
+  const formatProvider = (key, label) => {
+    const e = cb[key] || { failures: 0, openUntil: 0, lastOkAt: null, lastReason: '' };
+    const pausedMs = e.openUntil && e.openUntil > now ? e.openUntil - now : 0;
+    return {
+      key,
+      label,
+      status: pausedMs > 0 ? 'PAUSED' : (e.failures > 0 ? 'WARN' : 'OK'),
+      failures: Number(e.failures || 0),
+      pausedMin: pausedMs > 0 ? Math.ceil(pausedMs / 60000) : 0,
+      lastReason: e.lastReason || '',
+      lastOkAt: e.lastOkAt || null
+    };
+  };
+
+  const providers = [
+    formatProvider('duckduckgo', 'DuckDuckGo (14 сетей)'),
+    formatProvider('vkusvill', 'ВкусВилл (прямой)'),
+    formatProvider('magnit_dom', 'Магнит (DOM-парсер)')
+  ];
+  const provMap = Object.fromEntries(providers.map((p) => [p.key, p]));
+
+  const stores = RADAR_16_STORES_CATALOG.map((s) => {
+    const p = provMap[s.provider] || { status: 'OK', pausedMin: 0 };
+    return {
+      name: s.name,
+      mode: s.mode,
+      provider: s.provider,
+      status: p.status,
+      pausedMin: p.pausedMin,
+      cachedOffers: liveCountsByStore[s.name] || 0
+    };
+  });
+
+  return {
+    ok: true,
+    activeKeepAliveTasks: swKeepAliveActiveTasks,
+    providers,
+    stores
+  };
+}
 
 let geminiTabMutex = Promise.resolve();
 const inFlightRequests = new Map();
@@ -184,19 +270,39 @@ let isWarmingUp = false;
 let backendOfflineUntilTs = 0;
 let bridgeOfflineUntilTs = 0;
 
+let swKeepAliveActiveTasks = 0;
+let swKeepAliveTimer = null;
+
 function startSwKeepAlive() {
-  const timer = setInterval(() => {
-    try {
-      chrome.runtime.getPlatformInfo(() => {
-        if (chrome.runtime.lastError) {
-          // ignore
-        }
-      });
-    } catch {
-      // ignore
+  swKeepAliveActiveTasks += 1;
+  if (!swKeepAliveTimer) {
+    swKeepAliveTimer = setInterval(() => {
+      if (swKeepAliveActiveTasks <= 0 && inFlightRequests.size === 0) {
+        clearInterval(swKeepAliveTimer);
+        swKeepAliveTimer = null;
+        return;
+      }
+      try {
+        chrome.runtime.getPlatformInfo(() => {
+          if (chrome.runtime.lastError) {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
+    }, 20000);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    swKeepAliveActiveTasks = Math.max(0, swKeepAliveActiveTasks - 1);
+    if (swKeepAliveActiveTasks === 0 && inFlightRequests.size === 0 && swKeepAliveTimer) {
+      clearInterval(swKeepAliveTimer);
+      swKeepAliveTimer = null;
     }
-  }, 4000);
-  return () => clearInterval(timer);
+  };
 }
 
 async function getSettings() {
@@ -1948,12 +2054,13 @@ function buildDirectStoreSearchLinks(rawTitle, amount = '', brand = '') {
 }
 
 async function getExternalStoreOffersList() {
+  const seedOffers = await getMagnitSeedOffers();
   return new Promise((resolve) => {
     chrome.storage.local.get([EXT_STORE_DB_KEY], (res) => {
       const saved = res && Array.isArray(res[EXT_STORE_DB_KEY]) ? res[EXT_STORE_DB_KEY] : [];
       const combined = [...saved];
       const seenUrls = new Set(combined.map((o) => o.url));
-      for (const seed of MAGNIT_RECON_SEED_OFFERS) {
+      for (const seed of seedOffers) {
         if (!seenUrls.has(seed.url)) {
           combined.push(seed);
           seenUrls.add(seed.url);
@@ -2982,6 +3089,7 @@ function extractCompetitorPricesFromSources(sources, lavkaPrice = null, productT
 }
 
 async function parseDdgHtmlSearch(query) {
+  if (await isCircuitOpen('duckduckgo')) return [];
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   try {
     const resp = await fetchWithTimeout(
@@ -2994,8 +3102,16 @@ async function parseDdgHtmlSearch(query) {
       },
       5500
     );
+    if (resp.status === 429 || resp.status === 403) {
+      await recordCircuitFailure('duckduckgo', `HTTP ${resp.status}`, true);
+      return [];
+    }
     if (resp.ok) {
       const html = await resp.text();
+      if (isCaptchaOrBlockHtml(html)) {
+        await recordCircuitFailure('duckduckgo', 'captcha', true);
+        return [];
+      }
       const results = [];
       const chunks = html.split(/<h2[^>]+class="[^"]*result__title[^"]*"[^>]*>/i).slice(1, 11);
       for (const chunk of chunks) {
@@ -3019,7 +3135,10 @@ async function parseDdgHtmlSearch(query) {
           url: cleanUrl
         });
       }
-      if (results.length > 0) return results;
+      if (results.length > 0) {
+        await recordCircuitSuccess('duckduckgo');
+        return results;
+      }
     }
   } catch {
     // fallback to lite below
@@ -3037,8 +3156,15 @@ async function parseDdgHtmlSearch(query) {
       },
       5500
     );
-    if (!respLite.ok) return [];
+    if (!respLite.ok) {
+      await recordCircuitFailure('duckduckgo', `Lite HTTP ${respLite.status}`, respLite.status === 429 || respLite.status === 403);
+      return [];
+    }
     const htmlLite = await respLite.text();
+    if (isCaptchaOrBlockHtml(htmlLite)) {
+      await recordCircuitFailure('duckduckgo', 'lite captcha', true);
+      return [];
+    }
     const results = [];
     const linkRegex = /<a[^>]+class="[^"]*result-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     const snippets = Array.from(
@@ -3062,14 +3188,17 @@ async function parseDdgHtmlSearch(query) {
         url: cleanUrl
       });
     }
+    if (results.length > 0) await recordCircuitSuccess('duckduckgo');
     return results;
-  } catch {
+  } catch (err) {
+    await recordCircuitFailure('duckduckgo', err?.message || 'network error');
     return [];
   }
 }
 
 async function probeVkusVillSearchDirect(fullQuery, productTitle, productAmount = '', lavkaPrice = null) {
   if (!fullQuery) return [];
+  if (await isCircuitOpen('vkusvill')) return [];
   try {
     const url = `https://vkusvill.ru/search/?q=${encodeURIComponent(fullQuery)}`;
     const resp = await fetchWithTimeout(
@@ -3081,8 +3210,15 @@ async function probeVkusVillSearchDirect(fullQuery, productTitle, productAmount 
       },
       3200
     );
-    if (!resp.ok) return [];
+    if (!resp.ok) {
+      await recordCircuitFailure('vkusvill', `HTTP ${resp.status}`, resp.status === 429 || resp.status === 403);
+      return [];
+    }
     const html = await resp.text();
+    if (isCaptchaOrBlockHtml(html)) {
+      await recordCircuitFailure('vkusvill', 'captcha', true);
+      return [];
+    }
     const offers = [];
     const cardChunks = html.split(/class="[^"]*ProductCard[^"]*"/i).slice(1, 8);
     for (const chunk of cardChunks) {
@@ -3112,8 +3248,10 @@ async function probeVkusVillSearchDirect(fullQuery, productTitle, productAmount 
         });
       }
     }
+    await recordCircuitSuccess('vkusvill');
     return offers;
-  } catch {
+  } catch (err) {
+    await recordCircuitFailure('vkusvill', err?.message || 'network error');
     return [];
   }
 }
@@ -4398,6 +4536,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const found = srvAccounts.find((a) => a.accountId === msg.accountId);
       return { ok: true, password: found?.password || '' };
     })()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_RADAR_STATUS') {
+    getRadar16StoresStatus()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_RESET_CIRCUIT_BREAKER') {
+    resetCircuitBreakers()
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
