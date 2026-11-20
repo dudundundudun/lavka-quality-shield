@@ -11,7 +11,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from matcher import normalize_title_for_match
 from security import DEFAULT_DB_PATH, migrate_legacy_db_if_needed
 
-APP_VERSION = "2.8.1"
+APP_VERSION = "2.8.2"
 SCHEMA_VERSION = 3
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
@@ -167,7 +167,7 @@ def init_db(db_path: Optional[str] = None) -> None:
             current_version = 2
 
         if current_version < 3:
-            # v2.8.1: очищаем устаревшие маркетинговые цены «Гость (без куки)» из сводок
+            # v2.8.2: очищаем устаревшие маркетинговые цены «Гость (без куки)» из сводок
             conn.execute("UPDATE product_price_summary SET guest_price = NULL WHERE guest_price IS NOT NULL")
             summary_rows = conn.execute("SELECT slug, accounts_json FROM product_price_summary").fetchall()
             for slug_val, acc_raw in summary_rows:

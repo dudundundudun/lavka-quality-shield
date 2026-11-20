@@ -858,25 +858,31 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   font-weight: 700 !important;
 }
 
-/* ===== Lavka Quality Shield v2.8.0 — Price History Chart (Alitools-style) & Native Popover ===== */
+/* ===== Lavka Quality Shield v2.8.2 — Price History Chart (Lavka Theme, Compact) & Native Popover ===== */
 .lqs-price-chart-section {
   margin-top: 8px !important;
 }
 
 .lqs-ph-card {
   background: #ffffff !important;
-  border: 1px solid #e2e8f0 !important;
-  border-radius: 12px !important;
-  padding: 12px 14px !important;
-  color: #0f172a !important;
+  border: 1px solid #e5e3df !important;
+  border-radius: 14px !important;
+  padding: 10px 12px !important;
+  color: #21201f !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   box-sizing: border-box !important;
 }
 
+.lqs-ph-card.is-inline {
+  width: 100% !important;
+  max-width: 360px !important;
+  margin: 0 auto !important;
+}
+
 .lqs-ph-card.is-popover {
   border: none !important;
-  padding: 16px 18px !important;
-  width: 440px !important;
+  padding: 14px 16px !important;
+  width: 340px !important;
   max-width: calc(100vw - 24px) !important;
 }
 
@@ -890,34 +896,35 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 
 .lqs-ph-title-wrap {
   display: flex !important;
-  align-items: baseline !important;
+  align-items: center !important;
   gap: 8px !important;
   flex-wrap: wrap !important;
 }
 
 .lqs-ph-title {
-  font-size: 16px !important;
+  font-size: 15px !important;
   font-weight: 700 !important;
-  color: #1e293b !important;
+  color: #21201f !important;
 }
 
 .lqs-ph-period {
-  border: none !important;
-  background: transparent !important;
-  color: #1ca691 !important;
-  font-size: 13px !important;
+  border: 1px solid #e5e3df !important;
+  background: #f5f4f2 !important;
+  color: #21201f !important;
+  border-radius: 8px !important;
+  font-size: 12px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
   outline: none !important;
-  padding: 2px 4px !important;
+  padding: 2px 6px !important;
 }
 
 .lqs-ph-close-btn,
 .lqs-ph-popout-btn {
-  border: 1px solid #e2e8f0 !important;
-  background: #f8fafc !important;
-  color: #64748b !important;
-  border-radius: 7px !important;
+  border: 1px solid #e5e3df !important;
+  background: #f5f4f2 !important;
+  color: #5c5955 !important;
+  border-radius: 8px !important;
   width: 26px !important;
   height: 26px !important;
   display: inline-flex !important;
@@ -930,8 +937,8 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 
 .lqs-ph-close-btn:hover,
 .lqs-ph-popout-btn:hover {
-  background: #e2e8f0 !important;
-  color: #0f172a !important;
+  background: #ebe8e3 !important;
+  color: #21201f !important;
 }
 
 .lqs-ph-mode-row {
@@ -939,22 +946,25 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   align-items: center !important;
   justify-content: space-between !important;
   gap: 8px !important;
-  margin-bottom: 8px !important;
-  min-height: 28px !important;
+  margin-bottom: 6px !important;
+  min-height: 26px !important;
 }
 
 .lqs-ph-tabs {
   display: inline-flex !important;
-  border: 1px solid #2bb8a0 !important;
-  border-radius: 7px !important;
-  overflow: hidden !important;
+  background: #f5f4f2 !important;
+  border: 1px solid #e5e3df !important;
+  border-radius: 9px !important;
+  padding: 2px !important;
+  gap: 2px !important;
 }
 
 .lqs-ph-tab {
   border: none !important;
-  background: #ffffff !important;
-  color: #1ca691 !important;
-  padding: 4px 12px !important;
+  background: transparent !important;
+  color: #6e6a66 !important;
+  border-radius: 7px !important;
+  padding: 4px 11px !important;
   font-size: 12px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
@@ -962,14 +972,15 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 }
 
 .lqs-ph-tab.is-active {
-  background: #2bb8a0 !important;
-  color: #ffffff !important;
+  background: #fce000 !important;
+  color: #21201f !important;
+  font-weight: 700 !important;
 }
 
 .lqs-ph-tooltip {
-  font-size: 11.5px !important;
+  font-size: 11px !important;
   font-weight: 600 !important;
-  color: #0f172a !important;
+  color: #21201f !important;
   text-align: right !important;
   white-space: nowrap !important;
   overflow: hidden !important;
@@ -988,20 +999,20 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 }
 
 .lqs-svg-axis-label {
-  fill: #64748b !important;
-  font-size: 11px !important;
+  fill: #7a7773 !important;
+  font-size: 10.5px !important;
   font-weight: 500 !important;
 }
 
 .lqs-svg-axis-current {
-  fill: #0f172a !important;
-  font-size: 11.5px !important;
+  fill: #21201f !important;
+  font-size: 11px !important;
   font-weight: 700 !important;
 }
 
 .lqs-svg-axis-date {
-  fill: #64748b !important;
-  font-size: 10.5px !important;
+  fill: #7a7773 !important;
+  font-size: 10px !important;
 }
 
 .lqs-chart-hit {
@@ -1011,49 +1022,50 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 
 .lqs-chart-hit:hover,
 .lqs-chart-hit:focus {
-  fill: rgba(43, 184, 160, 0.28) !important;
-  stroke: #1ca691 !important;
+  fill: rgba(252, 224, 0, 0.35) !important;
+  stroke: #21201f !important;
   stroke-width: 1.5 !important;
   outline: none !important;
 }
 
 .lqs-chart-empty {
-  padding: 18px 12px !important;
+  padding: 16px 10px !important;
   text-align: center !important;
-  font-size: 12px !important;
-  color: #64748b !important;
-  background: #f8fafc !important;
-  border-radius: 8px !important;
+  font-size: 11.5px !important;
+  color: #6e6a66 !important;
+  background: #f5f4f2 !important;
+  border-radius: 10px !important;
 }
 
 .lqs-ph-meta {
   font-size: 11px !important;
-  color: #64748b !important;
+  color: #7a7773 !important;
   margin-top: 4px !important;
   text-align: center !important;
 }
 
 .lqs-ph-footer {
-  margin-top: 10px !important;
+  margin-top: 8px !important;
   display: flex !important;
   justify-content: center !important;
 }
 
 .lqs-ph-watch-btn {
-  border: 1px solid #cceee8 !important;
-  background: #edf9f7 !important;
-  color: #1ca691 !important;
-  border-radius: 8px !important;
-  padding: 7px 18px !important;
-  font-size: 13px !important;
+  border: 1px solid #e5e3df !important;
+  background: #f5f4f2 !important;
+  color: #21201f !important;
+  border-radius: 10px !important;
+  padding: 6px 16px !important;
+  font-size: 12.5px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
   transition: background 0.15s, border-color 0.15s !important;
 }
 
 .lqs-ph-watch-btn:hover {
-  background: #d9f4ef !important;
-  border-color: #2bb8a0 !important;
+  background: #fce000 !important;
+  border-color: #f0d400 !important;
+  color: #21201f !important;
 }
 
 .lqs-ph-watch-btn.is-watched {
@@ -1067,19 +1079,19 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   align-items: center !important;
   justify-content: space-between !important;
   gap: 8px !important;
-  background: #f0fdfa !important;
-  border: 1px solid #99f6e4 !important;
+  background: #fffdf0 !important;
+  border: 1px solid #f5e28a !important;
   border-radius: 10px !important;
   padding: 8px 12px !important;
   font-size: 12px !important;
-  color: #134e4a !important;
+  color: #21201f !important;
 }
 
 .lqs-ph-open-win-btn {
-  border: 1px solid #2bb8a0 !important;
-  background: #2bb8a0 !important;
-  color: #ffffff !important;
-  border-radius: 7px !important;
+  border: 1px solid #f0d400 !important;
+  background: #fce000 !important;
+  color: #21201f !important;
+  border-radius: 8px !important;
   padding: 4px 10px !important;
   font-size: 11.5px !important;
   font-weight: 700 !important;
@@ -1087,19 +1099,19 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   white-space: nowrap !important;
 }
 
-/* Native Top-Layer Popover window (Alitools-style) */
+/* Native Top-Layer Popover window (Lavka theme) */
 .lqs-price-chart-popover {
   padding: 0 !important;
-  border: 1px solid #e2e8f0 !important;
-  border-radius: 14px !important;
+  border: 1px solid #e5e3df !important;
+  border-radius: 16px !important;
   background: #ffffff !important;
-  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22) !important;
+  box-shadow: 0 18px 42px rgba(33, 32, 31, 0.2) !important;
   margin: auto !important;
   overflow: visible !important;
 }
 
 .lqs-price-chart-popover::backdrop {
-  background: rgba(15, 23, 42, 0.22) !important;
+  background: rgba(33, 32, 31, 0.22) !important;
 }
 
 .lqs-price-chart-popover.lqs-popover-fallback-open {
@@ -1111,7 +1123,7 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   z-index: 2147483640 !important;
 }
 
-/* Floating Alitools-style dock pill (shown when priceChartWindowMode = true) */
+/* Floating dock pill (shown when priceChartWindowMode = true) */
 .lqs-alitools-dock {
   position: fixed !important;
   left: 18px !important;
@@ -1121,10 +1133,10 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   align-items: center !important;
   gap: 6px !important;
   background: #ffffff !important;
-  border: 1px solid #e2e8f0 !important;
+  border: 1px solid #e5e3df !important;
   border-radius: 12px !important;
   padding: 6px !important;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16) !important;
+  box-shadow: 0 8px 24px rgba(33, 32, 31, 0.16) !important;
 }
 
 .lqs-alitools-dock-btn {
@@ -1140,18 +1152,18 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 }
 
 .lqs-alitools-dock-btn.is-price {
-  background: #2bb8a0 !important;
-  color: #ffffff !important;
+  background: #fce000 !important;
+  color: #21201f !important;
 }
 
 .lqs-alitools-dock-btn.is-price:hover {
-  background: #1ca691 !important;
+  background: #f2d200 !important;
 }
 
 .lqs-alitools-dock-btn.is-watch {
-  background: #f8fafc !important;
-  border: 1px solid #e2e8f0 !important;
-  color: #334155 !important;
+  background: #f5f4f2 !important;
+  border: 1px solid #e5e3df !important;
+  color: #21201f !important;
 }
 
 .lqs-alitools-dock-btn.is-watch.is-watched {

@@ -106,12 +106,12 @@
   }
 
   function buildPriceChartSvg(series, options = {}) {
-    const width = options.width || 420;
-    const height = options.height || 170;
+    const width = options.width || 330;
+    const height = options.height || 138;
     const padLeft = 10;
-    const padRight = 68;
-    const padTop = 16;
-    const padBottom = 26;
+    const padRight = 60;
+    const padTop = 14;
+    const padBottom = 22;
     const plotW = width - padLeft - padRight;
     const plotH = height - padTop - padBottom;
 
@@ -183,16 +183,16 @@
       <svg class="lqs-price-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="График истории цены">
         <defs>
           <linearGradient id="lqsPriceAreaGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#2bb8a0" stop-opacity="0.18"/>
-            <stop offset="100%" stop-color="#2bb8a0" stop-opacity="0.01"/>
+            <stop offset="0%" stop-color="#fce000" stop-opacity="0.28"/>
+            <stop offset="100%" stop-color="#fce000" stop-opacity="0.02"/>
           </linearGradient>
         </defs>
-        <line x1="${padLeft}" y1="${yMaxLine}" x2="${padLeft + plotW}" y2="${yMaxLine}" stroke="#e2e8f0" stroke-width="1"/>
-        <line x1="${padLeft}" y1="${yMinLine}" x2="${padLeft + plotW}" y2="${yMinLine}" stroke="#e2e8f0" stroke-width="1"/>
-        <line x1="${padLeft}" y1="${yLastLine}" x2="${padLeft + plotW}" y2="${yLastLine}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="3 3"/>
+        <line x1="${padLeft}" y1="${yMaxLine}" x2="${padLeft + plotW}" y2="${yMaxLine}" stroke="#eceae6" stroke-width="1"/>
+        <line x1="${padLeft}" y1="${yMinLine}" x2="${padLeft + plotW}" y2="${yMinLine}" stroke="#eceae6" stroke-width="1"/>
+        <line x1="${padLeft}" y1="${yLastLine}" x2="${padLeft + plotW}" y2="${yLastLine}" stroke="#d6d3cd" stroke-width="1" stroke-dasharray="3 3"/>
         <path d="${areaPath}" fill="url(#lqsPriceAreaGrad)"/>
-        <polyline fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${polylinePoints}"/>
-        <circle cx="${lastCoord.x}" cy="${lastCoord.y}" r="3.8" fill="#0f172a" stroke="#ffffff" stroke-width="1.5"/>
+        <polyline fill="none" stroke="#21201f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" points="${polylinePoints}"/>
+        <circle cx="${lastCoord.x}" cy="${lastCoord.y}" r="4" fill="#21201f" stroke="#fce000" stroke-width="2"/>
         ${showMaxLabel ? `<text x="${padLeft + plotW + 6}" y="${yMaxLine + 4}" class="lqs-svg-axis-label">${esc(formatRub(maxP))}</text>` : ''}
         <text x="${padLeft + plotW + 6}" y="${yLastLine + 4}" class="lqs-svg-axis-current">${esc(formatRub(lastP))}</text>
         ${showMinLabel ? `<text x="${padLeft + plotW + 6}" y="${yMinLine + 4}" class="lqs-svg-axis-label">${esc(formatRub(minP))}</text>` : ''}
