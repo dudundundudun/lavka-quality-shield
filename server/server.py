@@ -1,5 +1,5 @@
 """
-Lavka Quality Shield v2.9.3 — Локальный FastAPI сервер (127.0.0.1:8765)
+Lavka Quality Shield v2.9.4 — Локальный FastAPI сервер (127.0.0.1:8765)
 Модульная архитектура: db.py + security.py + matcher.py + routers/{health,accounts,prices,cache}.py
 """
 

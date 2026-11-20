@@ -58,6 +58,12 @@ const {
 } = globalThis.LQS_ACCOUNTS_VAULT;
 
 const {
+  GEMINI_IDLE_ALARM_NAME,
+  normalizeGeminiTabMode,
+  scheduleGeminiIdleCloseTimer,
+  cancelGeminiIdleCloseTimer,
+  closeManagedGeminiSession,
+  isGeminiLoginRequired,
   inspectGeminiCookies,
   detectTabAccountEmail,
   extractAccountIndexFromUrl,
@@ -1830,45 +1836,82 @@ async function orchestrateProductAnalysisInternal(payload) {
         };
       }
 
-      const geminiTab = await findOpenGeminiTab(true, false);
-      if (geminiTab && geminiTab.id) {
-        const email = await detectTabAccountEmail(geminiTab.id);
-        const accIdx = extractAccountIndexFromUrl(geminiTab.url);
-        const promptForTab = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, true, priceIntel);
-        const tabResult = await executePromptInsideGeminiTab(
-          geminiTab.id,
-          promptForTab,
-          authoritativeTitle,
-          Boolean(payload.forceRefresh)
-        );
-        if (tabResult && tabResult.ok && tabResult.text) {
-          const accLabel = email ? `${email} (/u/${accIdx})` : `/u/${accIdx}`;
-          const modeLabel = `Вкладка Gemini [${accLabel}]`;
-          await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, tabResult.text, webSources, modeLabel, payload.imageKey);
-          if (backendOnline) {
-            saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, tabResult.text, webSources);
-          }
-          const resObj = {
-            ok: true,
-            cached: false,
-            mode: modeLabel,
-            verdict: tabResult.text,
-            sources: webSources,
-            priceSummary: priceIntel
-          };
-          broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
-          return resObj;
-        }
+      const geminiMode = normalizeGeminiTabMode(settings.geminiTabMode);
+      const loginUrl = buildGeminiUrlForAccount(settings.geminiAccountIndex);
+      const cookieCheck = await inspectGeminiCookies();
+      if (isGeminiLoginRequired(null, cookieCheck)) {
         return {
           ok: false,
-          mode: 'Gemini Tab Error',
-          error:
-            tabResult && tabResult.error
-              ? tabResult.error
-              : 'Не удалось получить ответ от вкладки gemini.google.com.',
+          needsGeminiLogin: true,
+          loginUrl,
+          mode: 'Gemini Web (Hydrogen)',
+          error: 'Вы не вошли в аккаунт Google. Откройте Gemini один раз для входа, после чего режим «Невидимка» заработает автоматически.',
           sources: webSources,
           priceSummary: priceIntel
         };
+      }
+
+      await cancelGeminiIdleCloseTimer();
+      let geminiTab = null;
+      try {
+        geminiTab = await findOpenGeminiTab(true, false);
+        if (geminiTab && isGeminiLoginRequired(geminiTab, cookieCheck)) {
+          await closeManagedGeminiSession('login-required');
+          return {
+            ok: false,
+            needsGeminiLogin: true,
+            loginUrl,
+            mode: 'Gemini Web (Hydrogen)',
+            error: 'Gemini запросил вход в аккаунт Google. Нажмите «Открыть Gemini для входа», авторизуйтесь и повторите разбор.',
+            sources: webSources,
+            priceSummary: priceIntel
+          };
+        }
+
+        if (geminiTab && geminiTab.id) {
+          const email = await detectTabAccountEmail(geminiTab.id);
+          const accIdx = extractAccountIndexFromUrl(geminiTab.url);
+          const promptForTab = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, true, priceIntel);
+          const tabResult = await executePromptInsideGeminiTab(
+            geminiTab.id,
+            promptForTab,
+            authoritativeTitle,
+            Boolean(payload.forceRefresh)
+          );
+          if (tabResult && tabResult.ok && tabResult.text) {
+            const accLabel = email ? `${email} (/u/${accIdx})` : `/u/${accIdx}`;
+            const modePrefix = geminiMode === 'stealth_window' ? 'Gemini Невидимка' : 'Вкладка Gemini';
+            const modeLabel = `${modePrefix} [${accLabel}]`;
+            await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, tabResult.text, webSources, modeLabel, payload.imageKey);
+            if (backendOnline) {
+              saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, tabResult.text, webSources);
+            }
+            const resObj = {
+              ok: true,
+              cached: false,
+              mode: modeLabel,
+              verdict: tabResult.text,
+              sources: webSources,
+              priceSummary: priceIntel
+            };
+            broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
+            return resObj;
+          }
+          return {
+            ok: false,
+            mode: 'Gemini Tab Error',
+            error:
+              tabResult && tabResult.error
+                ? tabResult.error
+                : 'Не удалось получить ответ от вкладки gemini.google.com.',
+            sources: webSources,
+            priceSummary: priceIntel
+          };
+        }
+      } finally {
+        if (geminiTab && geminiTab.id) {
+          await scheduleGeminiIdleCloseTimer(settings);
+        }
       }
 
       return {
@@ -1954,6 +1997,9 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm && alarm.name === WATCHLIST_ALARM_NAME) {
       checkWatchlistPricesBatch({ maxItems: 12 }).catch(() => {});
+    }
+    if (alarm && alarm.name === GEMINI_IDLE_ALARM_NAME) {
+      closeManagedGeminiSession('idle-alarm').catch(() => {});
     }
   });
 }

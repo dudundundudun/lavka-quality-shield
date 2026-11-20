@@ -1787,7 +1787,12 @@
           }
           const dt = Math.round(performance.now() - t0);
           LQS_RECORDER.updateModule('aiReviewer', 'WARN', `Ответ оркестратора (${dt} мс): ${bgResult.error}`);
-          aiContent.innerHTML = `⚠️ <b>${escapeHtml(bgResult.error)}</b>`;
+          if (bgResult.needsGeminiLogin) {
+            const safeLoginUrl = safeHttpUrl(bgResult.loginUrl) || 'https://gemini.google.com/app';
+            aiContent.innerHTML = `⚠️ <b>${escapeHtml(bgResult.error)}</b><div style="margin-top:8px;"><a class="lqs-mini-btn lqs-paid-ai-btn" href="${escapeHtml(safeLoginUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;text-decoration:none;">🔑 Открыть Gemini для входа</a></div>`;
+          } else {
+            aiContent.innerHTML = `⚠️ <b>${escapeHtml(bgResult.error)}</b>`;
+          }
           if (Array.isArray(bgResult.sources) && bgResult.sources.length > 0) {
             aiSources.innerHTML = bgResult.sources
               .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))

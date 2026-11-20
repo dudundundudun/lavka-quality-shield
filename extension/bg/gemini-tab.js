@@ -10,10 +10,125 @@
   }
 
   const { fetchWithTimeout, getSettings } = root.LQS_UTILS;
+  const GEMINI_IDLE_ALARM_NAME = 'lqs_gemini_idle_close';
+  const GEMINI_STEALTH_SESSION_KEY =
+    (root.LQS_CONFIG && root.LQS_CONFIG.STORAGE_KEYS && root.LQS_CONFIG.STORAGE_KEYS.GEMINI_STEALTH_SESSION) ||
+    'lqs_gemini_stealth_session_v1';
 
   let geminiTabMutex = Promise.resolve();
   let lastWarmupCheckTs = 0;
   let isWarmingUp = false;
+
+  function normalizeGeminiTabMode(mode) {
+    const clean = String(mode || '').trim().toLowerCase();
+    if (clean === 'on_demand_tab' || clean === 'keep_open' || clean === 'stealth_window') {
+      return clean;
+    }
+    return 'stealth_window';
+  }
+
+  function getGeminiIdleCloseMinutes(settings = {}) {
+    const val = Number(settings && settings.geminiIdleCloseMinutes);
+    if (Number.isFinite(val) && val >= 1 && val <= 60) {
+      return Math.round(val);
+    }
+    return 5;
+  }
+
+  async function getManagedGeminiSession() {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local) return resolve(null);
+      chrome.storage.local.get([GEMINI_STEALTH_SESSION_KEY], (res) => {
+        const s = res && res[GEMINI_STEALTH_SESSION_KEY];
+        resolve(s && typeof s === 'object' && (s.tabId || s.windowId) ? s : null);
+      });
+    });
+  }
+
+  async function saveManagedGeminiSession(session) {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local) return resolve(session);
+      chrome.storage.local.set({ [GEMINI_STEALTH_SESSION_KEY]: session }, () => resolve(session));
+    });
+  }
+
+  async function clearManagedGeminiSession() {
+    return new Promise((resolve) => {
+      if (!chrome.storage || !chrome.storage.local) return resolve();
+      chrome.storage.local.remove([GEMINI_STEALTH_SESSION_KEY], () => resolve());
+    });
+  }
+
+  async function cancelGeminiIdleCloseTimer() {
+    try {
+      if (chrome.alarms && typeof chrome.alarms.clear === 'function') {
+        await chrome.alarms.clear(GEMINI_IDLE_ALARM_NAME);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  async function scheduleGeminiIdleCloseTimer(settingsOverride = null) {
+    const settings = settingsOverride || (await getSettings());
+    const mode = normalizeGeminiTabMode(settings.geminiTabMode);
+    if (mode === 'keep_open') {
+      await cancelGeminiIdleCloseTimer();
+      return { scheduled: false, mode };
+    }
+    const managed = await getManagedGeminiSession();
+    if (!managed) {
+      return { scheduled: false, mode };
+    }
+    const delayInMinutes = getGeminiIdleCloseMinutes(settings);
+    try {
+      if (chrome.alarms && typeof chrome.alarms.create === 'function') {
+        chrome.alarms.create(GEMINI_IDLE_ALARM_NAME, { delayInMinutes });
+        return { scheduled: true, mode, delayInMinutes };
+      }
+    } catch {
+      // ignore
+    }
+    return { scheduled: false, mode };
+  }
+
+  async function closeManagedGeminiSession(reason = 'idle') {
+    await cancelGeminiIdleCloseTimer();
+    const managed = await getManagedGeminiSession();
+    if (!managed) {
+      return { closed: false, reason };
+    }
+    await clearManagedGeminiSession();
+    let closed = false;
+    try {
+      if (managed.mode === 'stealth_window' && managed.windowId && chrome.windows && typeof chrome.windows.remove === 'function') {
+        await chrome.windows.remove(managed.windowId);
+        closed = true;
+      } else if (managed.tabId && chrome.tabs && typeof chrome.tabs.remove === 'function') {
+        await chrome.tabs.remove(managed.tabId);
+        closed = true;
+      }
+    } catch {
+      if (!closed && managed.tabId && chrome.tabs && typeof chrome.tabs.remove === 'function') {
+        try {
+          await chrome.tabs.remove(managed.tabId);
+          closed = true;
+        } catch {
+          // already closed by user
+        }
+      }
+    }
+    return { closed, mode: managed.mode, tabId: managed.tabId || null, windowId: managed.windowId || null, reason };
+  }
+
+  function isGeminiLoginRequired(tab, cookies = null) {
+    if (cookies && cookies.ok === false) return true;
+    const url = String((tab && tab.url) || '').toLowerCase();
+    if (url.includes('accounts.google.com') || url.includes('/servicelogin') || url.includes('/signin')) {
+      return true;
+    }
+    return false;
+  }
 
   async function inspectGeminiCookies() {
     try {
@@ -112,13 +227,25 @@
     const targetIdx = String(settings.geminiAccountIndex ?? 'auto');
     const preferredTabId = settings.preferredGeminiTabId ? Number(settings.preferredGeminiTabId) : null;
 
+    if (autoCreateIfMissing) {
+      await cancelGeminiIdleCloseTimer();
+    }
+
     const tabs = await chrome.tabs.query({ url: ['https://gemini.google.com/*'] });
     if (tabs && tabs.length > 0) {
+      const managed = await getManagedGeminiSession();
       if (preferredTabId) {
         const exactTab = tabs.find((t) => t.id === preferredTabId);
         if (exactTab) {
           if (makeActive) await chrome.tabs.update(exactTab.id, { active: true });
           return exactTab;
+        }
+      }
+      if (managed && managed.tabId) {
+        const managedTab = tabs.find((t) => t.id === managed.tabId);
+        if (managedTab && (targetIdx === 'auto' || extractAccountIndexFromUrl(managedTab.url) === targetIdx)) {
+          if (makeActive) await chrome.tabs.update(managedTab.id, { active: true });
+          return managedTab;
         }
       }
       if (targetIdx !== 'auto') {
@@ -144,11 +271,64 @@
     return await createGeminiTab(buildGeminiUrlForAccount(targetIdx), makeActive);
   }
 
-  async function createGeminiTab(targetUrl, makeActive = false) {
+  async function createGeminiTab(targetUrl, makeActive = false, modeOverride = null) {
+    const settings = await getSettings();
+    const mode = modeOverride ? normalizeGeminiTabMode(modeOverride) : normalizeGeminiTabMode(settings.geminiTabMode);
+
+    if (makeActive) {
+      const created = await chrome.tabs.create({
+        url: targetUrl,
+        active: true,
+        pinned: false
+      });
+      await getBgDeps().waitForTabCompleteSafe(created.id, 6500);
+      return created;
+    }
+
+    if (mode === 'stealth_window' && chrome.windows && typeof chrome.windows.create === 'function') {
+      const win = await chrome.windows.create({
+        url: targetUrl,
+        state: 'minimized',
+        focused: false
+      });
+      let createdTab = win && Array.isArray(win.tabs) && win.tabs[0] ? win.tabs[0] : null;
+      if (!createdTab && win && win.id && chrome.tabs && typeof chrome.tabs.query === 'function') {
+        const winTabs = await chrome.tabs.query({ windowId: win.id });
+        createdTab = winTabs && winTabs[0] ? winTabs[0] : null;
+      }
+      if (createdTab && createdTab.id) {
+        await saveManagedGeminiSession({
+          tabId: createdTab.id,
+          windowId: win ? win.id : null,
+          mode: 'stealth_window',
+          createdAt: Date.now()
+        });
+        await getBgDeps().waitForTabCompleteSafe(createdTab.id, 6500);
+        return createdTab;
+      }
+    }
+
+    if (mode === 'on_demand_tab') {
+      const created = await chrome.tabs.create({
+        url: targetUrl,
+        active: false,
+        pinned: false
+      });
+      await saveManagedGeminiSession({
+        tabId: created.id,
+        windowId: null,
+        mode: 'on_demand_tab',
+        createdAt: Date.now()
+      });
+      await getBgDeps().waitForTabCompleteSafe(created.id, 6500);
+      return created;
+    }
+
+    // Режим keep_open: классическая фоновая закреплённая вкладка без автозакрытия
     const created = await chrome.tabs.create({
       url: targetUrl,
-      active: makeActive,
-      pinned: !makeActive
+      active: false,
+      pinned: true
     });
     await getBgDeps().waitForTabCompleteSafe(created.id, 6500);
     return created;
@@ -162,21 +342,17 @@
 
     try {
       const settings = await getSettings();
-      if (settings.autoWarmupGeminiTab === false) return;
+      // По умолчанию автопрогрев выключен (v2.9.4), а при выборе любого API-провайдера gemini-tab вообще не трогаем
+      if (settings.autoWarmupGeminiTab !== true) return;
+
+      const aiProvider = String(settings.aiProvider || 'gemini_tab').trim().toLowerCase();
+      if (aiProvider !== 'gemini_tab') return;
+
+      // В режимах stealth_window и on_demand_tab окно/вкладка открываются строго по запросу
+      if (normalizeGeminiTabMode(settings.geminiTabMode) !== 'keep_open') return;
 
       const existingTab = await findOpenGeminiTab(false, false);
       if (existingTab) return;
-
-      const aiBaseUrl = (settings.aiBaseUrl || '').replace(/\/$/, '');
-      if (aiBaseUrl && Date.now() > (getBgDeps().getBridgeOfflineUntilTs?.() || 0)) {
-        try {
-          const headers = settings.aiApiKey ? { Authorization: `Bearer ${settings.aiApiKey}` } : {};
-          const bridgeResp = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 900);
-          if (bridgeResp.ok) return;
-        } catch {
-          getBgDeps().setBridgeOfflineUntilTs?.(Date.now() + 15000);
-        }
-      }
 
       const cookies = await inspectGeminiCookies();
       if (!cookies.ok) return;
@@ -565,6 +741,16 @@
   }
 
   const api = {
+    GEMINI_IDLE_ALARM_NAME,
+    normalizeGeminiTabMode,
+    getGeminiIdleCloseMinutes,
+    getManagedGeminiSession,
+    saveManagedGeminiSession,
+    clearManagedGeminiSession,
+    scheduleGeminiIdleCloseTimer,
+    cancelGeminiIdleCloseTimer,
+    closeManagedGeminiSession,
+    isGeminiLoginRequired,
     inspectGeminiCookies,
     detectTabAccountEmail,
     extractAccountIndexFromUrl,

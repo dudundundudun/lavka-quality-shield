@@ -6,13 +6,14 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.9.3',
+    VERSION: '2.9.4',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
       FLIGHT_LOG: 'lqs_flight_log_v1',
       AI_CACHE: 'lqs_ai_cache_v1',
       AI_USAGE: 'lqs_ai_usage_v1',
+      GEMINI_STEALTH_SESSION: 'lqs_gemini_stealth_session_v1',
       PRICE_DB: 'lqs_price_db_v1',
       WATCHLIST: 'lqs_watchlist_v1',
       EXT_STORE_DB: 'lqs_ext_store_prices_v1',
@@ -28,7 +29,8 @@
       MAX_LOCAL_PRICE_DB_ITEMS: 1500,
       AI_DIRECT_TIMEOUT_MS: 28000,
       BACKEND_ANALYZE_TIMEOUT_MS: 35000,
-      DEFAULT_PAID_AI_DAILY_LIMIT: 25
+      DEFAULT_PAID_AI_DAILY_LIMIT: 25,
+      DEFAULT_GEMINI_IDLE_CLOSE_MINUTES: 5
     }),
     CLIENT_HEADER: Object.freeze({
       'X-LQS-Client': 'lavka-quality-shield'
@@ -45,9 +47,11 @@
       useDirectBrowserAiFallback: true,
       geminiAccountIndex: 'auto',
       preferredGeminiTabId: null,
+      geminiTabMode: 'stealth_window',
+      geminiIdleCloseMinutes: 5,
       autoRunAiOnProductPage: true,
       autoOpenDrawerOnAi: true,
-      autoWarmupGeminiTab: true,
+      autoWarmupGeminiTab: false,
       lavkaAccountLabel: 'Аккаунт #1 (Основной)',
       priceChartWindowMode: false,
       watchlistCheckIntervalHours: 6,
