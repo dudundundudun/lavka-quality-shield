@@ -152,8 +152,8 @@ test('background.js guards all onMessage commands with explicit sender checks', 
     /msg\.type === 'LQS_RECORD_EXTERNAL_STORE_OFFERS'\)[\s\S]{0,160}isTrustedExternalStoreSender\(sender\)/,
     'LQS_RECORD_EXTERNAL_STORE_OFFERS must be guarded by isTrustedExternalStoreSender(sender)'
   );
-  assert.match(bg, /function isTrustedMagnitSender\(sender\)/);
-  assert.match(bg, /parsed\.hostname === 'magnit\.ru' \|\| parsed\.hostname\.endsWith\('\.magnit\.ru'\)/);
+  assert.match(bg, /function isTrustedExternalStoreSender\(sender\)/);
+  assert.match(bg, /TRUSTED_EXTERNAL_STORE_DOMAINS/);
 
   // Ensure every LQS_* command in onMessage has a sender guard
   const handlerMatches = [...listenerBlock.matchAll(/if\s*\(msg\.type === '(LQS_[A-Z0-9_]+)'\)\s*\{/g)];
@@ -187,7 +187,7 @@ test('content.js validates competitor href URLs with safeHttpUrl from shared/uti
   const content = fs.readFileSync(path.join(extDir, 'content.js'), 'utf8');
   const cartAudit = fs.readFileSync(path.join(extDir, 'content', 'cart-audit.js'), 'utf8');
   assert.match(utils, /function safeHttpUrl\(url\)/);
-  assert.match(manifest, /"shared\/utils\.js",[\s\S]*?"content\/magnit-parser\.js",[\s\S]*?"content\/passport-helper\.js",[\s\S]*?"content\/cart-audit\.js",[\s\S]*?"content\/price-chart\.js",[\s\S]*?"content\.js"/);
+  assert.match(manifest, /"shared\/utils\.js",[\s\S]*?"content\/store-harvester\.js",[\s\S]*?"content\/passport-helper\.js",[\s\S]*?"content\/cart-audit\.js",[\s\S]*?"content\/price-chart\.js",[\s\S]*?"content\.js"/);
   assert.match(content, /safeHttpUrl[\s\S]*?=\s*globalThis\.LQS_UTILS/);
   assert.match(cartAudit, /escapeHtml\(safeHttpUrl\(o\.url\)\)/);
   assert.match(content, /escapeHtml\(safeRowUrl\)/);

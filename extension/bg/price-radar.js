@@ -1350,10 +1350,11 @@
   function waitForTabComplete(tabId, timeoutMs = 8000) {
     return new Promise((resolve) => {
       let settled = false;
+      let timer = null;
       const done = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (chrome.tabs?.onUpdated?.removeListener) {
           chrome.tabs.onUpdated.removeListener(onUpdated);
         }
@@ -1364,7 +1365,7 @@
           done();
         }
       };
-      const timer = setTimeout(done, timeoutMs);
+      timer = setTimeout(done, timeoutMs);
       if (chrome.tabs?.onUpdated?.addListener) {
         chrome.tabs.onUpdated.addListener(onUpdated);
       }
@@ -1447,6 +1448,8 @@
       const brand = String(payload.brand || '').trim();
       const amount = String(payload.amount || '').trim();
       const price = payload.price ? Number(payload.price) : null;
+      const oldPrice = payload.oldPrice ? Number(payload.oldPrice) : null;
+      const accountId = payload.accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
       const imageKey = payload.imageKey || null;
 
       const fullQuery = buildFullProductSearchQuery(title, brand, amount);
@@ -1485,7 +1488,7 @@
       }
 
       const summary = slug
-        ? await getProductPriceIntelligence(slug, title, price, amount, imageKey, true, brand)
+        ? await getProductPriceIntelligence(slug, title, price, oldPrice, amount, accountId, true, imageKey, brand)
         : null;
       const matchedCount = summary && Array.isArray(summary.competitorOffers)
         ? summary.competitorOffers.filter((o) => o && o.price > 0).length

@@ -58,10 +58,10 @@ test('detectKuperRetailer maps Kuper sub-retailers to canonical Russian store na
 test('extractPricePairFromText skips unit prices per kg and extracts main + old price', () => {
   const h = loadHarvesterModule();
   const pr = h.extractPricePairFromText('478 ₽/кг Филе индейки 500г 189 ₽ 239 ₽');
-  assert.deepEqual(pr, { price: 189, oldPrice: 239 });
+  assert.deepEqual(JSON.parse(JSON.stringify(pr)), { price: 189, oldPrice: 239 });
 
   const single = h.extractPricePairFromText('Молоко Простоквашино 930 мл 94,90 ₽');
-  assert.deepEqual(single, { price: 95, oldPrice: null });
+  assert.deepEqual(JSON.parse(JSON.stringify(single)), { price: 95, oldPrice: null });
 });
 
 test('scanStoresInBackgroundTabs opens background tab, harvests offers, and closes tab cleanly', async () => {
