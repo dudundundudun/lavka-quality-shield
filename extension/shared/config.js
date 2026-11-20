@@ -6,7 +6,7 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.9.1',
+    VERSION: '2.9.2',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
@@ -24,7 +24,9 @@
     }),
     LIMITS: Object.freeze({
       MAX_LOCAL_AI_CACHE_ITEMS: 500,
-      MAX_LOCAL_PRICE_DB_ITEMS: 1500
+      MAX_LOCAL_PRICE_DB_ITEMS: 1500,
+      AI_DIRECT_TIMEOUT_MS: 28000,
+      BACKEND_ANALYZE_TIMEOUT_MS: 35000
     }),
     CLIENT_HEADER: Object.freeze({
       'X-LQS-Client': 'lavka-quality-shield'
@@ -32,6 +34,7 @@
     TOKEN_HEADER_NAME: 'X-LQS-Token',
     DEFAULT_SETTINGS: Object.freeze({
       backendUrl: 'http://127.0.0.1:8765',
+      aiProvider: 'gemini_tab',
       aiBaseUrl: 'http://localhost:8083/v1',
       aiApiKey: '',
       aiModel: '',

@@ -204,6 +204,7 @@ test('Service Worker loads background.js with all importScripts and exports all 
     'LQS_ACCOUNTS_VAULT',
     'LQS_GEMINI_TAB',
     'LQS_PRICE_RADAR',
+    'LQS_AI_PROVIDERS',
   ];
   for (const name of expectedGlobals) {
     assert.ok(sandbox[name] && typeof sandbox[name] === 'object', `Expected globalThis.${name} to be exported`);

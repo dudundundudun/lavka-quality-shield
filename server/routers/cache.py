@@ -69,6 +69,7 @@ class AnalyzeRequest(BaseModel):
     proteinPer100g: Optional[float] = None
     pricePer100gProtein: Optional[int] = None
     pricingSummary: Optional[str] = None
+    aiProvider: str = "custom_openai"
     aiBaseUrl: str = "http://localhost:8083/v1"
     aiApiKey: str = ""
     aiModel: str = ""
@@ -350,23 +351,143 @@ def build_ai_prompt(req: AnalyzeRequest, web_snippets: List[dict], price_summary
     )
 
 
-async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_summary: Optional[Dict[str, Any]] = None) -> str:
+AI_PROVIDER_BASE_URLS = {
+    "moduleapi": "https://moduleapi.pro/v1",
+    "openai": "https://api.openai.com/v1",
+    "gemini_api": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "anthropic": "https://api.anthropic.com/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
+AI_PROVIDER_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "gemini_api": "gemini-2.5-flash",
+    "anthropic": "claude-3-5-sonnet-latest",
+    "deepseek": "deepseek-chat",
+}
+
+ANTHROPIC_API_VERSION = "2023-06-01"
+ANTHROPIC_MAX_TOKENS = 900
+
+
+def _resolve_provider_target(req: AnalyzeRequest) -> Tuple[str, str]:
+    provider = (req.aiProvider or "custom_openai").strip().lower()
+    raw_url = (req.aiBaseUrl or "").strip().rstrip("/")
+    if provider in AI_PROVIDER_BASE_URLS:
+        base_url = AI_PROVIDER_BASE_URLS[provider]
+    else:
+        base_url = raw_url or "http://localhost:8083/v1"
+        lower_u = base_url.lower()
+        if "api.anthropic.com" in lower_u:
+            provider = "anthropic"
+            base_url = re.sub(r"/messages$", "", base_url, flags=re.IGNORECASE)
+        elif "moduleapi.pro" in lower_u:
+            provider = "moduleapi"
+        elif "openrouter.ai" in lower_u:
+            provider = "openrouter"
+    return provider, base_url
+
+
+def _parse_moduleapi_cost(headers: Any) -> Optional[float]:
+    if not headers:
+        return None
+    raw = headers.get("x-moduleapi-cost")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        val = float(str(raw).strip().lstrip("$").replace(",", "."))
+        return val if val >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_provider_http_error(provider: str, status_code: int, detail: str = "") -> str:
+    clean_detail = re.sub(r"\s+", " ", str(detail or "")).strip()[:160]
+    suffix = f" ({clean_detail})" if clean_detail else ""
+    if status_code == 401:
+        return f"{provider}: неверный API-ключ (HTTP 401)."
+    if status_code == 402:
+        return f"{provider}: недостаточно средств на балансе (HTTP 402)."
+    if status_code == 403:
+        return f"{provider}: доступ запрещён (HTTP 403)."
+    if status_code == 404:
+        return f"{provider}: модель или адрес API не найдены (HTTP 404){suffix}."
+    if status_code == 429:
+        return f"{provider}: превышен лимит запросов (HTTP 429)."
+    if status_code in (502, 503, 504):
+        return f"{provider}: сервер провайдера временно недоступен (HTTP {status_code})."
+    return f"{provider}: ошибка API (HTTP {status_code}){suffix}"
+
+
+def _extract_anthropic_text(data: Dict[str, Any]) -> str:
+    blocks = data.get("content") if isinstance(data, dict) else None
+    if not isinstance(blocks, list):
+        return ""
+    parts: List[str] = []
+    for block in blocks:
+        if isinstance(block, str) and block.strip():
+            parts.append(block.strip())
+        elif isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"].strip():
+            parts.append(block["text"].strip())
+    return "\n".join(parts).strip()
+
+
+async def call_ai_model(
+    req: AnalyzeRequest,
+    web_snippets: List[dict],
+    price_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     prompt = build_ai_prompt(req, web_snippets, price_summary)
 
-    base_url = validate_ai_base_url(req.aiBaseUrl)
+    provider, target_url = _resolve_provider_target(req)
+    base_url = validate_ai_base_url(target_url)
     is_local = "localhost" in base_url or "127.0.0.1" in base_url
 
-    headers = {"Content-Type": "application/json"}
-    if req.aiApiKey:
-        headers["Authorization"] = f"Bearer {req.aiApiKey}"
-
     t0 = time.perf_counter()
-    timeout_cfg = httpx.Timeout(18.0, connect=1.5)
+    timeout_cfg = httpx.Timeout(30.0, connect=1.5 if is_local else 5.0)
     async with httpx.AsyncClient(timeout=timeout_cfg, trust_env=not is_local) as client:
-        model_id = (req.aiModel or "").strip()
+        model_id = (req.aiModel or "").strip() or AI_PROVIDER_DEFAULT_MODELS.get(provider, "")
+
+        if provider == "anthropic":
+            headers = {
+                "Content-Type": "application/json",
+                "anthropic-version": ANTHROPIC_API_VERSION,
+            }
+            if req.aiApiKey:
+                headers["x-api-key"] = req.aiApiKey
+            if not model_id:
+                model_id = AI_PROVIDER_DEFAULT_MODELS["anthropic"]
+            endpoint = base_url if base_url.lower().endswith("/messages") else f"{base_url}/messages"
+            payload = {
+                "model": model_id,
+                "max_tokens": ANTHROPIC_MAX_TOKENS,
+                "temperature": 0.2,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            resp = await client.post(endpoint, headers=headers, json=payload)
+            dt_ms = int((time.perf_counter() - t0) * 1000)
+            if resp.status_code >= 400:
+                raise RuntimeError(_format_provider_http_error(provider, resp.status_code, resp.text))
+            cost_usd = _parse_moduleapi_cost(resp.headers)
+            data = resp.json()
+            reply = _extract_anthropic_text(data)
+            if not reply:
+                raise ValueError("Anthropic API returned empty content.")
+            db.log_event("LLM_OK", f"Anthropic '{model_id}' @ {base_url} replied in {dt_ms}ms ({len(reply)} chars)")
+            return {"verdict": reply, "costUsd": cost_usd, "model": model_id, "provider": provider}
+
+        headers = {"Content-Type": "application/json"}
+        if req.aiApiKey:
+            headers["Authorization"] = f"Bearer {req.aiApiKey}"
+        if provider == "openrouter":
+            headers["HTTP-Referer"] = "https://lavka.yandex.ru"
+            headers["X-Title"] = "Lavka Quality Shield"
+
         if not model_id:
             m_resp = await client.get(f"{base_url}/models", headers=headers)
-            m_resp.raise_for_status()
+            if m_resp.status_code >= 400:
+                raise RuntimeError(_format_provider_http_error(provider, m_resp.status_code, m_resp.text))
             m_data = m_resp.json()
             models_arr = m_data.get("data", []) if isinstance(m_data, dict) else (m_data if isinstance(m_data, list) else [])
             for m in models_arr:
@@ -384,11 +505,13 @@ async def call_ai_model(req: AnalyzeRequest, web_snippets: List[dict], price_sum
         }
         resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
         dt_ms = int((time.perf_counter() - t0) * 1000)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise RuntimeError(_format_provider_http_error(provider, resp.status_code, resp.text))
+        cost_usd = _parse_moduleapi_cost(resp.headers)
         data = resp.json()
         reply = data["choices"][0]["message"]["content"].strip()
-        db.log_event("LLM_OK", f"Model '{model_id}' @ {base_url} replied in {dt_ms}ms ({len(reply)} chars)")
-        return reply
+        db.log_event("LLM_OK", f"Model '{model_id}' ({provider}) @ {base_url} replied in {dt_ms}ms ({len(reply)} chars)")
+        return {"verdict": reply, "costUsd": cost_usd, "model": model_id, "provider": provider}
 
 
 def _lookup_cached_analysis_sync(cache_key: str, norm_title: str, title: str) -> Optional[Dict[str, Any]]:
@@ -481,7 +604,9 @@ def _save_ai_cache_sync(
 
 @router.post("/api/analyze-product", dependencies=[Depends(verify_trusted_extension_request)])
 async def analyze_product(req: AnalyzeRequest):
-    validate_ai_base_url(req.aiBaseUrl)
+    if (req.aiProvider or "").strip().lower() != "gemini_tab":
+        _, target_url = _resolve_provider_target(req)
+        validate_ai_base_url(target_url)
     cache_key = (req.slug or req.title).strip().lower()
     norm_title = normalize_title_for_match(req.title)
     await asyncio.to_thread(
@@ -507,20 +632,36 @@ async def analyze_product(req: AnalyzeRequest):
         _record_analysis_price_sync, cache_key, req, comp_min, comp_sum, comp_offers
     )
 
+    provider_name = (req.aiProvider or "custom_openai").strip().lower()
     ai_ok = True
-    try:
-        verdict = await call_ai_model(req, sources, price_summary)
-    except Exception as exc:
+    cost_usd: Optional[float] = None
+    used_model = (req.aiModel or "").strip()
+
+    if provider_name == "gemini_tab":
         ai_ok = False
-        await asyncio.to_thread(
-            db.log_event,
-            "LLM_ERR",
-            f"AI call failed ({req.aiModel} @ {req.aiBaseUrl}): {exc} -> handing off to Browser Gemini Tab",
-        )
-        verdict = (
-            f"⚠️ Ошибка вызова ИИ ({req.aiModel} @ {req.aiBaseUrl}): {exc}\n"
-            f"Переключаюсь на автопилот через открытую вкладку gemini.google.com..."
-        )
+        verdict = "⚠️ Выбран режим вкладки Gemini Web (Hydrogen) — передаю разбор в браузер."
+    else:
+        try:
+            ai_res = await call_ai_model(req, sources, price_summary)
+            if isinstance(ai_res, dict):
+                verdict = str(ai_res.get("verdict") or "").strip()
+                cost_usd = ai_res.get("costUsd")
+                used_model = str(ai_res.get("model") or used_model)
+            elif isinstance(ai_res, tuple):
+                verdict = str(ai_res[0] or "").strip()
+                cost_usd = ai_res[1] if len(ai_res) > 1 else None
+            else:
+                verdict = str(ai_res or "").strip()
+            if not verdict:
+                raise ValueError("AI model returned empty verdict.")
+        except Exception as exc:
+            ai_ok = False
+            await asyncio.to_thread(
+                db.log_event,
+                "LLM_ERR",
+                f"AI call failed ({provider_name}/{req.aiModel} @ {req.aiBaseUrl}): {exc}",
+            )
+            verdict = f"⚠️ Ошибка вызова ИИ ({provider_name}): {exc}"
 
     if ai_ok:
         await asyncio.to_thread(_save_ai_cache_sync, cache_key, req.title, norm_title, verdict, sources)
@@ -531,4 +672,7 @@ async def analyze_product(req: AnalyzeRequest):
         "verdict": verdict,
         "sources": sources,
         "priceSummary": price_summary,
+        "costUsd": cost_usd,
+        "aiProvider": provider_name,
+        "aiModel": used_model,
     }

@@ -24,6 +24,7 @@ importScripts('shared/config.js', 'shared/price-parser.js', 'shared/utils.js', '
 importScripts('bg/accounts-vault.js');
 importScripts('bg/gemini-tab.js');
 importScripts('bg/price-radar.js');
+importScripts('bg/ai-providers.js');
 
 const {
   fetchWithTimeout,
@@ -88,6 +89,15 @@ const {
   auditCartCompetitorsAndAccounts,
   scanStoresInBackgroundTabs
 } = globalThis.LQS_PRICE_RADAR;
+
+const {
+  AI_DIRECT_TIMEOUT_MS,
+  resolveProviderConfig,
+  formatCostUsd,
+  fetchProviderModelsList,
+  testProviderConnection,
+  callAiProvider
+} = globalThis.LQS_AI_PROVIDERS;
 
 const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER, TOKEN_HEADER_NAME = 'X-LQS-Token' } = globalThis.LQS_CONFIG;
 const AI_CACHE_KEY = STORAGE_KEYS.AI_CACHE;
@@ -221,21 +231,11 @@ async function getBackendAuthHeaders(backendUrl, extraHeaders = {}) {
   return headers;
 }
 
-async function fetchAiModelsList(aiBaseUrl, aiApiKey = '') {
+async function fetchAiModelsList(aiBaseUrl, aiApiKey = '', aiProvider = '') {
   const cleanUrl = String(aiBaseUrl || '').trim().replace(/\/$/, '');
-  if (!cleanUrl) return [];
-  const headers = {};
-  if (aiApiKey) headers.Authorization = `Bearer ${aiApiKey}`;
-  const resp = await fetchWithTimeout(`${cleanUrl}/models`, { method: 'GET', headers }, 2500);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const data = await resp.json();
-  const rawList = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
-  const ids = [];
-  for (const item of rawList) {
-    const id = typeof item === 'string' ? item.trim() : String(item?.id || '').trim();
-    if (id && !ids.includes(id)) ids.push(id);
-  }
-  return ids;
+  if (!cleanUrl && !aiProvider) return [];
+  const provider = aiProvider || (cleanUrl ? 'custom_openai' : 'gemini_tab');
+  return await fetchProviderModelsList({ aiProvider: provider, aiBaseUrl: cleanUrl, aiApiKey });
 }
 
 function normalizeCacheKey(slug, title) {
@@ -1429,7 +1429,8 @@ async function checkAllConnections() {
   const trackedPricesCount = Object.keys(priceDb).length;
 
   const backendUrl = settings.backendUrl.replace(/\/$/, '');
-  const aiBaseUrl = settings.aiBaseUrl.replace(/\/$/, '');
+  const providerCfg = resolveProviderConfig(settings);
+  const aiBaseUrl = (providerCfg.protocol === 'gemini_tab' ? settings.aiBaseUrl : providerCfg.baseUrl || settings.aiBaseUrl).replace(/\/$/, '');
 
   let backendStatus = { ok: false, cachedItems: 0, trackedPrices: trackedPricesCount, msg: 'Выкл (локальная БД)' };
   try {
@@ -1450,26 +1451,42 @@ async function checkAllConnections() {
     backendOfflineUntilTs = Date.now() + 10000;
   }
 
-  let bridgeStatus = { ok: false, msg: 'Выкл (работает вкладка)' };
-  try {
-    const headers = settings.aiApiKey ? { Authorization: `Bearer ${settings.aiApiKey}` } : {};
-    const r2 = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 1000);
-    if (r2.ok) {
-      bridgeOfflineUntilTs = 0;
-      let activeModelLabel = settings.aiModel || 'авто';
-          try {
-            const mJson = await r2.json();
-            const firstId = Array.isArray(mJson?.data) && mJson.data[0]?.id ? mJson.data[0].id : '';
-            if (!settings.aiModel && firstId) activeModelLabel = firstId;
-          } catch {
-            // ignore
-          }
-          bridgeStatus = { ok: true, msg: `ОК (${activeModelLabel})` };
-    } else {
-      bridgeStatus = { ok: false, msg: `HTTP ${r2.status} (проверь ключ)` };
+  let bridgeStatus = { ok: false, msg: providerCfg.protocol === 'gemini_tab' ? 'Выкл (работает вкладка)' : `${providerCfg.label}: не проверен` };
+  if (providerCfg.protocol === 'gemini_tab') {
+    try {
+      const headers = settings.aiApiKey ? { Authorization: `Bearer ${settings.aiApiKey}` } : {};
+      const r2 = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 1000);
+      if (r2.ok) {
+        bridgeOfflineUntilTs = 0;
+        let activeModelLabel = settings.aiModel || 'авто';
+        try {
+          const mJson = await r2.json();
+          const firstId = Array.isArray(mJson?.data) && mJson.data[0]?.id ? mJson.data[0].id : '';
+          if (!settings.aiModel && firstId) activeModelLabel = firstId;
+        } catch {
+          // ignore
+        }
+        bridgeStatus = { ok: true, msg: `ОК (${activeModelLabel})` };
+      } else {
+        bridgeStatus = { ok: false, msg: `HTTP ${r2.status} (проверь ключ)` };
+      }
+    } catch {
+      bridgeOfflineUntilTs = Date.now() + 12000;
     }
-  } catch {
-    bridgeOfflineUntilTs = Date.now() + 12000;
+  } else {
+    const connTest = await testProviderConnection({
+      aiProvider: providerCfg.providerId,
+      aiBaseUrl: providerCfg.baseUrl,
+      aiApiKey: settings.aiApiKey,
+      timeoutMs: 3500
+    });
+    if (connTest.ok) {
+      bridgeOfflineUntilTs = 0;
+      const activeModelLabel = settings.aiModel || connTest.models[0] || providerCfg.model || 'авто';
+      bridgeStatus = { ok: true, msg: `ОК (${providerCfg.label}: ${activeModelLabel})` };
+    } else {
+      bridgeStatus = { ok: false, msg: connTest.error || `Ошибка подключения (${providerCfg.label})` };
+    }
   }
 
   const matchedTabInfo = selectedTab
@@ -1531,7 +1548,10 @@ async function orchestrateProductAnalysisInternal(payload) {
   try {
     const settings = await getSettings();
     const backendUrl = settings.backendUrl.replace(/\/$/, '');
-    const aiBaseUrl = settings.aiBaseUrl.replace(/\/$/, '');
+    const providerCfg = resolveProviderConfig(settings);
+    const aiBaseUrl = (providerCfg.baseUrl || settings.aiBaseUrl || '').replace(/\/$/, '');
+    const backendAnalyzeTimeoutMs = LIMITS.BACKEND_ANALYZE_TIMEOUT_MS || 35000;
+    const directAiTimeoutMs = LIMITS.AI_DIRECT_TIMEOUT_MS || AI_DIRECT_TIMEOUT_MS || 28000;
     const acc = payload.accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
 
     let priceIntel = await getProductPriceIntelligence(
@@ -1585,12 +1605,13 @@ async function orchestrateProductAnalysisInternal(payload) {
                 ...payload,
                 title: authoritativeTitle,
                 accountId: acc,
-                aiBaseUrl: settings.aiBaseUrl,
+                aiProvider: providerCfg.providerId,
+                aiBaseUrl: providerCfg.baseUrl || settings.aiBaseUrl,
                 aiApiKey: settings.aiApiKey,
-                aiModel: settings.aiModel
+                aiModel: settings.aiModel || providerCfg.model
               })
             },
-            9500
+            backendAnalyzeTimeoutMs
           );
 
           if (resp.ok) {
@@ -1602,7 +1623,12 @@ async function orchestrateProductAnalysisInternal(payload) {
               priceIntel = { ...(priceIntel || {}), ...data.priceSummary };
             }
             if (data.verdict && data.aiOk !== false && !data.verdict.startsWith('⚠️')) {
-              const modeLabel = data.cached ? 'FastAPI SQLite Cache (:8765)' : `FastAPI (:8765) + ${settings.aiModel}`;
+              const costUsd = typeof data.costUsd === 'number' ? data.costUsd : null;
+              const costSuffix = costUsd !== null ? ` · ${formatCostUsd(costUsd)}` : '';
+              const modelTag = data.aiModel || settings.aiModel || providerCfg.model || providerCfg.label;
+              const modeLabel = data.cached
+                ? 'FastAPI SQLite Cache (:8765)'
+                : `FastAPI (:8765) + ${modelTag}${costSuffix}`;
               await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, data.verdict, webSources, modeLabel, payload.imageKey);
               const resObj = {
                 ok: true,
@@ -1610,7 +1636,8 @@ async function orchestrateProductAnalysisInternal(payload) {
                 mode: modeLabel,
                 verdict: data.verdict,
                 sources: webSources,
-                priceSummary: priceIntel
+                priceSummary: priceIntel,
+                costUsd
               };
               broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
               return resObj;
@@ -1649,59 +1676,52 @@ async function orchestrateProductAnalysisInternal(payload) {
       }
     }
 
-    if (aiBaseUrl && Date.now() > bridgeOfflineUntilTs) {
+    if (providerCfg.protocol !== 'gemini_tab' && aiBaseUrl && (providerCfg.isPaid || Date.now() > bridgeOfflineUntilTs)) {
       try {
         const promptForBridge = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, false, priceIntel);
-        const headers = { 'Content-Type': 'application/json' };
-        if (settings.aiApiKey) {
-          headers.Authorization = `Bearer ${settings.aiApiKey}`;
-        }
-        let resolvedModel = (settings.aiModel || '').trim();
-        if (!resolvedModel) {
-          const availableModels = await fetchAiModelsList(aiBaseUrl, settings.aiApiKey).catch(() => []);
-          resolvedModel = availableModels[0] || '';
-        }
-        if (!resolvedModel) {
-          throw new Error('No AI model configured or returned by /models');
-        }
-        const directResp = await fetchWithTimeout(
-          `${aiBaseUrl}/chat/completions`,
+        const aiResult = await callAiProvider(
           {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model: resolvedModel,
-              messages: [{ role: 'user', content: promptForBridge }],
-              temperature: 0.2
-            })
+            aiProvider: providerCfg.providerId,
+            aiBaseUrl: providerCfg.baseUrl,
+            aiApiKey: settings.aiApiKey,
+            aiModel: settings.aiModel,
+            timeoutMs: directAiTimeoutMs
           },
-          6000
+          promptForBridge
         );
-
-        if (directResp.ok) {
+        if (aiResult && aiResult.ok && aiResult.text) {
           bridgeOfflineUntilTs = 0;
-          const json = await directResp.json();
-          const reply = json.choices?.[0]?.message?.content;
-          if (reply) {
-            const cleanReply = reply.trim();
-            const modeLabel = `Мост ${resolvedModel} (${aiBaseUrl})`;
-            await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, cleanReply, webSources, modeLabel, payload.imageKey);
-            if (backendOnline) {
-              saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, cleanReply, webSources);
-            }
-            const resObj = {
-              ok: true,
-              cached: false,
-              mode: modeLabel,
-              verdict: cleanReply,
-              sources: webSources,
-              priceSummary: priceIntel
-            };
-            broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
-            return resObj;
+          const cleanReply = aiResult.text.trim();
+          const costUsd = typeof aiResult.costUsd === 'number' ? aiResult.costUsd : null;
+          const costSuffix = costUsd !== null ? ` · ${formatCostUsd(costUsd)}` : '';
+          const modeLabel = `${aiResult.providerLabel} · ${aiResult.model}${costSuffix}`;
+          await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, cleanReply, webSources, modeLabel, payload.imageKey);
+          if (backendOnline) {
+            saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, cleanReply, webSources);
           }
+          const resObj = {
+            ok: true,
+            cached: false,
+            mode: modeLabel,
+            verdict: cleanReply,
+            sources: webSources,
+            priceSummary: priceIntel,
+            costUsd,
+            usage: aiResult.usage || null
+          };
+          broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
+          return resObj;
         }
-      } catch {
+      } catch (err) {
+        if (providerCfg.isPaid) {
+          return {
+            ok: false,
+            mode: providerCfg.label,
+            error: err && err.message ? err.message : String(err),
+            sources: webSources,
+            priceSummary: priceIntel
+          };
+        }
         bridgeOfflineUntilTs = Date.now() + 15000;
       }
     }
@@ -1800,7 +1820,7 @@ async function orchestrateProductAnalysis(payload) {
   }
   if (key && !payload.forceRefresh && !payload.isManualUserClick && inFlightRequests.has(key)) {
     const existingEntry = inFlightRequests.get(key);
-    if (existingEntry && Date.now() - existingEntry.startedAt < 12000) {
+    if (existingEntry && Date.now() - existingEntry.startedAt < 35000) {
       return existingEntry.promise;
     }
     inFlightRequests.delete(key);
@@ -2110,8 +2130,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, models: [], error: 'Forbidden' });
       return true;
     }
-    fetchAiModelsList(msg.aiBaseUrl, msg.aiApiKey)
+    fetchAiModelsList(msg.aiBaseUrl, msg.aiApiKey, msg.aiProvider || '')
       .then((models) => sendResponse({ ok: true, models }))
+      .catch((err) => sendResponse({ ok: false, models: [], error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_TEST_AI_PROVIDER') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, models: [], error: 'Forbidden' });
+      return true;
+    }
+    testProviderConnection({
+      aiProvider: msg.aiProvider || '',
+      aiBaseUrl: msg.aiBaseUrl || '',
+      aiApiKey: msg.aiApiKey || ''
+    })
+      .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, models: [], error: err.message || String(err) }));
     return true;
   }
