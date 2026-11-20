@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lavka Quality Shield — Радар 16 Магазинов (Лавка + Магнит + Сети), Сейф Аккаунтов и Zero-Click ИИ",
-  "version": "2.7.0",
-  "description": "Сравнение цен товара и корзины по 16 торговым сетям (Пятёрочка, Магнит, Перекрёсток, ВкусВилл, Ашан, МЕТРО, Глобус, Лента, Магнолия, Дикси, Чижик, Ozon, Купер), нативный парсер Магнита, менеджер аккаунтов и Zero-Click ИИ.",
+  "name": "Lavka Quality Shield — Радар 16 Магазинов, График Цен, Сейф Аккаунтов и Zero-Click ИИ",
+  "version": "2.8.0",
+  "description": "История и график цен товаров (как в Alitools), фоновое отслеживание скидок, сравнение цен по 16 торговым сетям, менеджер аккаунтов и Zero-Click ИИ.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -13,7 +13,8 @@
     "storage",
     "tabs",
     "cookies",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
     "https://lavka.yandex.ru/*",
@@ -38,7 +39,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.7.0 — 16-Store Price Radar, Magnit Parser, Account Vault & Zero-Click AI",
+    "default_title": "Lavka Quality Shield v2.8.0 — Price History Chart, Watchlist, 16-Store Radar, Account Vault & Zero-Click AI",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -62,6 +63,10 @@
         "shared/config.js",
         "shared/price-parser.js",
         "shared/utils.js",
+        "content/magnit-parser.js",
+        "content/passport-helper.js",
+        "content/cart-audit.js",
+        "content/price-chart.js",
         "content.js"
       ],
       "run_at": "document_idle"

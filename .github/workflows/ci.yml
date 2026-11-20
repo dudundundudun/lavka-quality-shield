@@ -33,7 +33,16 @@ jobs:
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8')); JSON.parse(require('fs').readFileSync('extension/data/seed-magnit.json', 'utf8'));"
           node --check extension/shared/config.js
           node --check extension/shared/price-parser.js
+          node --check extension/shared/utils.js
+          node --check extension/shared/product-matcher.js
+          node --check extension/bg/accounts-vault.js
+          node --check extension/bg/gemini-tab.js
+          node --check extension/bg/price-radar.js
           node --check extension/background.js
+          node --check extension/content/magnit-parser.js
+          node --check extension/content/passport-helper.js
+          node --check extension/content/cart-audit.js
+          node --check extension/content/price-chart.js
           node --check extension/content.js
           node --check extension/popup.js
       - name: Run JS parser tests (node --test)

@@ -1,56 +1,61 @@
-# 🛡️ Lavka Quality Shield v2.7.0 — Радар 16 Магазинов, DPAPI-Сейф, Аудит Корзины и Zero-Click ИИ
+# 🛡️ Lavka Quality Shield v2.8.0 — График Истории Цен, Отслеживание, Радар 16 Магазинов и Zero-Click ИИ
 
-Гибридное расширение **Google Chrome (Manifest V3)** и локальный сервер **FastAPI + SQLite (`127.0.0.1:8765`)** для защиты покупателя на сайте **Яндекс Лавки (`https://lavka.yandex.ru/*`)** и сравнения цен по 16 торговым сетям.
+Гибридное расширение **Google Chrome (Manifest V3)** и локальный сервер **FastAPI + SQLite (`127.0.0.1:8765`)** для защиты покупателя на сайте **Яндекс Лавки (`https://lavka.yandex.ru/*`)**: история и график цен товаров, фоновое отслеживание скидок, сравнение цен по 16 торговым сетям, сейф аккаунтов и Zero-Click ИИ.
 
 ## 📁 Структура проекта
 
 ```text
 lavka-quality-shield/
-├── .github/workflows/ci.yml    # Автоматический прогон Python- и JS-тестов на push / PR
-├── extension/                  # Папка расширения Chrome (указывается в chrome://extensions)
+├── .github/workflows/ci.yml       # Автоматический прогон Python- и JS-тестов на push / PR
+├── extension/                     # Папка расширения Chrome (указывается в chrome://extensions)
 │   ├── manifest.json
-│   ├── shared/config.js        # Единый источник настроек, ключей storage и заголовков
-│   ├── shared/price-parser.js  # Чистый парсер ₽/кг, ₽/л, ₽/шт и стоимости белка
-│   ├── shared/utils.js         # Общие утилиты (escapeHtml, safeHttpUrl, fetchWithTimeout, настройки, поиск)
-│   ├── data/seed-magnit.json   # Внешние seed-данные Магнита (fallback)
-│   ├── tests/                  # Юнит-тесты парсера, общих утилит и security-guards (node --test)
-│   ├── background.js           # Service Worker (keep-alive, оркестрация анализа, клонирование корзины, onMessage)
-│   ├── bg/accounts-vault.js    # Сейф аккаунтов, куки-сессии, 1-клик свитчер и автозаполнение
-│   ├── bg/gemini-tab.js        # Вкладка Gemini, куки Google, автопрогрев и очередь промптов
-│   ├── bg/price-radar.js       # Радар 16 сетей, история цен, парсер карточки Лавки и circuit breaker
-│   ├── content.js              # UI-панель, аудит корзины, нативный парсер Магнита
-│   ├── popup.html / popup.js   # Попап: история цен, клонирование корзины, статус 16 сетей
+│   ├── shared/config.js           # Единый источник настроек, ключей storage и заголовков
+│   ├── shared/price-parser.js     # Чистый парсер ₽/кг, ₽/л, ₽/шт и стоимости белка
+│   ├── shared/utils.js            # Общие утилиты (escapeHtml, safeHttpUrl, fetchWithTimeout, настройки, поиск)
+│   ├── shared/product-matcher.js  # Чистый модуль нормализации и матчинга товаров (сахар/вкус/объём)
+│   ├── data/seed-magnit.json      # Внешние seed-данные Магнита (fallback)
+│   ├── tests/                     # Юнит- и поведенческие тесты (price-parser, price-chart, utils, matcher, price-radar, security-guards)
+│   ├── background.js              # Service Worker (keep-alive, LQS_BG_DEPS, chrome.alarms watchlist, onMessage)
+│   ├── bg/accounts-vault.js       # Сейф аккаунтов, куки-сессии, 1-клик свитчер и автозаполнение
+│   ├── bg/gemini-tab.js           # Вкладка Gemini, куки Google, автопрогрев и очередь промптов
+│   ├── bg/price-radar.js          # Радар 16 сетей, полная история цен, Watchlist и фоновый чекер
+│   ├── content/magnit-parser.js   # Нативный сборщик цен на magnit.ru (с паузой при document.hidden)
+│   ├── content/passport-helper.js # Плашка быстрого входа и автозаполнения на passport.yandex.ru / id.yandex.ru
+│   ├── content/cart-audit.js      # Слепок корзины, фиксатор цен и баннер аудита корзины Лавки
+│   ├── content/price-chart.js     # Интерактивный SVG-график истории цены в стиле Alitools + кнопка «Следить»
+│   ├── content.js                 # Оркестрация карточки товара Лавки, панель ИИ-ревизора, спойлер и SPA
+│   ├── popup.html / popup.js      # Попап: история цен, отслеживаемые товары, клонирование корзины, настройки
 │   ├── styles.css
 │   └── icons/
-├── server/                     # Модульный локальный FastAPI-бэкенд и автотесты
-│   ├── server.py               # Точка входа FastAPI, динамический CORS и подключение роутеров
-│   ├── db.py                   # SQLite (WAL, busy_timeout=5000, индексы, PRAGMA user_version)
-│   ├── security.py             # secret.key (32B), пиннинг Origin, fail-closed DPAPI, SSRF-фильтр
-│   ├── matcher.py              # Exact Product & Modifier Matcher (сахар/вкус/объём)
-│   ├── routers/                # Модульные роутеры: health.py, accounts.py, prices.py, cache.py
+├── server/                        # Модульный локальный FastAPI-бэкенд и автотесты
+│   ├── server.py                  # Точка входа FastAPI, динамический CORS и подключение роутеров
+│   ├── db.py                      # SQLite (WAL, busy_timeout=5000, индексы, PRAGMA user_version=3, price_watchlist)
+│   ├── security.py                # secret.key (32B), пиннинг Origin, fail-closed DPAPI, SSRF-фильтр
+│   ├── matcher.py                 # Exact Product & Modifier Matcher (сахар/вкус/объём)
+│   ├── routers/                   # Модульные роутеры: health.py, accounts.py, prices.py, cache.py
 │   ├── requirements.txt
-│   ├── start_server.bat        # Запуск сервера в изолированном .venv
+│   ├── start_server.bat           # Запуск сервера в изолированном .venv
 │   ├── enable_windows_autostart.bat
 │   ├── disable_windows_autostart.bat
-│   ├── run_tests.bat           # Запуск автотестов бэкенда в 1 клик
-│   └── tests/                  # Тесты безопасности, БД/конфигов, матчера и API CRUD
+│   ├── run_tests.bat              # Запуск автотестов бэкенда в 1 клик
+│   └── tests/                     # Тесты безопасности, БД/конфигов, матчера и API CRUD
 ├── .gitignore
-├── LICENSE                     # MIT
+├── LICENSE                        # MIT
 └── README.md
 ```
 
-## 🔥 Что нового в v2.7.0
+## 🔥 Что нового в v2.8.0
 
-* **Безопасность сейфа и API**: автогенерация 32-байтного `secret.key`, обязательный `X-LQS-Token` и пиннинг `Origin` расширения при первом подключении (`/api/auth/pair`), fail-closed DPAPI без отката в plaintext, защита всех API-маршрутов и SSRF-валидация `aiBaseUrl`, полная очистка паролей и куки из `chrome.storage.local`.
-* **Усиленный SQLite и конфиги**: `WAL`, `busy_timeout=5000`, 6 индексов (включая `norm_title`), версионирование схемы через `PRAGMA user_version`, единая версия `2.7.0` и динамическая подгрузка моделей ИИ из `${aiBaseUrl}/models`.
-* **Стабильный Service Worker и радар**: ref-counted `startSwKeepAlive()`, внешний `extension/data/seed-magnit.json`, персистентный circuit breaker (пауза 15 мин после 3 ошибок или капчи) и компактный статус 16 сетей в настройках попапа.
-* **Модульный бэкенд, чистые JS-парсеры и CI**: разделение `server.py` на `db.py` и `routers/`, модульная декомпозиция `background.js` (`bg/accounts-vault.js`, `bg/gemini-tab.js`, `bg/price-radar.js`), чистый модуль `shared/price-parser.js` с тестами `node --test`, интеграционные тесты `test_api_crud.py` и GitHub Actions CI.
+* **Интерактивный график «История цены» (как в Alitools)**: чистый SVG-график без сторонних библиотек прямо в карточке товара Лавки — выбор периода (`7 дней` / `1 мес` / `3 мес` / `всё время`), переключатель **«Точная» / «Средняя»** (сглаживание по дням), отметки минимума, максимума и текущей цены справа, подсказка при наведении на точку (дата, цена, аккаунт) и полная выдача истории из `price_observations` (`GET /api/price/history/{slug}`).
+* **Два режима отображения графика**: по умолчанию график встроен прямо в панель радара карточки товара, а в настройках можно включить **отдельное всплывающее окно** (плавающая кнопка «📈 цена» + нативное окно на базе Popover API с закрытием по `Esc` или клику вне окна).
+* **«❤️ Следить за товаром» (Watchlist) и фоновый чекер**: кнопка отслеживания в графике, таблица `price_watchlist` в SQLite (схема v3), маршруты `GET/POST/DELETE /api/watchlist`, фильтр **«❤️ Отслеживаемые»** и кнопка ручной проверки в попапе, а также тихая фоновая проверка цен через `chrome.alarms` (каждые 6 / 12 / 24 ч или выкл) под твоей реальной сессией.
+* **Полное удаление маркетинговой цены «Гость (без куки)»**: убраны лишние запросы `credentials: 'omit'`, гостевая строка из матрицы сравнения, бейджи переплаты, промпты ИИ, аудит корзины, попап и настройка `enableGuestPriceProbe`; миграция БД v3 автоматически очищает старые гостевые записи.
 
 ## 🚀 Быстрый старт (Windows 11 + Google Chrome)
 
-1. Распакуй архив в постоянную папку.
-2. Открой `chrome://extensions`, включи **Режим разработчика (Developer mode)**, нажми **Загрузить распакованное расширение (Load unpacked)** и выбери папку **`extension/`**.
-3. Запусти локальный сервер через **`server\start_server.bat`** (или настрой тихий автозапуск через **`server\enable_windows_autostart.bat`**).
+1. Распакуй архив в постоянную папку (замени файлы поверх старой папки, если обновляешься).
+2. Открой `chrome://extensions`, включи **Режим разработчика (Developer mode)**, нажми **Загрузить распакованное расширение (Load unpacked)** и выбери папку **`extension/`** (при обновлении просто нажми значок обновления 🔄 на карточке расширения).
+3. Перезапусти локальный сервер через **`server\start_server.bat`** (или настрой тихий автозапуск через **`server\enable_windows_autostart.bat`**).
 4. Запуск тестов локально:
    * Python: **`server\run_tests.bat`** или `python -m unittest discover -s server/tests -v`
    * JS: `node --test extension/tests/*.test.js`

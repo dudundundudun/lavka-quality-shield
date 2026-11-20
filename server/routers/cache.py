@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Depends
+from collections import deque
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import db
@@ -28,6 +29,27 @@ from security import validate_ai_base_url, verify_trusted_extension_request
 
 router = APIRouter()
 
+ANALYZE_RATE_LIMIT_MAX_REQUESTS = 12
+ANALYZE_RATE_LIMIT_WINDOW_SEC = 60.0
+_analyze_uncached_timestamps: "deque[float]" = deque()
+
+
+def reset_analyze_rate_limiter() -> None:
+    _analyze_uncached_timestamps.clear()
+
+
+def _check_and_record_analyze_rate_limit(now: Optional[float] = None) -> None:
+    ts = time.monotonic() if now is None else now
+    cutoff = ts - ANALYZE_RATE_LIMIT_WINDOW_SEC
+    while _analyze_uncached_timestamps and _analyze_uncached_timestamps[0] <= cutoff:
+        _analyze_uncached_timestamps.popleft()
+    if len(_analyze_uncached_timestamps) >= ANALYZE_RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {ANALYZE_RATE_LIMIT_MAX_REQUESTS} uncached AI analyses per minute.",
+        )
+    _analyze_uncached_timestamps.append(ts)
+
 
 class AnalyzeRequest(BaseModel):
     slug: Optional[str] = None
@@ -37,7 +59,6 @@ class AnalyzeRequest(BaseModel):
     price: Optional[float] = None
     oldPrice: Optional[float] = None
     accountId: Optional[str] = "Аккаунт #1"
-    guestPrice: Optional[float] = None
     ingredients: Optional[str] = None
     traits: Optional[str] = None
     pricePerKg: Optional[int] = None
@@ -248,9 +269,6 @@ def build_pricing_context(req: AnalyzeRequest, price_summary: Optional[Dict[str,
 
     extra_intel = []
     if price_summary:
-        if price_summary.get("guestPrice") and req.price and price_summary["guestPrice"] < req.price:
-            diff = round(req.price - price_summary["guestPrice"])
-            extra_intel.append(f"ВНИМАНИЕ: без куки (для гостя) цена ниже на {diff} ₽ ({price_summary['guestPrice']} ₽)!")
         if price_summary.get("minPrice") and req.price and price_summary["minPrice"] < req.price:
             extra_intel.append(f"исторический минимум в твоей базе: {price_summary['minPrice']} ₽")
         if price_summary.get("competitorSummary"):
@@ -396,7 +414,6 @@ def _lookup_cached_analysis_sync(cache_key: str, norm_title: str, title: str) ->
                     "maxPrice": s_row[4],
                     "avgPrice": s_row[5],
                     "lastPrice": s_row[6],
-                    "guestPrice": s_row[7],
                     "competitorMinPrice": s_row[8],
                     "competitorSummary": s_row[9],
                     "competitorOffers": json.loads(s_row[10] or "[]"),
@@ -433,7 +450,6 @@ def _record_analysis_price_sync(
             price=req.price,
             old_price=req.oldPrice,
             amount=req.amount or "",
-            guest_price=req.guestPrice,
             competitor_min=comp_min,
             competitor_summary=comp_sum,
             competitor_offers=comp_offers,
@@ -479,6 +495,8 @@ async def analyze_product(req: AnalyzeRequest):
         cached_resp = await asyncio.to_thread(_lookup_cached_analysis_sync, cache_key, norm_title, req.title)
         if cached_resp:
             return cached_resp
+
+    _check_and_record_analyze_rate_limit()
 
     sources = await search_web_reviews(req.title, req.brand, req.amount)
     comp_min, comp_sum, comp_offers = extract_competitor_prices_from_sources(

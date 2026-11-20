@@ -47,6 +47,7 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
             "idx_ai_cache_updated_at",
             "idx_price_summary_norm_title",
             "idx_price_summary_updated_at",
+            "idx_price_watchlist_updated",
         }
         with server.get_db_connection() as conn:
             existing = {
@@ -109,12 +110,12 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
         r = self.client.get("/api/health")
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(data.get("version"), "2.7.0")
+        self.assertEqual(data.get("version"), "2.8.0")
         self.assertEqual(data.get("schemaVersion"), server.SCHEMA_VERSION)
         self.assertEqual(str(data.get("journalMode", "")).lower(), "wal")
 
     def test_version_synchronized_across_project_files(self):
-        expected = "2.7.0"
+        expected = "2.8.0"
         manifest = json.loads((Path(REPO_ROOT) / "extension" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], expected)
         self.assertIn(f"v{expected}", manifest["action"]["default_title"])
@@ -122,7 +123,10 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
         config_js = (Path(REPO_ROOT) / "extension" / "shared" / "config.js").read_text(encoding="utf-8")
         self.assertIn(f"VERSION: '{expected}'", config_js)
 
-        readme = (Path(REPO_ROOT) / "README.md").read_text(encoding="utf-8")
+        readme_path = Path(REPO_ROOT) / "README.md"
+        if not readme_path.exists():
+            readme_path = Path(REPO_ROOT) / "readme.md"
+        readme = readme_path.read_text(encoding="utf-8")
         self.assertIn(f"v{expected}", readme)
 
         self.assertEqual(server.APP_VERSION, expected)

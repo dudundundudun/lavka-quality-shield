@@ -5,14 +5,14 @@ Lavka Quality Shield — SQLite Database, Schema Migrations & Logging Module
 import json
 import sqlite3
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from matcher import normalize_title_for_match
 from security import DEFAULT_DB_PATH, migrate_legacy_db_if_needed
 
-APP_VERSION = "2.7.0"
-SCHEMA_VERSION = 2
+APP_VERSION = "2.8.0"
+SCHEMA_VERSION = 3
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
 
@@ -101,6 +101,22 @@ def init_db(db_path: Optional[str] = None) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS price_watchlist (
+                slug TEXT PRIMARY KEY,
+                title TEXT,
+                norm_title TEXT,
+                amount TEXT,
+                target_price REAL,
+                last_price REAL,
+                baseline_price REAL,
+                last_checked_at TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS saved_carts (
                 cart_id TEXT PRIMARY KEY,
                 account_id TEXT,
@@ -148,8 +164,26 @@ def init_db(db_path: Optional[str] = None) -> None:
                     conn.execute(f"UPDATE {table} SET norm_title = ? WHERE slug = ?", (nt, slug_val))
 
             conn.execute("PRAGMA user_version = 2")
+            current_version = 2
 
-        # Indexes for fast cache & price lookups
+        if current_version < 3:
+            # v2.8.0: очищаем устаревшие маркетинговые цены «Гость (без куки)» из сводок
+            conn.execute("UPDATE product_price_summary SET guest_price = NULL WHERE guest_price IS NOT NULL")
+            summary_rows = conn.execute("SELECT slug, accounts_json FROM product_price_summary").fetchall()
+            for slug_val, acc_raw in summary_rows:
+                try:
+                    acc_map = json.loads(acc_raw or "{}")
+                except Exception:
+                    continue
+                if isinstance(acc_map, dict) and "Гость (без куки)" in acc_map:
+                    acc_map.pop("Гость (без куки)", None)
+                    conn.execute(
+                        "UPDATE product_price_summary SET accounts_json = ? WHERE slug = ?",
+                        (json.dumps(acc_map, ensure_ascii=False), slug_val),
+                    )
+            conn.execute("PRAGMA user_version = 3")
+
+        # Indexes for fast cache, price & watchlist lookups
         conn.execute("CREATE INDEX IF NOT EXISTS idx_price_obs_slug ON price_observations(slug)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_price_obs_slug_observed ON price_observations(slug, observed_at DESC)"
@@ -164,12 +198,13 @@ def init_db(db_path: Optional[str] = None) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_price_summary_updated_at ON product_price_summary(updated_at DESC)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_watchlist_updated ON price_watchlist(updated_at DESC)"
+        )
 
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
         conn.commit()
     log_event("INIT", f"SQLite v{APP_VERSION} (schema v{SCHEMA_VERSION}, WAL) initialized")
-
-
 
 
 def find_existing_summary_row_by_slug_or_title(
@@ -202,6 +237,36 @@ def find_existing_summary_row_by_slug_or_title(
     return None
 
 
+def find_watchlist_row_by_slug_or_title(
+    conn: sqlite3.Connection, clean_slug: str, title: Optional[str] = None
+) -> Optional[Tuple[Any, ...]]:
+    row = conn.execute(
+        """
+        SELECT slug, title, norm_title, amount, target_price, last_price, baseline_price,
+               last_checked_at, created_at, updated_at
+        FROM price_watchlist WHERE slug = ?
+        """,
+        (clean_slug,),
+    ).fetchone()
+    if row:
+        return row
+    norm_title = normalize_title_for_match(title)
+    if norm_title and len(norm_title) >= 5:
+        row = conn.execute(
+            """
+            SELECT slug, title, norm_title, amount, target_price, last_price, baseline_price,
+                   last_checked_at, created_at, updated_at
+            FROM price_watchlist
+            WHERE norm_title = ? OR LOWER(title) = ?
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (norm_title, norm_title),
+        ).fetchone()
+        if row:
+            return row
+    return None
+
+
 def upsert_price_observation_sync(
     conn: sqlite3.Connection,
     slug: str,
@@ -210,7 +275,6 @@ def upsert_price_observation_sync(
     price: float,
     old_price: Optional[float] = None,
     amount: Optional[str] = "",
-    guest_price: Optional[float] = None,
     competitor_min: Optional[float] = None,
     competitor_summary: Optional[str] = None,
     competitor_offers: Optional[List[Dict[str, Any]]] = None,
@@ -219,21 +283,21 @@ def upsert_price_observation_sync(
     now_iso = datetime.now(timezone.utc).isoformat()
     acc = (account_id or "Аккаунт #1").strip()
 
+    row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
+    canonical_slug = row[0] if row else clean_slug
+
     if price and price > 0:
         conn.execute(
             """
             INSERT INTO price_observations (slug, title, account_id, price, old_price, amount, observed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (clean_slug, title or clean_slug, acc, float(price), old_price, amount or "", now_iso),
+            (canonical_slug, title or canonical_slug, acc, float(price), old_price, amount or "", now_iso),
         )
 
-    row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
-
     if row:
-        cur_title = title or row[1] or clean_slug
+        cur_title = title or row[1] or canonical_slug
         cur_amount = amount or row[2] or ""
-        cur_guest = guest_price if (guest_price and guest_price > 0) else row[7]
         cur_comp_min = competitor_min if (competitor_min and competitor_min > 0) else row[8]
         cur_comp_sum = competitor_summary if competitor_summary else row[9]
         try:
@@ -250,39 +314,45 @@ def upsert_price_observation_sync(
         except Exception:
             history_list = []
     else:
-        cur_title = title or clean_slug
+        cur_title = title or canonical_slug
         cur_amount = amount or ""
-        cur_guest = guest_price if (guest_price and guest_price > 0) else None
         cur_comp_min = competitor_min if (competitor_min and competitor_min > 0) else None
         cur_comp_sum = competitor_summary or None
         cur_comp_offers = competitor_offers or []
         accounts_map = {}
         history_list = []
 
+    # Никогда не храним устаревшую маркетинговую цену «Гость (без куки)»
+    accounts_map.pop("Гость (без куки)", None)
+
     if price and price > 0:
+        rounded_price = round(float(price), 2)
+        rounded_old = round(float(old_price), 2) if old_price else None
         accounts_map[acc] = {
-            "price": round(float(price), 2),
-            "oldPrice": round(float(old_price), 2) if old_price else None,
+            "price": rounded_price,
+            "oldPrice": rounded_old,
             "updatedAt": now_iso,
         }
-        if not history_list or history_list[0].get("price") != round(float(price), 2) or history_list[0].get("accountId") != acc:
+        now_day = now_iso[:10]
+        last_entry = history_list[0] if history_list else None
+        last_day = str(last_entry.get("ts") or "")[:10] if last_entry else ""
+        should_append = (
+            not last_entry
+            or last_entry.get("price") != rounded_price
+            or last_entry.get("accountId") != acc
+            or last_day != now_day
+        )
+        if should_append:
             history_list.insert(
                 0,
                 {
-                    "price": round(float(price), 2),
-                    "oldPrice": round(float(old_price), 2) if old_price else None,
+                    "price": rounded_price,
+                    "oldPrice": rounded_old,
                     "accountId": acc,
                     "ts": now_iso,
                 },
             )
-            history_list = history_list[:20]
-
-    if cur_guest and cur_guest > 0:
-        accounts_map["Гость (без куки)"] = {
-            "price": round(float(cur_guest), 2),
-            "oldPrice": None,
-            "updatedAt": now_iso,
-        }
+            history_list = history_list[:120]
 
     all_prices = [float(h["price"]) for h in history_list if h.get("price") and float(h["price"]) > 0]
     if not all_prices:
@@ -309,7 +379,7 @@ def upsert_price_observation_sync(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            clean_slug,
+            canonical_slug,
             cur_title,
             normalize_title_for_match(cur_title),
             cur_amount,
@@ -317,7 +387,7 @@ def upsert_price_observation_sync(
             max_p,
             avg_p,
             last_p,
-            cur_guest,
+            None,
             cur_comp_min,
             cur_comp_sum,
             json.dumps(cur_comp_offers, ensure_ascii=False),
@@ -327,20 +397,284 @@ def upsert_price_observation_sync(
         ),
     )
 
+    # Если товар в списке отслеживания — синхронизируем его последнюю цену и время проверки
+    w_row = find_watchlist_row_by_slug_or_title(conn, canonical_slug, cur_title)
+    if w_row and price and price > 0:
+        conn.execute(
+            """
+            UPDATE price_watchlist
+            SET last_price = ?, last_checked_at = ?, updated_at = ?
+            WHERE slug = ?
+            """,
+            (round(float(price), 2), now_iso, now_iso, w_row[0]),
+        )
+
     return {
-        "slug": clean_slug,
+        "slug": canonical_slug,
         "title": cur_title,
         "amount": cur_amount,
         "minPrice": min_p,
         "maxPrice": max_p,
         "avgPrice": avg_p,
         "lastPrice": last_p,
-        "guestPrice": cur_guest,
         "competitorMinPrice": cur_comp_min,
         "competitorSummary": cur_comp_sum,
         "competitorOffers": cur_comp_offers,
         "accounts": accounts_map,
         "history": history_list,
+        "isWatched": bool(w_row),
+        "targetPrice": w_row[4] if w_row else None,
         "updatedAt": now_iso,
     }
 
+
+def get_price_history_series(
+    conn: sqlite3.Connection,
+    slug: str,
+    title: Optional[str] = None,
+    days: int = 90,
+    account_id: Optional[str] = None,
+    limit: int = 1000,
+) -> Dict[str, Any]:
+    clean_slug = slug.strip().lower()
+    summary_row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
+    canonical_slug = summary_row[0] if summary_row else clean_slug
+    resolved_title = (summary_row[1] if summary_row else None) or title or canonical_slug
+    resolved_amount = summary_row[2] if summary_row else ""
+
+    cutoff_iso: Optional[str] = None
+    if days and days > 0:
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    slugs_to_query = [canonical_slug]
+    if clean_slug != canonical_slug:
+        slugs_to_query.append(clean_slug)
+
+    placeholders = ",".join("?" for _ in slugs_to_query)
+    params: List[Any] = list(slugs_to_query)
+    where_clauses = [f"slug IN ({placeholders})", "price > 0"]
+    if cutoff_iso:
+        where_clauses.append("observed_at >= ?")
+        params.append(cutoff_iso)
+    if account_id:
+        where_clauses.append("account_id = ?")
+        params.append(account_id.strip())
+    params.append(limit)
+
+    obs_rows = conn.execute(
+        f"""
+        SELECT price, old_price, account_id, observed_at
+        FROM price_observations
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY observed_at ASC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+    # Fallback к history_json, если в legacy БД price_observations пуста
+    points: List[Dict[str, Any]] = []
+    if obs_rows:
+        for r in obs_rows:
+            acc_val = r[2] or "Аккаунт #1"
+            if acc_val == "Гость (без куки)":
+                continue
+            points.append(
+                {
+                    "price": round(float(r[0]), 2),
+                    "oldPrice": round(float(r[1]), 2) if r[1] else None,
+                    "accountId": acc_val,
+                    "ts": r[3],
+                }
+            )
+    elif summary_row:
+        try:
+            hist = json.loads(summary_row[12] or "[]")
+        except Exception:
+            hist = []
+        for h in reversed(hist):
+            if not isinstance(h, dict) or not h.get("price"):
+                continue
+            ts_val = str(h.get("ts") or "")
+            acc_val = str(h.get("accountId") or "Аккаунт #1")
+            if acc_val == "Гость (без куки)":
+                continue
+            if cutoff_iso and ts_val and ts_val < cutoff_iso:
+                continue
+            if account_id and acc_val != account_id.strip():
+                continue
+            points.append(
+                {
+                    "price": round(float(h["price"]), 2),
+                    "oldPrice": round(float(h["oldPrice"]), 2) if h.get("oldPrice") else None,
+                    "accountId": acc_val,
+                    "ts": ts_val,
+                }
+            )
+
+    # Агрегация «Средняя» по дням (YYYY-MM-DD)
+    daily_buckets: Dict[str, List[float]] = {}
+    accounts_seen: List[str] = []
+    for pt in points:
+        day_key = str(pt.get("ts") or "")[:10]
+        if day_key:
+            daily_buckets.setdefault(day_key, []).append(float(pt["price"]))
+        acc_val = pt.get("accountId")
+        if acc_val and acc_val not in accounts_seen:
+            accounts_seen.append(acc_val)
+
+    daily_avg: List[Dict[str, Any]] = []
+    for day_key in sorted(daily_buckets.keys()):
+        vals = daily_buckets[day_key]
+        daily_avg.append(
+            {
+                "date": day_key,
+                "ts": f"{day_key}T12:00:00+00:00",
+                "price": round(sum(vals) / len(vals), 2),
+                "minPrice": round(min(vals), 2),
+                "maxPrice": round(max(vals), 2),
+                "count": len(vals),
+            }
+        )
+
+    all_prices = [p["price"] for p in points if p.get("price") and p["price"] > 0]
+    if all_prices:
+        stats = {
+            "minPrice": round(min(all_prices), 2),
+            "maxPrice": round(max(all_prices), 2),
+            "avgPrice": round(sum(all_prices) / len(all_prices), 2),
+            "lastPrice": round(all_prices[-1], 2),
+            "count": len(all_prices),
+        }
+    else:
+        stats = {
+            "minPrice": summary_row[3] if summary_row else None,
+            "maxPrice": summary_row[4] if summary_row else None,
+            "avgPrice": summary_row[5] if summary_row else None,
+            "lastPrice": summary_row[6] if summary_row else None,
+            "count": 0,
+        }
+
+    w_row = find_watchlist_row_by_slug_or_title(conn, canonical_slug, resolved_title)
+
+    return {
+        "slug": canonical_slug,
+        "title": resolved_title,
+        "amount": resolved_amount,
+        "days": days,
+        "points": points,
+        "dailyAvg": daily_avg,
+        "stats": stats,
+        "accounts": accounts_seen,
+        "isWatched": bool(w_row),
+        "targetPrice": w_row[4] if w_row else None,
+    }
+
+
+def upsert_watchlist_item(
+    conn: sqlite3.Connection,
+    slug: str,
+    title: str = "",
+    amount: str = "",
+    current_price: Optional[float] = None,
+    target_price: Optional[float] = None,
+) -> Dict[str, Any]:
+    clean_slug = slug.strip().lower()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    summary_row = find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
+    canonical_slug = summary_row[0] if summary_row else clean_slug
+    existing = find_watchlist_row_by_slug_or_title(conn, canonical_slug, title)
+
+    final_title = title or (existing[1] if existing else None) or (summary_row[1] if summary_row else canonical_slug)
+    final_amount = amount or (existing[3] if existing else None) or (summary_row[2] if summary_row else "")
+    eff_price = (
+        round(float(current_price), 2)
+        if (current_price and current_price > 0)
+        else (existing[5] if existing and existing[5] else (summary_row[6] if summary_row else None))
+    )
+    baseline = existing[6] if (existing and existing[6]) else eff_price
+    eff_target = (
+        round(float(target_price), 2)
+        if (target_price is not None and target_price > 0)
+        else (existing[4] if existing else None)
+    )
+    created_at = existing[8] if existing else now_iso
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO price_watchlist (
+            slug, title, norm_title, amount, target_price, last_price, baseline_price,
+            last_checked_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            canonical_slug,
+            final_title,
+            normalize_title_for_match(final_title),
+            final_amount,
+            eff_target,
+            eff_price,
+            baseline,
+            now_iso if eff_price else (existing[7] if existing else None),
+            created_at,
+            now_iso,
+        ),
+    )
+
+    return {
+        "slug": canonical_slug,
+        "title": final_title,
+        "amount": final_amount,
+        "targetPrice": eff_target,
+        "lastPrice": eff_price,
+        "baselinePrice": baseline,
+        "lastCheckedAt": now_iso if eff_price else (existing[7] if existing else None),
+        "createdAt": created_at,
+        "updatedAt": now_iso,
+    }
+
+
+def delete_watchlist_item(conn: sqlite3.Connection, slug: str, title: Optional[str] = None) -> bool:
+    clean_slug = slug.strip().lower()
+    existing = find_watchlist_row_by_slug_or_title(conn, clean_slug, title)
+    target_slug = existing[0] if existing else clean_slug
+    cur = conn.execute("DELETE FROM price_watchlist WHERE slug = ?", (target_slug,))
+    return cur.rowcount > 0
+
+
+def list_watchlist_items(conn: sqlite3.Connection, limit: int = 200) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT w.slug, w.title, w.amount, w.target_price, w.last_price, w.baseline_price,
+               w.last_checked_at, w.created_at, w.updated_at,
+               s.min_price, s.max_price, s.avg_price, s.last_price
+        FROM price_watchlist w
+        LEFT JOIN product_price_summary s ON s.slug = w.slug
+        ORDER BY w.updated_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    items: List[Dict[str, Any]] = []
+    for r in rows:
+        last_p = r[12] if r[12] is not None else r[4]
+        baseline_p = r[5]
+        price_diff = round(last_p - baseline_p, 2) if (last_p is not None and baseline_p is not None) else 0.0
+        items.append(
+            {
+                "slug": r[0],
+                "title": r[1],
+                "amount": r[2],
+                "targetPrice": r[3],
+                "lastPrice": last_p,
+                "baselinePrice": baseline_p,
+                "priceDiff": price_diff,
+                "minPrice": r[9],
+                "maxPrice": r[10],
+                "avgPrice": r[11],
+                "lastCheckedAt": r[6],
+                "createdAt": r[7],
+                "updatedAt": r[8],
+            }
+        )
+    return items

@@ -5,6 +5,10 @@
 (function (root) {
   'use strict';
 
+  function getBgDeps() {
+    return root.LQS_BG_DEPS || {};
+  }
+
   const { STORAGE_KEYS } = root.LQS_CONFIG;
   const { fetchWithTimeout, getSettings, saveSettingsPatch } = root.LQS_UTILS;
 
@@ -60,25 +64,25 @@
 
   async function fetchBackendVaultAccounts(backendUrl) {
     const cleanUrl = (backendUrl || '').replace(/\/$/, '');
-    if (!cleanUrl || Date.now() < backendOfflineUntilTs) return null;
+    if (!cleanUrl || Date.now() < (getBgDeps().getBackendOfflineUntilTs?.() || 0)) return null;
     try {
-      const headers = await getBackendAuthHeaders(cleanUrl);
+      const headers = await getBgDeps().getBackendAuthHeaders(cleanUrl);
       const r = await fetchWithTimeout(`${cleanUrl}/api/accounts/list`, { method: 'GET', headers }, 1500);
       if (r.ok) {
         const j = await r.json();
         if (j && Array.isArray(j.accounts)) return j.accounts;
       }
     } catch {
-      backendOfflineUntilTs = Date.now() + 10000;
+      getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
     }
     return null;
   }
 
   async function fetchBackendAccountSecrets(backendUrl, accountId) {
     const cleanUrl = (backendUrl || '').replace(/\/$/, '');
-    if (!cleanUrl || !accountId || Date.now() < backendOfflineUntilTs) return null;
+    if (!cleanUrl || !accountId || Date.now() < (getBgDeps().getBackendOfflineUntilTs?.() || 0)) return null;
     try {
-      const headers = await getBackendAuthHeaders(cleanUrl);
+      const headers = await getBgDeps().getBackendAuthHeaders(cleanUrl);
       const r = await fetchWithTimeout(
         `${cleanUrl}/api/accounts/${encodeURIComponent(accountId)}/secrets`,
         { method: 'GET', headers },
@@ -96,7 +100,7 @@
         }
       }
     } catch {
-      backendOfflineUntilTs = Date.now() + 10000;
+      getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
     }
     return null;
   }
@@ -463,9 +467,9 @@
 
     const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
     let backendSaved = false;
-    if (backendUrl && Date.now() > backendOfflineUntilTs) {
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
       try {
-        const headers = await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' });
+        const headers = await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' });
         const r = await fetchWithTimeout(
           `${backendUrl}/api/accounts/save`,
           { method: 'POST', headers, body: JSON.stringify(backendPayload) },
@@ -473,7 +477,7 @@
         );
         backendSaved = r.ok;
       } catch {
-        backendOfflineUntilTs = Date.now() + 10000;
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
 
@@ -513,16 +517,16 @@
       await saveAccountsVaultMap(map);
     }
     const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
-    if (backendUrl && Date.now() > backendOfflineUntilTs) {
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
       try {
-        const headers = await getBackendAuthHeaders(backendUrl);
+        const headers = await getBgDeps().getBackendAuthHeaders(backendUrl);
         await fetchWithTimeout(
           `${backendUrl}/api/accounts/${encodeURIComponent(accountId)}`,
           { method: 'DELETE', headers },
           1500
         );
       } catch {
-        backendOfflineUntilTs = Date.now() + 10000;
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
     return await getAccountsVaultStatus();
@@ -559,7 +563,7 @@
         url: 'https://passport.yandex.ru/auth?retpath=https%3A%2F%2Flavka.yandex.ru%2F',
         active: true
       });
-      await waitForTabCompleteSafe(targetTab.id, 5500);
+      await getBgDeps().waitForTabCompleteSafe(targetTab.id, 5500);
     } else {
       await chrome.tabs.update(targetTab.id, { active: true });
     }
@@ -652,9 +656,9 @@
         );
         if (curEntry) {
           const nowIso = new Date().toISOString();
-          if (backendUrl && Date.now() > backendOfflineUntilTs) {
+          if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
             try {
-              const headers = await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' });
+              const headers = await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' });
               await fetchWithTimeout(
                 `${backendUrl}/api/accounts/save`,
                 {
@@ -675,7 +679,7 @@
                 2000
               );
             } catch {
-              backendOfflineUntilTs = Date.now() + 10000;
+              getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
             }
           }
           curEntry.cookieCount = currentLive.cookies.length;
@@ -738,7 +742,7 @@
     let autoBuildResult = null;
     if (buildCartAfterSwitch) {
       await new Promise((r) => setTimeout(r, 900));
-      autoBuildResult = await autoBuildCartInBrowser(null);
+      autoBuildResult = await getBgDeps().autoBuildCartInBrowser(null);
     }
 
     let autofillTriggered = false;

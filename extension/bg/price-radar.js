@@ -5,6 +5,16 @@
 (function (root) {
   'use strict';
 
+  function getBgDeps() {
+    return root.LQS_BG_DEPS || {};
+  }
+
+  const {
+    normalizeTitleKey,
+    isSearchResultMatchingProduct,
+    decodeHtmlEntities
+  } = root.LQS_MATCHER;
+
   const { STORAGE_KEYS, LIMITS } = root.LQS_CONFIG;
   const {
     fetchWithTimeout,
@@ -14,6 +24,7 @@
   } = root.LQS_UTILS;
 
   const PRICE_DB_KEY = STORAGE_KEYS.PRICE_DB;
+  const WATCHLIST_KEY = STORAGE_KEYS.WATCHLIST;
   const EXT_STORE_DB_KEY = STORAGE_KEYS.EXT_STORE_DB;
   const CIRCUIT_BREAKER_KEY = STORAGE_KEYS.CIRCUIT_BREAKER || 'lqs_circuit_breaker_v1';
   const MAX_LOCAL_PRICE_DB_ITEMS = LIMITS.MAX_LOCAL_PRICE_DB_ITEMS;
@@ -173,7 +184,7 @@
 
     return {
       ok: true,
-      activeKeepAliveTasks: swKeepAliveActiveTasks,
+      activeKeepAliveTasks: getBgDeps().getSwKeepAliveActiveTasks ? getBgDeps().getSwKeepAliveActiveTasks() : 0,
       providers,
       stores
     };
@@ -217,7 +228,6 @@
     const acc = String(accountId || 'Аккаунт #1').trim();
     const price = Number(item.price) || 0;
     const oldPrice = item.oldPrice ? Number(item.oldPrice) : null;
-    const guestPrice = item.guestPrice ? Number(item.guestPrice) : (existing?.guestPrice || null);
     const imageKey = item.imageKey || existing?.imageKey || null;
 
     // ЗАЩИТА ОТ УРЕЗАННЫХ НАЗВАНИЙ ИЗ КОРЗИНЫ:
@@ -269,7 +279,6 @@
       maxPrice: price,
       avgPrice: price,
       lastPrice: price,
-      guestPrice: null,
       competitorMinPrice: null,
       competitorSummary: null,
       competitorOffers: [],
@@ -285,14 +294,10 @@
     if (imageKey) entry.imageKey = imageKey;
     if (effectiveAmount) entry.amount = effectiveAmount;
 
-    if (guestPrice && guestPrice > 0) {
-      entry.guestPrice = Math.round(guestPrice);
-      entry.accounts['Гость (без куки)'] = {
-        price: Math.round(guestPrice),
-        oldPrice: null,
-        updatedAt: nowIso
-      };
+    if (entry.accounts && entry.accounts['Гость (без куки)']) {
+      delete entry.accounts['Гость (без куки)'];
     }
+    if ('guestPrice' in entry) delete entry.guestPrice;
     entry.competitorMinPrice = compMin && compMin > 0 ? Math.round(compMin) : null;
     entry.competitorSummary = compSum || null;
     entry.competitorOffers = compOffers;
@@ -306,14 +311,16 @@
         updatedAt: nowIso
       };
       const lastHist = entry.history[0];
-      if (!lastHist || lastHist.price !== rounded || lastHist.accountId !== acc) {
+      const nowDay = String(nowIso || '').slice(0, 10);
+      const lastDay = lastHist && lastHist.ts ? String(lastHist.ts).slice(0, 10) : '';
+      if (!lastHist || lastHist.price !== rounded || lastHist.accountId !== acc || lastDay !== nowDay) {
         entry.history.unshift({
           price: rounded,
           oldPrice: oldPrice ? Math.round(oldPrice) : null,
           accountId: acc,
           ts: nowIso
         });
-        if (entry.history.length > 20) entry.history.length = 20;
+        if (entry.history.length > 120) entry.history.length = 120;
       }
     }
 
@@ -376,13 +383,13 @@
     });
 
     const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
-    if (backendUrl && Date.now() > backendOfflineUntilTs) {
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
       try {
         const resp = await fetchWithTimeout(
           `${backendUrl}/api/price/record`,
           {
             method: 'POST',
-            headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+            headers: await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
             body: JSON.stringify({ accountId: acc, items })
           },
           1800
@@ -406,7 +413,7 @@
           }
         }
       } catch {
-        backendOfflineUntilTs = Date.now() + 10000;
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
 
@@ -507,69 +514,36 @@
 
   /**
    * Запрашивает оригинальную карточку товара `https://lavka.yandex.ru/good/<slug>`
-   * и возвращает как гостевую цену, так и ПОЛНОЕ название и характеристики из карточки товара!
+   * строго с реальной сессией пользователя (`credentials: 'include'`) и возвращает
+   * актуальную цену, ПОЛНОЕ название и характеристики из карточки товара.
    */
-  async function probeGuestPriceAndCardMeta(slug, fallbackTitle = '', currentPrice = null, accountId = null, fallbackAmount = '', fallbackImageKey = null) {
+  async function probeProductCardMeta(slug, fallbackTitle = '', currentPrice = null, accountId = null, fallbackAmount = '', fallbackImageKey = null) {
     if (!slug) return null;
     const cleanSlug = String(slug).trim().toLowerCase();
     const url = `https://lavka.yandex.ru/good/${encodeURIComponent(cleanSlug)}`;
 
     let parsedCard = null;
-    let guestPrice = null;
-
-    // Сначала пробуем без куки (получаем и гостевую цену, и полное название из оригинальной карточки!)
     try {
-      const resp = await fetchWithTimeout(
+      const respAuth = await fetchWithTimeout(
         url,
         {
           method: 'GET',
-          credentials: 'omit',
+          credentials: 'include',
           cache: 'no-store',
           headers: {
             'Accept-Language': 'ru-RU,ru;q=0.9'
           }
         },
-        3800
+        4200
       );
-      if (resp.ok) {
-        const html = await resp.text();
-        parsedCard = parseFullProductCardFromLavkaHtml(html);
-        if (parsedCard && parsedCard.price > 0) {
-          guestPrice = parsedCard.price;
+      if (respAuth.ok) {
+        const htmlAuth = await respAuth.text();
+        if (!isCaptchaOrBlockHtml(htmlAuth)) {
+          parsedCard = parseFullProductCardFromLavkaHtml(htmlAuth);
         }
       }
     } catch {
       // ignore
-    }
-
-    // Если без куки Лавка не отдала заголовок h1 карточки (например, редирект локации), запрашиваем с куками пользователя!
-    if (!parsedCard || !parsedCard.cardTitle) {
-      try {
-        const respAuth = await fetchWithTimeout(
-          url,
-          {
-            method: 'GET',
-            credentials: 'include',
-            cache: 'no-store',
-            headers: {
-              'Accept-Language': 'ru-RU,ru;q=0.9'
-            }
-          },
-          3800
-        );
-        if (respAuth.ok) {
-          const htmlAuth = await respAuth.text();
-          const parsedAuth = parseFullProductCardFromLavkaHtml(htmlAuth);
-          if (parsedAuth && parsedAuth.cardTitle) {
-            parsedCard = {
-              ...parsedAuth,
-              price: guestPrice || parsedAuth.price
-            };
-          }
-        }
-      } catch {
-        // ignore
-      }
     }
 
     const canonicalTitle = parsedCard?.cardTitle
@@ -579,8 +553,9 @@
     const canonicalBrand = parsedCard?.cardBrand || '';
     const canonicalImageKey = parsedCard?.imageKey || fallbackImageKey || null;
     const hasCanonicalTitle = Boolean(parsedCard?.cardTitle);
+    const effectivePrice = currentPrice || (parsedCard && parsedCard.price > 0 ? parsedCard.price : 0);
 
-    if (guestPrice || hasCanonicalTitle || currentPrice) {
+    if (hasCanonicalTitle || effectivePrice > 0) {
       const summaries = await recordPricesBatch(accountId, [
         {
           slug: cleanSlug,
@@ -589,8 +564,7 @@
           brand: canonicalBrand,
           imageKey: canonicalImageKey,
           amount: canonicalAmount,
-          price: currentPrice || guestPrice || 0,
-          guestPrice: guestPrice || null
+          price: effectivePrice
         }
       ]);
       return summaries[cleanSlug] || {
@@ -600,7 +574,7 @@
         brand: canonicalBrand,
         imageKey: canonicalImageKey,
         amount: canonicalAmount,
-        guestPrice
+        lastPrice: effectivePrice || null
       };
     }
     return null;
@@ -633,12 +607,12 @@
     let summary = findPriceEntryInDb(db, cleanSlug, fullCardTitle, imageKey);
 
     const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
-    if (backendUrl && Date.now() > backendOfflineUntilTs) {
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
       try {
         const qTitle = fullCardTitle ? `?title=${encodeURIComponent(fullCardTitle)}` : '';
         const r = await fetchWithTimeout(
           `${backendUrl}/api/price/product/${encodeURIComponent(cleanSlug)}${qTitle}`,
-          { method: 'GET', headers: await getBackendAuthHeaders(backendUrl) },
+          { method: 'GET', headers: await getBgDeps().getBackendAuthHeaders(backendUrl) },
           1000
         );
         if (r.ok) {
@@ -657,15 +631,12 @@
           }
         }
       } catch {
-        backendOfflineUntilTs = Date.now() + 10000;
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
 
-    if (
-      (settings.enableGuestPriceProbe !== false && (!summary || !summary.guestPrice)) ||
-      (!summary || !summary.isCanonicalCardTitle)
-    ) {
-      const probed = await probeGuestPriceAndCardMeta(
+    if (!summary || !summary.isCanonicalCardTitle) {
+      const probed = await probeProductCardMeta(
         cleanSlug,
         fullCardTitle,
         currentPrice,
@@ -695,7 +666,7 @@
       // Если в базе ещё нет цен других магазинов для этого товара, запускаем прямой экспресс-парсинг ВкусВилла и мульти-поиска сетей
       if (combinedOffers.filter((o) => o.price && o.price > 0).length < 2 && authoritativeTitle) {
         try {
-          const directStoreOffers = await probeDirectRetailStoresForProduct(authoritativeTitle, authoritativeBrand, authoritativeAmount, currentPrice);
+          const directStoreOffers = await getBgDeps().probeDirectRetailStoresForProduct(authoritativeTitle, authoritativeBrand, authoritativeAmount, currentPrice);
           if (directStoreOffers.length > 0) {
             combinedOffers = mergeUniqueStoreOffers(combinedOffers, directStoreOffers);
             combinedOffers = sanitizeCompetitorOffersForProduct(combinedOffers, authoritativeTitle, authoritativeAmount);
@@ -844,7 +815,7 @@
    * СТРОГО ИЗ ОРИГИНАЛЬНОЙ КАРТОЧКИ ТОВАРА (`/good/<slug>`), а не из сокращённого текста в корзине!
    */
   async function auditCartCompetitorsAndAccounts(accountId, items = [], forceNetworkSearch = false) {
-    const stopKeepAlive = startSwKeepAlive();
+    const stopKeepAlive = getBgDeps().startSwKeepAlive ? getBgDeps().startSwKeepAlive() : () => {};
     try {
       const settings = await getSettings();
       const acc = accountId || settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
@@ -855,14 +826,14 @@
       const itemsNeedingCardResolution = items.filter((item) => {
         if (!item || !item.slug) return false;
         const existing = findPriceEntryInDb(priceDb, item.slug, item.title, item.imageKey);
-        return !existing || !existing.isCanonicalCardTitle || (settings.enableGuestPriceProbe !== false && !existing.guestPrice);
+        return !existing || !existing.isCanonicalCardTitle;
       });
 
       for (let i = 0; i < itemsNeedingCardResolution.length; i += 4) {
         const chunk = itemsNeedingCardResolution.slice(i, i + 4);
         await Promise.all(
           chunk.map((it) =>
-            probeGuestPriceAndCardMeta(
+            probeProductCardMeta(
               it.slug,
               it.title || it.slug,
               it.price,
@@ -905,8 +876,7 @@
         const cardImageKey = (pEntry && pEntry.imageKey) ? pEntry.imageKey : (item.imageKey || null);
         const fullAuthoritativeTitle = buildFullProductSearchQuery(cardTitle, cardBrand, cardAmount);
 
-        const aiEntry = await getLocalAiCacheEntry(slug, fullAuthoritativeTitle, cardImageKey);
-        const guestPrice = pEntry?.guestPrice || null;
+        const aiEntry = await getBgDeps().getLocalAiCacheEntry(slug, fullAuthoritativeTitle, cardImageKey);
 
         const extStoreList = await getExternalStoreOffersList();
         const matchedExtOffers = findMatchingExternalStoreOffersFromList(extStoreList, fullAuthoritativeTitle, cardAmount);
@@ -927,7 +897,7 @@
         }
 
         if (compOffers.length === 0 && aiEntry && Array.isArray(aiEntry.sources) && aiEntry.sources.length > 0) {
-          const extracted = extractCompetitorPricesFromSources(
+          const extracted = getBgDeps().extractCompetitorPricesFromSources(
             aiEntry.sources,
             price,
             fullAuthoritativeTitle,
@@ -944,8 +914,8 @@
           ddgNetworkCallsMade < maxDdgCallsPerPass
         ) {
           ddgNetworkCallsMade += 1;
-          const foundSources = await searchWebReviewsDirect(fullAuthoritativeTitle, cardBrand, cardAmount);
-          const extracted = extractCompetitorPricesFromSources(
+          const foundSources = await getBgDeps().searchWebReviewsDirect(fullAuthoritativeTitle, cardBrand, cardAmount);
+          const extracted = getBgDeps().extractCompetitorPricesFromSources(
             foundSources,
             price,
             fullAuthoritativeTitle,
@@ -977,7 +947,6 @@
             price,
             oldPrice: item.oldPrice || null,
             amount: cardAmount,
-            guestPrice: guestPrice || null,
             competitorMinPrice: compMin || null,
             competitorSummary: compSum || null,
             competitorOffers: compOffers
@@ -986,10 +955,6 @@
 
         let bestAltPrice = null;
         let bestAltLabel = '';
-        if (guestPrice && guestPrice < price - 2) {
-          bestAltPrice = guestPrice;
-          bestAltLabel = 'Без куки (Гость)';
-        }
         const accountsMap = pEntry?.accounts || {};
         for (const [accName, accVal] of Object.entries(accountsMap)) {
           if (accName !== acc && accVal && accVal.price && accVal.price < price - 2) {
@@ -1027,7 +992,6 @@
           qty,
           price,
           rowTotal: Math.round(price * qty),
-          guestPrice: guestPrice || null,
           bestAltPrice: bestAltPrice || null,
           bestAltLabel: bestAltLabel || '',
           overpayVsAltPerUnit,
@@ -1061,6 +1025,296 @@
     }
   }
 
+
+  async function getLocalWatchlist() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([WATCHLIST_KEY], (res) => {
+        const map = res[WATCHLIST_KEY];
+        resolve(map && typeof map === 'object' ? map : {});
+      });
+    });
+  }
+
+  async function saveLocalWatchlist(map) {
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ [WATCHLIST_KEY]: map || {} }, () => resolve());
+    });
+  }
+
+  function buildLocalDailyAvg(points) {
+    const buckets = new Map();
+    for (const pt of Array.isArray(points) ? points : []) {
+      if (!pt || !(Number(pt.price) > 0)) continue;
+      const dayKey = String(pt.ts || '').slice(0, 10);
+      if (!dayKey) continue;
+      if (!buckets.has(dayKey)) buckets.set(dayKey, []);
+      buckets.get(dayKey).push(Number(pt.price));
+    }
+    return Array.from(buckets.keys())
+      .sort()
+      .map((dayKey) => {
+        const vals = buckets.get(dayKey);
+        const avg = Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 100) / 100;
+        return {
+          date: dayKey,
+          ts: `${dayKey}T12:00:00.000Z`,
+          price: avg,
+          minPrice: Math.min(...vals),
+          maxPrice: Math.max(...vals),
+          count: vals.length
+        };
+      });
+  }
+
+  async function getProductPriceHistory(slug, title = '', days = 90, accountId = null) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    if (!cleanSlug) return null;
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+    const daysNum = Number.isFinite(Number(days)) ? Number(days) : 90;
+
+    if (Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
+      try {
+        const qs = new URLSearchParams({ days: String(daysNum) });
+        if (title) qs.set('title', title);
+        if (accountId) qs.set('accountId', accountId);
+        const resp = await fetchWithTimeout(
+          `${backendUrl}/api/price/history/${encodeURIComponent(cleanSlug)}?${qs.toString()}`,
+          { headers: await getBgDeps().buildBackendAuthHeaders(backendUrl) },
+          3000
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.status === 'ok') {
+            return data;
+          }
+        }
+      } catch {
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+      }
+    }
+
+    // Fallback к локальной базе PRICE_DB + WATCHLIST
+    const db = await getLocalPriceDb();
+    const wl = await getLocalWatchlist();
+    const entry = findPriceEntryInDb(db, cleanSlug, title);
+    const canonicalSlug = entry?.slug || cleanSlug;
+    const rawHistory = Array.isArray(entry?.history) ? [...entry.history].reverse() : [];
+    const cutoff = daysNum > 0 ? Date.now() - daysNum * 24 * 60 * 60 * 1000 : 0;
+
+    const points = rawHistory
+      .filter((h) => h && Number(h.price) > 0 && h.accountId !== 'Гость (без куки)')
+      .filter((h) => !accountId || h.accountId === accountId)
+      .filter((h) => !cutoff || !h.ts || Date.parse(h.ts) >= cutoff)
+      .map((h) => ({
+        price: Number(h.price),
+        oldPrice: h.oldPrice ? Number(h.oldPrice) : null,
+        accountId: h.accountId || 'Аккаунт #1',
+        ts: h.ts || entry.updatedAt || new Date().toISOString()
+      }));
+
+    if (points.length === 0 && entry && entry.lastPrice > 0) {
+      points.push({
+        price: Number(entry.lastPrice),
+        oldPrice: null,
+        accountId: settings.lavkaAccountLabel || 'Аккаунт #1',
+        ts: entry.updatedAt || new Date().toISOString()
+      });
+    }
+
+    const prices = points.map((p) => p.price);
+    const stats = prices.length > 0
+      ? {
+          minPrice: Math.min(...prices),
+          maxPrice: Math.max(...prices),
+          avgPrice: Math.round((prices.reduce((a, b) => a + b, 0) / prices.length) * 100) / 100,
+          lastPrice: prices[prices.length - 1],
+          count: prices.length
+        }
+      : { minPrice: null, maxPrice: null, avgPrice: null, lastPrice: null, count: 0 };
+
+    const wItem = wl[canonicalSlug] || wl[cleanSlug] || null;
+    const accounts = Array.from(new Set(points.map((p) => p.accountId).filter(Boolean)));
+
+    return {
+      status: 'ok',
+      slug: canonicalSlug,
+      title: entry?.title || title || canonicalSlug,
+      amount: entry?.amount || '',
+      days: daysNum,
+      points,
+      dailyAvg: buildLocalDailyAvg(points),
+      stats,
+      accounts,
+      isWatched: Boolean(wItem),
+      targetPrice: wItem?.targetPrice || null
+    };
+  }
+
+  async function toggleWatchlistItem({ slug, title = '', amount = '', price = null, targetPrice = null, watch = null } = {}) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    if (!cleanSlug) return { ok: false, error: 'slug is required' };
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+    const wl = await getLocalWatchlist();
+    const nowIso = new Date().toISOString();
+
+    let watched = watch === null || watch === undefined ? !Boolean(wl[cleanSlug]) : Boolean(watch);
+    let item = null;
+
+    if (Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
+      try {
+        const resp = await fetchWithTimeout(
+          `${backendUrl}/api/watchlist/toggle`,
+          {
+            method: 'POST',
+            headers: await getBgDeps().buildBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ slug: cleanSlug, title, amount, price, targetPrice, watch })
+          },
+          3000
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.status === 'ok') {
+            watched = Boolean(data.watched);
+            item = data.item || null;
+          }
+        }
+      } catch {
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+      }
+    }
+
+    if (watched) {
+      const existing = wl[cleanSlug] || {};
+      const effPrice = price && Number(price) > 0 ? Math.round(Number(price)) : (existing.lastPrice || null);
+      wl[cleanSlug] = item || {
+        slug: cleanSlug,
+        title: title || existing.title || cleanSlug,
+        amount: amount || existing.amount || '',
+        targetPrice: targetPrice && Number(targetPrice) > 0 ? Math.round(Number(targetPrice)) : (existing.targetPrice || null),
+        lastPrice: effPrice,
+        baselinePrice: existing.baselinePrice || effPrice,
+        lastCheckedAt: nowIso,
+        createdAt: existing.createdAt || nowIso,
+        updatedAt: nowIso
+      };
+      item = wl[cleanSlug];
+    } else {
+      delete wl[cleanSlug];
+    }
+
+    await saveLocalWatchlist(wl);
+    return { ok: true, watched, slug: cleanSlug, item };
+  }
+
+  async function getWatchlistItems() {
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+
+    if (Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0)) {
+      try {
+        const resp = await fetchWithTimeout(
+          `${backendUrl}/api/watchlist?limit=200`,
+          { headers: await getBgDeps().buildBackendAuthHeaders(backendUrl) },
+          3000
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.status === 'ok' && Array.isArray(data.items)) {
+            const syncMap = {};
+            data.items.forEach((it) => {
+              if (it && it.slug) syncMap[it.slug] = it;
+            });
+            await saveLocalWatchlist(syncMap);
+            return data.items;
+          }
+        }
+      } catch {
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+      }
+    }
+
+    const wl = await getLocalWatchlist();
+    const db = await getLocalPriceDb();
+    return Object.values(wl)
+      .map((it) => {
+        const pEntry = findPriceEntryInDb(db, it.slug, it.title);
+        const lastP = pEntry?.lastPrice ?? it.lastPrice ?? null;
+        const baseP = it.baselinePrice ?? lastP;
+        return {
+          ...it,
+          lastPrice: lastP,
+          baselinePrice: baseP,
+          priceDiff: (lastP != null && baseP != null) ? Math.round((lastP - baseP) * 100) / 100 : 0,
+          minPrice: pEntry?.minPrice ?? it.minPrice ?? lastP,
+          maxPrice: pEntry?.maxPrice ?? it.maxPrice ?? lastP,
+          avgPrice: pEntry?.avgPrice ?? it.avgPrice ?? lastP
+        };
+      })
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  }
+
+  async function checkWatchlistPricesBatch({ maxItems = 12 } = {}) {
+    const stopKeepAlive = getBgDeps().startSwKeepAlive ? getBgDeps().startSwKeepAlive() : () => {};
+    try {
+      const settings = await getSettings();
+      const acc = settings.lavkaAccountLabel || 'Аккаунт #1 (Основной)';
+      const items = await getWatchlistItems();
+      if (!items || items.length === 0) {
+        return { ok: true, checked: 0, updated: 0, drops: [] };
+      }
+
+      const slice = items.slice(0, Math.max(1, Number(maxItems) || 12));
+      const wl = await getLocalWatchlist();
+      const drops = [];
+      let checked = 0;
+      let updated = 0;
+
+      for (const item of slice) {
+        if (!item || !item.slug) continue;
+        checked += 1;
+        try {
+          const prevPrice = Number(item.lastPrice) || 0;
+          const probed = await probeProductCardMeta(
+            item.slug,
+            item.title || item.slug,
+            null,
+            acc,
+            item.amount || '',
+            null
+          );
+          const newPrice = probed && Number(probed.lastPrice) > 0 ? Number(probed.lastPrice) : 0;
+          if (newPrice > 0) {
+            updated += 1;
+            if (wl[item.slug]) {
+              wl[item.slug].lastPrice = newPrice;
+              wl[item.slug].lastCheckedAt = new Date().toISOString();
+              wl[item.slug].updatedAt = new Date().toISOString();
+            }
+            if (prevPrice > 0 && newPrice < prevPrice - 1) {
+              drops.push({
+                slug: item.slug,
+                title: item.title || item.slug,
+                oldPrice: prevPrice,
+                newPrice,
+                diff: Math.round(prevPrice - newPrice)
+              });
+            }
+          }
+        } catch {
+          // continue next item
+        }
+        await new Promise((r) => setTimeout(r, 450));
+      }
+
+      await saveLocalWatchlist(wl);
+      return { ok: true, checked, updated, drops };
+    } finally {
+      stopKeepAlive();
+    }
+  }
+
   const api = {
     getMagnitSeedOffers,
     RADAR_16_STORES_CATALOG,
@@ -1079,7 +1333,12 @@
     recordPricesBatch,
     parsePriceFromLavkaHtml,
     parseFullProductCardFromLavkaHtml,
-    probeGuestPriceAndCardMeta,
+    probeProductCardMeta,
+    getLocalWatchlist,
+    getProductPriceHistory,
+    toggleWatchlistItem,
+    getWatchlistItems,
+    checkWatchlistPricesBatch,
     getProductPriceIntelligence,
     getExternalStoreOffersList,
     recordExternalStoreOffers,

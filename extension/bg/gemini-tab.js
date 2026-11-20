@@ -5,6 +5,10 @@
 (function (root) {
   'use strict';
 
+  function getBgDeps() {
+    return root.LQS_BG_DEPS || {};
+  }
+
   const { fetchWithTimeout, getSettings } = root.LQS_UTILS;
 
   let geminiTabMutex = Promise.resolve();
@@ -146,7 +150,7 @@
       active: makeActive,
       pinned: !makeActive
     });
-    await waitForTabCompleteSafe(created.id, 6500);
+    await getBgDeps().waitForTabCompleteSafe(created.id, 6500);
     return created;
   }
 
@@ -164,13 +168,13 @@
       if (existingTab) return;
 
       const aiBaseUrl = (settings.aiBaseUrl || '').replace(/\/$/, '');
-      if (aiBaseUrl && Date.now() > bridgeOfflineUntilTs) {
+      if (aiBaseUrl && Date.now() > (getBgDeps().getBridgeOfflineUntilTs?.() || 0)) {
         try {
           const headers = settings.aiApiKey ? { Authorization: `Bearer ${settings.aiApiKey}` } : {};
           const bridgeResp = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 900);
           if (bridgeResp.ok) return;
         } catch {
-          bridgeOfflineUntilTs = Date.now() + 15000;
+          getBgDeps().setBridgeOfflineUntilTs?.(Date.now() + 15000);
         }
       }
 
@@ -195,7 +199,7 @@
    *    мгновенно забирает его за 0.1 сек без повторного ожидания!
    */
   async function executePromptInsideGeminiTab(tabId, promptText, productTitle = '', forceRefresh = false) {
-    const stopKeepAlive = startSwKeepAlive();
+    const stopKeepAlive = getBgDeps().startSwKeepAlive ? getBgDeps().startSwKeepAlive() : () => {};
     const swWait = (ms) => new Promise((r) => setTimeout(r, ms));
 
     try {

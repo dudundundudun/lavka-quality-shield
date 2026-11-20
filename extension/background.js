@@ -1,6 +1,6 @@
 /**
- * Lavka Quality Shield v2.6.0 — Background Service Worker
- * Что нового и исправлено в v2.6.0:
+ * Lavka Quality Shield v2.7.0 — Background Service Worker
+ * Что нового и исправлено в v2.7.0:
  * 1. МАТРИЦА ЦЕН 16 КРУПНЕЙШИХ МАГАЗИНОВ + НАТИВНЫЙ ПАРСЕР МАГНИТА (`magnit.ru` по Site Recon):
  *    - Подключены 16 торговых сетей: Магнит, Пятёрочка, Перекрёсток, ВкусВилл, Магнолия, Дикси, Чижик,
  *      Ашан, МЕТРО, Глобус, Лента, О’КЕЙ, Азбука Вкуса, Самокат, Ozon Fresh, Купер / Яндекс Маркет.
@@ -20,7 +20,7 @@
 
 'use strict';
 
-importScripts('shared/config.js', 'shared/price-parser.js', 'shared/utils.js');
+importScripts('shared/config.js', 'shared/price-parser.js', 'shared/utils.js', 'shared/product-matcher.js');
 importScripts('bg/accounts-vault.js');
 importScripts('bg/gemini-tab.js');
 importScripts('bg/price-radar.js');
@@ -32,6 +32,18 @@ const {
   buildFullProductSearchQuery,
   buildDirectStoreSearchLinks
 } = globalThis.LQS_UTILS;
+
+const {
+  SUGAR_FREE_REGEX,
+  FLAVOR_AND_TYPE_MODIFIERS,
+  GENERIC_STOP_WORDS,
+  normalizeTitleKey,
+  parseVolumeOrWeightGrams,
+  normalizeSynonymTokens,
+  isSearchResultMatchingProduct,
+  decodeHtmlEntities
+} = globalThis.LQS_MATCHER;
+
 
 const {
   fetchBackendAccountSecrets,
@@ -231,17 +243,6 @@ function normalizeCacheKey(slug, title) {
     .toLowerCase();
 }
 
-function normalizeTitleKey(rawTitle) {
-  if (!rawTitle) return '';
-  return String(rawTitle)
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/[\u00ad\u200b\u00a0«»"'„“”]/g, ' ')
-    .replace(/(?:,\s*|\s+)(?:\d+\s*[×xх*]\s*)?\d+(?:[.,]\d+)?\s*(?:г|гр|грамм|кг|мл|л|шт|уп|пак|рул|капс)\.?$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase()
-    .replace(/ё/g, 'е');
-}
 
 function extractImageKeyFromUrl(src) {
   if (!src) return null;
@@ -249,212 +250,6 @@ function extractImageKeyFromUrl(src) {
   return m ? m[1].toLowerCase() : null;
 }
 
-// ============================================================================
-// ТОЧНЫЙ ПОИСК ИДЕНТИЧНЫХ ТОВАРОВ И ФИЛЬТР МОДИФИКАТОРОВ (БЕЗ САХАРА / ОБЪЁМ)
-// ============================================================================
-const SUGAR_FREE_REGEX =
-  /(без\s+сахара|без\s+добавленного\s+сахара|\bzero\b|\bзеро\b|\blight\b|\bлайт\b|\bdiet\b|0\s*%\s*сахара|0\s+сахара|на\s+стевии|подсластител)/i;
-
-const FLAVOR_AND_TYPE_MODIFIERS = [
-  'ваниль',
-  'вишн',
-  'черешн',
-  'лимон',
-  'лайм',
-  'манго',
-  'маракуй',
-  'апельсин',
-  'персик',
-  'малин',
-  'клубник',
-  'земляник',
-  'смородин',
-  'черник',
-  'яблок',
-  'груш',
-  'ананас',
-  'грейпфрут',
-  'тархун',
-  'дюшес',
-  'байкал',
-  'буратино',
-  'крем-сода',
-  'карамел',
-  'кокос',
-  'миндал',
-  'фундук',
-  'фисташк',
-  'банан',
-  'шоколад',
-  'какао',
-  'кофе',
-  'матча',
-  'имбир',
-  'мята',
-  'мятн',
-  'солен',
-  'копчен',
-  'остр',
-  'сырн',
-  'гриб',
-  'сметан',
-  'зелен',
-  'краб',
-  'бекон',
-  'паприк',
-  'безлактоз',
-  'топлен',
-  'обезжир'
-];
-
-const GENERIC_STOP_WORDS = new Set([
-  'напиток',
-  'газированный',
-  'сильногазированный',
-  'среднегазированный',
-  'слабогазированный',
-  'негазированный',
-  'безалкогольный',
-  'пастеризованный',
-  'ультрапастеризованный',
-  'стерилизованный',
-  'охлажденный',
-  'замороженный',
-  'фасованный',
-  'нарезка',
-  'упаковка',
-  'бутылка',
-  'банка',
-  'пакет',
-  'коробка',
-  'продукт',
-  'товар',
-  'купить',
-  'цена',
-  'отзывы',
-  'отзыв',
-  'доставка',
-  'москва',
-  'лавка',
-  'яндекс',
-  'бзмж',
-  'стм',
-  'для',
-  'или',
-  'под',
-  'над',
-  'при'
-]);
-
-function parseVolumeOrWeightGrams(rawStr) {
-  if (!rawStr) return null;
-  const s = String(rawStr).replace(/[\u00ad\u200b\u00a0]/g, ' ');
-  const multi = s.match(
-    /(\d+)\s*[×xх*]\s*(\d+(?:[.,]\d+)?)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i
-  );
-  if (multi) {
-    const cnt = parseInt(multi[1], 10) || 1;
-    const val = parseFloat(multi[2].replace(',', '.'));
-    const u = multi[3].toLowerCase();
-    const mult = u.startsWith('кг') || u.startsWith('л') ? 1000 : 1;
-    if (val > 0) return cnt * val * mult;
-  }
-  const single = s.match(
-    /(?:^|[^\d.,])(\d+(?:[.,]\d+)?)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i
-  );
-  if (single) {
-    const val = parseFloat(single[1].replace(',', '.'));
-    const u = single[2].toLowerCase();
-    const mult = u.startsWith('кг') || u.startsWith('л') ? 1000 : 1;
-    if (val > 0) return val * mult;
-  }
-  return null;
-}
-
-function normalizeSynonymTokens(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/\bcola\b/g, 'кола')
-    .replace(/\bcoca[\s-]*кола\b/g, 'coca-cola кока-кола')
-    .replace(/\boriginal\b/g, 'оригинал original')
-    .replace(/\bclassic\b/g, 'классик classic')
-    .replace(/\bzero\b/g, 'без сахара zero зеро');
-}
-
-function isSearchResultMatchingProduct(resTitle, resSnippet, productTitle, productAmount = '') {
-  const fullTarget = `${productTitle || ''} ${productAmount || ''}`.trim();
-  const targetLower = fullTarget.toLowerCase().replace(/ё/g, 'е');
-  const resTitleLower = String(resTitle || '').toLowerCase().replace(/ё/g, 'е');
-  const resCombinedLower = `${resTitleLower} ${String(resSnippet || '').toLowerCase().replace(/ё/g, 'е')}`;
-
-  // 1. ЖЁСТКАЯ ПРОВЕРКА «БЕЗ САХАРА / ZERO»
-  const targetIsSugarFree = SUGAR_FREE_REGEX.test(targetLower);
-  const resIsSugarFree = SUGAR_FREE_REGEX.test(resCombinedLower);
-  const resTitleIsSugarFree = SUGAR_FREE_REGEX.test(resTitleLower);
-
-  if (targetIsSugarFree && !resIsSugarFree) {
-    return { isSameProduct: false, isSameVolume: false };
-  }
-  if (!targetIsSugarFree && resTitleIsSugarFree) {
-    return { isSameProduct: false, isSameVolume: false };
-  }
-
-  // 2. ПРОВЕРКА ВКУСОВЫХ И ВИДОВЫХ МОДИФИКАТОРОВ
-  for (const mod of FLAVOR_AND_TYPE_MODIFIERS) {
-    const targetHasMod = targetLower.includes(mod);
-    const resTitleHasMod = resTitleLower.includes(mod);
-    const resAnyHasMod = resCombinedLower.includes(mod);
-    if (targetHasMod && !resAnyHasMod) {
-      return { isSameProduct: false, isSameVolume: false };
-    }
-    if (!targetHasMod && resTitleHasMod) {
-      return { isSameProduct: false, isSameVolume: false };
-    }
-  }
-
-  // 3. ПРОВЕРКА ЯДРА НАЗВАНИЯ И БРЕНДА
-  const normTarget = normalizeSynonymTokens(targetLower);
-  const normRes = normalizeSynonymTokens(resCombinedLower);
-
-  const rawWords = normTarget.match(/[а-яa-z0-9]{3,}/g) || [];
-  const coreTokens = [];
-  for (const w of rawWords) {
-    if (GENERIC_STOP_WORDS.has(w)) continue;
-    if (['без', 'сахара', 'сахар', 'zero', 'зеро', 'литр', 'литра', 'литров', 'грамм', 'грамма'].includes(w)) {
-      continue;
-    }
-    if (/^\d+(?:г|гр|кг|мл|л|шт|percent)?$/.test(w)) continue;
-    if (!coreTokens.includes(w)) coreTokens.push(w);
-  }
-
-  if (coreTokens.length > 0) {
-    let matchedCount = 0;
-    for (const tok of coreTokens) {
-      const stem = tok.length >= 6 ? tok.slice(0, 5) : (tok.length >= 5 ? tok.slice(0, 4) : tok);
-      if (normRes.includes(stem)) {
-        matchedCount += 1;
-      }
-    }
-    const required = coreTokens.length === 1 ? 1 : Math.max(2, Math.ceil(coreTokens.length * 0.6));
-    if (matchedCount < Math.min(required, coreTokens.length)) {
-      return { isSameProduct: false, isSameVolume: false };
-    }
-  }
-
-  // 4. ПРОВЕРКА ОБЪЁМА / ВЕСА
-  const targetGrams = parseVolumeOrWeightGrams(productAmount) || parseVolumeOrWeightGrams(productTitle);
-  const resGrams = parseVolumeOrWeightGrams(resTitle) || parseVolumeOrWeightGrams(resSnippet);
-  let isSameVolume = true;
-  if (targetGrams && resGrams) {
-    const ratio = resGrams / targetGrams;
-    if (ratio < 0.78 || ratio > 1.25) {
-      isSameVolume = false;
-    }
-  }
-
-  return { isSameProduct: true, isSameVolume };
-}
 
 // ============================================================================
 // 1. ВСТРОЕННЫЙ КЭШ ИИ-ОБЗОРОВ (lqs_ai_cache_v1)
@@ -719,7 +514,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
     const comparedItems = [];
     let sourceTotal = 0;
     let currentTotal = 0;
-    let guestTotal = 0;
     const batchToRecord = [];
 
     for (const item of latest.items) {
@@ -729,7 +523,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
       const existingEntry = findPriceEntryInDb(priceDb, slug, item.title, item.imageKey);
 
       let currentPrice = null;
-      let guestPrice = existingEntry?.guestPrice || null;
       let cardTitle = existingEntry?.isCanonicalCardTitle ? existingEntry.title : (item.title || slug);
       let isCanonical = Boolean(existingEntry?.isCanonicalCardTitle);
 
@@ -755,32 +548,10 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
         currentPrice = existingEntry?.accounts?.[currentAcc]?.price || sourcePrice;
       }
 
-      if (!guestPrice) {
-        try {
-          const url = `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}`;
-          const respG = await fetchWithTimeout(url, { method: 'GET', credentials: 'omit', cache: 'no-store' }, 3500);
-          if (respG.ok) {
-            const htmlG = await respG.text();
-            const parsedG = parseFullProductCardFromLavkaHtml(htmlG);
-            if (parsedG) {
-              if (parsedG.price > 0) guestPrice = parsedG.price;
-              if (!isCanonical && parsedG.cardTitle) {
-                cardTitle = buildFullProductSearchQuery(parsedG.cardTitle, parsedG.cardBrand || '', parsedG.cardAmount || item.amount || '');
-                isCanonical = true;
-              }
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }
-
       const effCurrent = currentPrice || sourcePrice;
-      const effGuest = guestPrice || effCurrent;
 
       sourceTotal += sourcePrice * qty;
       currentTotal += effCurrent * qty;
-      guestTotal += effGuest * qty;
 
       if (currentPrice) {
         batchToRecord.push({
@@ -789,7 +560,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
           isCanonicalCardTitle: isCanonical,
           imageKey: item.imageKey || existingEntry?.imageKey || null,
           price: currentPrice,
-          guestPrice: guestPrice || null,
           amount: item.amount || existingEntry?.amount || ''
         });
       }
@@ -800,7 +570,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
         qty,
         sourcePrice,
         currentPrice: effCurrent,
-        guestPrice: guestPrice || null,
         diffPerUnit: effCurrent - sourcePrice,
         diffTotal: (effCurrent - sourcePrice) * qty,
         accounts: existingEntry?.accounts || {}
@@ -817,7 +586,6 @@ async function compareSavedCartOnCurrentAccount(targetAccountId) {
       currentAccount: currentAcc,
       sourceTotal: Math.round(sourceTotal),
       currentTotal: Math.round(currentTotal),
-      guestTotal: Math.round(guestTotal),
       diffTotal: Math.round(currentTotal - sourceTotal),
       items: comparedItems,
       updatedAt: new Date().toISOString()
@@ -1196,19 +964,6 @@ function detectSourceSite(urlStr) {
   }
 }
 
-function decodeHtmlEntities(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 function unwrapDdgUrl(rawHref) {
   let href = String(rawHref || '').trim();
@@ -1557,9 +1312,6 @@ function buildPricingContext(payload, priceIntel = null) {
 
   const radarNotes = [];
   if (priceIntel) {
-    if (priceIntel.guestPrice && price && priceIntel.guestPrice < price - 2) {
-      radarNotes.push(`ВНИМАНИЕ: цена без куки (для гостя) ниже на ${Math.round(price - priceIntel.guestPrice)} ₽ (${priceIntel.guestPrice} ₽)`);
-    }
     if (priceIntel.minPrice && price && priceIntel.minPrice < price - 2) {
       radarNotes.push(`минимальная цена в твоей базе была ${priceIntel.minPrice} ₽`);
     }
@@ -1832,7 +1584,6 @@ async function orchestrateProductAnalysisInternal(payload) {
                 ...payload,
                 title: authoritativeTitle,
                 accountId: acc,
-                guestPrice: priceIntel?.guestPrice || null,
                 aiBaseUrl: settings.aiBaseUrl,
                 aiApiKey: settings.aiApiKey,
                 aiModel: settings.aiModel
@@ -2065,13 +1816,73 @@ async function orchestrateProductAnalysis(payload) {
 // ============================================================================
 // 7. СОБЫТИЯ ЖИЗНЕННОГО ЦИКЛА И ОБРАБОТЧИК СООБЩЕНИЙ
 // ============================================================================
+
+// Единый явный мост зависимостей background.js для вынесенных модулей bg/*.js
+globalThis.LQS_BG_DEPS = {
+  getBackendOfflineUntilTs: () => backendOfflineUntilTs,
+  setBackendOfflineUntilTs: (ts) => {
+    backendOfflineUntilTs = ts;
+  },
+  getBridgeOfflineUntilTs: () => bridgeOfflineUntilTs,
+  setBridgeOfflineUntilTs: (ts) => {
+    bridgeOfflineUntilTs = ts;
+  },
+  getSwKeepAliveActiveTasks: () => swKeepAliveActiveTasks,
+  getBackendAuthHeaders,
+  startSwKeepAlive,
+  waitForTabCompleteSafe,
+  autoBuildCartInBrowser,
+  getLocalAiCacheEntry,
+  searchWebReviewsDirect,
+  extractCompetitorPricesFromSources,
+  probeDirectRetailStoresForProduct
+};
+
+const WATCHLIST_ALARM_NAME = 'lqs_watchlist_price_check';
+
+async function syncWatchlistAlarm() {
+  try {
+    if (!chrome.alarms) return;
+    const settings = await getSettings();
+    const hours = Number(settings.watchlistCheckIntervalHours ?? 6);
+    if (!hours || hours <= 0) {
+      chrome.alarms.clear(WATCHLIST_ALARM_NAME);
+      return;
+    }
+    chrome.alarms.create(WATCHLIST_ALARM_NAME, {
+      delayInMinutes: Math.max(15, Math.round(hours * 60)),
+      periodInMinutes: Math.max(60, Math.round(hours * 60))
+    });
+  } catch {
+    // ignore
+  }
+}
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === WATCHLIST_ALARM_NAME) {
+      checkWatchlistPricesBatch({ maxItems: 12 }).catch(() => {});
+    }
+  });
+}
+
+if (chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes && changes[LQS_CONFIG.STORAGE_KEYS.SETTINGS]) {
+      syncWatchlistAlarm();
+    }
+  });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   ensureAutopilotWarmup('onInstalled');
   getAccountsVaultMap();
+  syncWatchlistAlarm();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureAutopilotWarmup('onStartup');
+  syncWatchlistAlarm();
 });
 
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
@@ -2479,6 +2290,57 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     }
     inspectGeminiCookies()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_PRICE_HISTORY') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    getProductPriceHistory(msg.slug, msg.title || '', msg.days ?? 90, msg.accountId || null)
+      .then((data) => sendResponse({ ok: Boolean(data), data }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_TOGGLE_WATCHLIST') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    toggleWatchlistItem({
+      slug: msg.slug,
+      title: msg.title || '',
+      amount: msg.amount || '',
+      price: msg.price || null,
+      targetPrice: msg.targetPrice || null,
+      watch: msg.watch
+    })
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_WATCHLIST') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    getWatchlistItems()
+      .then((items) => sendResponse({ ok: true, items }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_CHECK_WATCHLIST_NOW') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    checkWatchlistPricesBatch({ maxItems: msg.maxItems || 15 })
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;

@@ -13,6 +13,7 @@ if SERVER_DIR not in sys.path:
 
 import security
 import server
+from routers import cache as cache_router
 
 PINNED_EXT_ID = "c" * 32
 VALID_ORIGIN = f"chrome-extension://{PINNED_EXT_ID}"
@@ -31,6 +32,7 @@ class TestApiCrudEndpoints(unittest.TestCase):
         security.PINNED_EXT_PATH = os.path.join(self._tmp.name, "pinned_extension.json")
 
         server.init_db()
+        cache_router.reset_analyze_rate_limiter()
         self.client = TestClient(server.app)
 
         pair_resp = self.client.post(
@@ -64,7 +66,6 @@ class TestApiCrudEndpoints(unittest.TestCase):
                         "price": 179.0,
                         "oldPrice": 199.0,
                         "amount": "1,5 л",
-                        "guestPrice": 159.0,
                         "competitorMinPrice": 144.0,
                         "competitorSummary": "Магнит 144 ₽",
                     }
@@ -101,7 +102,8 @@ class TestApiCrudEndpoints(unittest.TestCase):
         self.assertEqual(summary["maxPrice"], 179.0)
         self.assertEqual(summary["avgPrice"], 164.0)
         self.assertEqual(summary["lastPrice"], 149.0)
-        self.assertEqual(summary["guestPrice"], 159.0)
+        self.assertNotIn("guestPrice", summary)
+        self.assertNotIn("Гость (без куки)", summary["accounts"])
 
         # Lookup by unknown HEX-ID slug with matching title (uses norm_title index)
         r_hex = self.client.get(
@@ -257,6 +259,159 @@ class TestApiCrudEndpoints(unittest.TestCase):
             self.assertEqual(sec["cookies"], [{"name": "yandexuid", "value": "999"}])
             self.assertEqual(sec["localStorageData"], {"k": "v"})
 
+
+    def test_analyze_product_rate_limits_uncached_only_not_cache_hits(self):
+        cache_router.reset_analyze_rate_limiter()
+        # Seed a cached product
+        r_save = self.client.post(
+            "/api/save-cache",
+            json={
+                "slug": "cached_milk_1l",
+                "title": "Молоко Кэш 1 л",
+                "verdict": "1. Хорошие отзывы.\n2. Чистый состав.\n3. Отличный выбор.",
+                "sources": [],
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_save.status_code, 200)
+
+        async def _fake_search(*_args, **_kwargs):
+            return []
+
+        async def _fake_ai(*_args, **_kwargs):
+            return "1. Отзывов нет.\n2. Состав ок.\n3. Хороший вариант."
+
+        with patch.object(cache_router, "ANALYZE_RATE_LIMIT_MAX_REQUESTS", 2), patch.object(
+            cache_router, "search_web_reviews", side_effect=_fake_search
+        ), patch.object(cache_router, "call_ai_model", side_effect=_fake_ai):
+            # 2 uncached requests allowed
+            for idx in range(2):
+                r = self.client.post(
+                    "/api/analyze-product",
+                    json={"slug": f"uncached_{idx}", "title": f"Новый товар {idx}", "forceRefresh": True},
+                    headers=self.headers,
+                )
+                self.assertEqual(r.status_code, 200)
+                self.assertFalse(r.json()["cached"])
+
+            # 3rd uncached request -> HTTP 429
+            r_limited = self.client.post(
+                "/api/analyze-product",
+                json={"slug": "uncached_3", "title": "Новый товар 3", "forceRefresh": True},
+                headers=self.headers,
+            )
+            self.assertEqual(r_limited.status_code, 429)
+
+            # Cache hit is still allowed even when uncached limit is exhausted
+            r_hit = self.client.post(
+                "/api/analyze-product",
+                json={"slug": "cached_milk_1l", "title": "Молоко Кэш 1 л", "forceRefresh": False},
+                headers=self.headers,
+            )
+            self.assertEqual(r_hit.status_code, 200)
+            self.assertTrue(r_hit.json()["cached"])
+
+
+    def test_price_history_series_exact_and_daily_avg(self):
+        # Record 3 observations across 2 accounts
+        self.client.post(
+            "/api/price/record",
+            json={
+                "accountId": "Аккаунт #1",
+                "items": [{"slug": "cheese_brie_125", "title": "Сыр Бри 125 г", "price": 249.0, "amount": "125 г"}],
+            },
+            headers=self.headers,
+        )
+        self.client.post(
+            "/api/price/record",
+            json={
+                "accountId": "Аккаунт #1",
+                "items": [{"slug": "cheese_brie_125", "title": "Сыр Бри 125 г", "price": 219.0, "amount": "125 г"}],
+            },
+            headers=self.headers,
+        )
+        self.client.post(
+            "/api/price/record",
+            json={
+                "accountId": "Аккаунт #2",
+                "items": [{"slug": "cheese_brie_125", "title": "Сыр Бри 125 г", "price": 229.0, "amount": "125 г"}],
+            },
+            headers=self.headers,
+        )
+
+        r_hist = self.client.get("/api/price/history/cheese_brie_125?days=90", headers=self.headers)
+        self.assertEqual(r_hist.status_code, 200)
+        data = r_hist.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(len(data["points"]), 3)
+        self.assertEqual(data["stats"]["minPrice"], 219.0)
+        self.assertEqual(data["stats"]["maxPrice"], 249.0)
+        self.assertEqual(data["stats"]["lastPrice"], 229.0)
+        self.assertEqual(len(data["dailyAvg"]), 1)
+        self.assertAlmostEqual(data["dailyAvg"][0]["price"], round((249 + 219 + 229) / 3, 2), places=2)
+
+        # Filter by accountId
+        r_acc = self.client.get(
+            "/api/price/history/cheese_brie_125",
+            params={"days": 90, "accountId": "Аккаунт #1"},
+            headers=self.headers,
+        )
+        self.assertEqual(r_acc.status_code, 200)
+        self.assertEqual(len(r_acc.json()["points"]), 2)
+
+    def test_watchlist_toggle_list_and_delete(self):
+        # Add to watchlist
+        r_add = self.client.post(
+            "/api/watchlist/toggle",
+            json={
+                "slug": "avocado_hass_2pcs",
+                "title": "Авокадо Хасс 2 шт",
+                "amount": "2 шт",
+                "price": 299.0,
+                "targetPrice": 250.0,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_add.status_code, 200)
+        self.assertTrue(r_add.json()["watched"])
+        self.assertEqual(r_add.json()["item"]["baselinePrice"], 299.0)
+        self.assertEqual(r_add.json()["item"]["targetPrice"], 250.0)
+
+        # Record a price drop and verify watchlist reflects updated price & diff
+        self.client.post(
+            "/api/price/record",
+            json={
+                "accountId": "Аккаунт #1",
+                "items": [{"slug": "avocado_hass_2pcs", "title": "Авокадо Хасс 2 шт", "price": 239.0}],
+            },
+            headers=self.headers,
+        )
+        r_list = self.client.get("/api/watchlist", headers=self.headers)
+        self.assertEqual(r_list.status_code, 200)
+        self.assertEqual(r_list.json()["count"], 1)
+        w_item = r_list.json()["items"][0]
+        self.assertEqual(w_item["lastPrice"], 239.0)
+        self.assertEqual(w_item["priceDiff"], -60.0)
+
+        # Toggle off
+        r_off = self.client.post(
+            "/api/watchlist/toggle",
+            json={"slug": "avocado_hass_2pcs"},
+            headers=self.headers,
+        )
+        self.assertEqual(r_off.status_code, 200)
+        self.assertFalse(r_off.json()["watched"])
+
+        # Re-add and DELETE
+        self.client.post(
+            "/api/watchlist/toggle",
+            json={"slug": "avocado_hass_2pcs", "title": "Авокадо Хасс 2 шт", "watch": True},
+            headers=self.headers,
+        )
+        r_del = self.client.delete("/api/watchlist/avocado_hass_2pcs", headers=self.headers)
+        self.assertEqual(r_del.status_code, 200)
+        self.assertTrue(r_del.json()["removed"])
+        self.assertEqual(self.client.get("/api/watchlist", headers=self.headers).json()["count"], 0)
 
 if __name__ == "__main__":
     unittest.main()

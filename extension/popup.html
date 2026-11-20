@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.6.0</title>
+  <title>Lavka Quality Shield v2.8.0</title>
   <style>
     body {
       width: 430px;
@@ -530,7 +530,7 @@
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.6.0 Account &amp; Cart</span>
+    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.8.0 Account &amp; Cart</span>
   </div>
 
   <div class="tabs">
@@ -650,9 +650,11 @@
     </div>
 
     <input type="text" class="search-input" id="price-search-input" placeholder="🔍 Поиск товара в базе истории цен...">
-    <div class="filter-row">
+    <div class="filter-row" style="flex-wrap:wrap;gap:4px;">
       <button class="filter-btn active" data-pfilter="all">Все цены</button>
-      <button class="filter-btn" data-pfilter="diff">🕵️ Разные цены / Штраф</button>
+      <button class="filter-btn" data-pfilter="watched">❤️ Отслеживаемые</button>
+      <button class="filter-btn" data-pfilter="diff">📉 Изменялась цена</button>
+      <button type="button" class="filter-btn" id="check-watchlist-now-btn" title="Проверить актуальные цены отслеживаемых товаров" style="margin-left:auto;">🔄 Проверить</button>
     </div>
     <div class="list" id="prices-list" style="max-height:140px;"></div>
   </div>
@@ -677,8 +679,17 @@
         <span><b>Сам прогревать вкладку Gemini</b> при старте браузера</span>
       </label>
       <label class="zero-click-row">
-        <input type="checkbox" id="chk-guest-probe" checked>
-        <span><b>Анонимный зонд без куки</b> (ловить «штраф за лояльность»)</span>
+        <input type="checkbox" id="chk-price-chart-popover">
+        <span><b>График цены в отдельном окне</b> (кнопка «цена» как в Alitools; выкл = встроенный блок)</span>
+      </label>
+      <label class="zero-click-row" style="justify-content:space-between;">
+        <span><b>Фоновая проверка отслеживаемых цен:</b></span>
+        <select id="sel-watchlist-interval" style="padding:2px 6px;border-radius:6px;border:1px solid #86efac;background:#ffffff;font-size:11px;font-weight:600;color:#166534;">
+          <option value="6">Каждые 6 ч</option>
+          <option value="12">Каждые 12 ч</option>
+          <option value="24">Раз в сутки</option>
+          <option value="0">Выкл (вручную)</option>
+        </select>
       </label>
       <div style="display:flex;justify-content:flex-end;margin-top:3px;">
         <button type="button" id="clear-ai-cache-btn" style="border:1px solid #86efac;background:#ffffff;color:#166534;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;">🗑️ Очистить кэш ИИ</button>

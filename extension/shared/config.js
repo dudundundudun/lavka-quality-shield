@@ -6,13 +6,14 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.7.0',
+    VERSION: '2.8.0',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
       FLIGHT_LOG: 'lqs_flight_log_v1',
       AI_CACHE: 'lqs_ai_cache_v1',
       PRICE_DB: 'lqs_price_db_v1',
+      WATCHLIST: 'lqs_watchlist_v1',
       EXT_STORE_DB: 'lqs_ext_store_prices_v1',
       SAVED_CARTS: 'lqs_saved_carts_v1',
       CART_LOCKS: 'lqs_cart_locks_v1',
@@ -42,7 +43,8 @@
       autoOpenDrawerOnAi: true,
       autoWarmupGeminiTab: true,
       lavkaAccountLabel: 'Аккаунт #1 (Основной)',
-      enableGuestPriceProbe: true
+      priceChartWindowMode: false,
+      watchlistCheckIntervalHours: 6
     })
   });
 

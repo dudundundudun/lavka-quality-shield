@@ -1,5 +1,5 @@
 """
-Lavka Quality Shield — Price History & Cart Snapshot Router
+Lavka Quality Shield — Price History, Watchlist & Cart Snapshot Router
 """
 
 import json
@@ -23,7 +23,6 @@ class PriceItemInput(BaseModel):
     price: float
     oldPrice: Optional[float] = None
     amount: Optional[str] = ""
-    guestPrice: Optional[float] = None
     competitorMinPrice: Optional[float] = None
     competitorSummary: Optional[str] = None
     competitorOffers: Optional[List[Dict[str, Any]]] = None
@@ -32,6 +31,15 @@ class PriceItemInput(BaseModel):
 class RecordPricesRequest(BaseModel):
     accountId: str = "Аккаунт #1"
     items: List[PriceItemInput] = Field(default_factory=list, **_ITEMS_MAX_KW)
+
+
+class WatchlistToggleRequest(BaseModel):
+    slug: str
+    title: Optional[str] = ""
+    amount: Optional[str] = ""
+    price: Optional[float] = None
+    targetPrice: Optional[float] = None
+    watch: Optional[bool] = None
 
 
 class CartItemModel(BaseModel):
@@ -48,7 +56,6 @@ class SaveCartSnapshotRequest(BaseModel):
     accountId: str = "Аккаунт #1"
     items: List[CartItemModel] = Field(default_factory=list, **_ITEMS_MAX_KW)
     totalPrice: float = 0.0
-
 
 
 @router.post("/api/price/record", dependencies=[Depends(verify_trusted_extension_request)])
@@ -68,7 +75,6 @@ def record_prices_endpoint(req: RecordPricesRequest):
                 price=item.price,
                 old_price=item.oldPrice,
                 amount=item.amount,
-                guest_price=item.guestPrice,
                 competitor_min=item.competitorMinPrice,
                 competitor_summary=item.competitorSummary,
                 competitor_offers=item.competitorOffers,
@@ -86,6 +92,10 @@ def get_product_price_summary(slug: str, title: Optional[str] = None):
         row = db.find_existing_summary_row_by_slug_or_title(conn, clean_slug, title)
         if not row:
             return {"status": "not_found", "slug": clean_slug}
+        accounts = json.loads(row[11] or "{}")
+        if isinstance(accounts, dict):
+            accounts.pop("Гость (без куки)", None)
+        w_row = db.find_watchlist_row_by_slug_or_title(conn, row[0], row[1])
         return {
             "status": "ok",
             "summary": {
@@ -96,26 +106,48 @@ def get_product_price_summary(slug: str, title: Optional[str] = None):
                 "maxPrice": row[4],
                 "avgPrice": row[5],
                 "lastPrice": row[6],
-                "guestPrice": row[7],
                 "competitorMinPrice": row[8],
                 "competitorSummary": row[9],
                 "competitorOffers": json.loads(row[10] or "[]"),
-                "accounts": json.loads(row[11] or "{}"),
+                "accounts": accounts,
                 "history": json.loads(row[12] or "[]"),
+                "isWatched": bool(w_row),
+                "targetPrice": w_row[4] if w_row else None,
                 "updatedAt": row[13],
             },
         }
+
+
+@router.get("/api/price/history/{slug}", dependencies=[Depends(verify_trusted_extension_request)])
+def get_product_price_history(
+    slug: str,
+    title: Optional[str] = None,
+    days: int = Query(90, ge=0, le=3650),
+    accountId: Optional[str] = None,
+):
+    with db.get_db_connection() as conn:
+        series = db.get_price_history_series(
+            conn=conn,
+            slug=slug,
+            title=title,
+            days=days,
+            account_id=accountId,
+        )
+    return {"status": "ok", **series}
 
 
 @router.get("/api/price/list", dependencies=[Depends(verify_trusted_extension_request)])
 def list_tracked_prices(limit: int = Query(200, ge=1, le=2000)):
     items = []
     with db.get_db_connection() as conn:
+        watched_slugs = {
+            row[0] for row in conn.execute("SELECT slug FROM price_watchlist").fetchall()
+        }
         rows = conn.execute(
             """
             SELECT slug, title, amount, min_price, max_price, avg_price, last_price,
-                   guest_price, competitor_min_price, competitor_summary, competitor_offers_json,
-                   accounts_json, updated_at
+                   competitor_min_price, competitor_summary, competitor_offers_json,
+                   accounts_json, history_json, updated_at
             FROM product_price_summary
             ORDER BY updated_at DESC
             LIMIT ?
@@ -123,7 +155,9 @@ def list_tracked_prices(limit: int = Query(200, ge=1, le=2000)):
             (limit,),
         ).fetchall()
         for r in rows:
-            accounts = json.loads(r[11] or "{}")
+            accounts = json.loads(r[10] or "{}")
+            if isinstance(accounts, dict):
+                accounts.pop("Гость (без куки)", None)
             items.append(
                 {
                     "slug": r[0],
@@ -133,22 +167,67 @@ def list_tracked_prices(limit: int = Query(200, ge=1, le=2000)):
                     "maxPrice": r[4],
                     "avgPrice": r[5],
                     "lastPrice": r[6],
-                    "guestPrice": r[7],
-                    "competitorMinPrice": r[8],
-                    "competitorSummary": r[9],
-                    "competitorOffers": json.loads(r[10] or "[]"),
+                    "competitorMinPrice": r[7],
+                    "competitorSummary": r[8],
+                    "competitorOffers": json.loads(r[9] or "[]"),
                     "accounts": accounts,
+                    "history": json.loads(r[11] or "[]"),
+                    "isWatched": r[0] in watched_slugs,
                     "updatedAt": r[12],
                 }
             )
     return {"status": "ok", "count": len(items), "items": items}
 
 
+@router.get("/api/watchlist", dependencies=[Depends(verify_trusted_extension_request)])
+def list_watchlist_endpoint(limit: int = Query(200, ge=1, le=500)):
+    with db.get_db_connection() as conn:
+        items = db.list_watchlist_items(conn, limit=limit)
+    return {"status": "ok", "count": len(items), "items": items}
+
+
+@router.post("/api/watchlist/toggle", dependencies=[Depends(verify_trusted_extension_request)])
+def toggle_watchlist_endpoint(req: WatchlistToggleRequest):
+    clean_slug = (req.slug or "").strip().lower()
+    if not clean_slug:
+        return {"status": "error", "error": "slug is required"}
+    with db.get_db_connection() as conn:
+        existing = db.find_watchlist_row_by_slug_or_title(conn, clean_slug, req.title)
+        should_watch = (not bool(existing)) if req.watch is None else bool(req.watch)
+        if should_watch:
+            item = db.upsert_watchlist_item(
+                conn=conn,
+                slug=clean_slug,
+                title=req.title or "",
+                amount=req.amount or "",
+                current_price=req.price,
+                target_price=req.targetPrice,
+            )
+            conn.commit()
+            db.log_event("WATCHLIST", f"Added '{item['title']}' ({item['slug']}) to watchlist")
+            return {"status": "ok", "watched": True, "item": item}
+        else:
+            removed = db.delete_watchlist_item(conn, clean_slug, req.title)
+            conn.commit()
+            db.log_event("WATCHLIST", f"Removed '{clean_slug}' from watchlist")
+            return {"status": "ok", "watched": False, "removed": removed, "slug": clean_slug}
+
+
+@router.delete("/api/watchlist/{slug}", dependencies=[Depends(verify_trusted_extension_request)])
+def delete_watchlist_endpoint(slug: str):
+    clean_slug = slug.strip().lower()
+    with db.get_db_connection() as conn:
+        removed = db.delete_watchlist_item(conn, clean_slug)
+        conn.commit()
+    db.log_event("WATCHLIST", f"Deleted '{clean_slug}' from watchlist")
+    return {"status": "ok", "removed": removed, "slug": clean_slug}
+
+
 @router.post("/api/cart/save", dependencies=[Depends(verify_trusted_extension_request)])
 def save_cart_snapshot_endpoint(req: SaveCartSnapshotRequest):
     now_iso = datetime.now(timezone.utc).isoformat()
     acc = (req.accountId or "Аккаунт #1").strip()
-    items_list = [i.model_dump() if hasattr(i, 'model_dump') else i.dict() for i in req.items]
+    items_list = [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in req.items]
     calc_total = round(sum((i.price or 0) * (i.qty or 1) for i in req.items), 2)
     final_total = req.totalPrice if req.totalPrice > 0 else calc_total
 
@@ -196,13 +275,15 @@ def get_latest_cart_snapshot():
                 conn, str(it.get("slug", "")).lower(), it.get("title")
             )
             if s_row:
+                accounts = json.loads(s_row[11] or "{}")
+                if isinstance(accounts, dict):
+                    accounts.pop("Гость (без куки)", None)
                 it["minPrice"] = s_row[3]
                 it["avgPrice"] = s_row[5]
-                it["guestPrice"] = s_row[7]
                 it["competitorMinPrice"] = s_row[8]
                 it["competitorSummary"] = s_row[9]
                 it["competitorOffers"] = json.loads(s_row[10] or "[]")
-                it["accounts"] = json.loads(s_row[11] or "{}")
+                it["accounts"] = accounts
 
         carts_by_account = [
             {
@@ -225,4 +306,3 @@ def get_latest_cart_snapshot():
             },
             "cartsByAccount": carts_by_account,
         }
-

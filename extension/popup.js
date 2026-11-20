@@ -17,6 +17,7 @@ async function getPopupBackendHeaders() {
   return headers;
 }
 const PRICE_DB_KEY = STORAGE_KEYS.PRICE_DB;
+const WATCHLIST_KEY = STORAGE_KEYS.WATCHLIST;
 
 const DEFAULT_SETTINGS = { ...globalThis.LQS_CONFIG.DEFAULT_SETTINGS };
 
@@ -71,7 +72,7 @@ function loadReviews() {
 
       div.innerHTML = `
         <div class="item-header">
-          <a href="https://lavka.yandex.ru/good/${safeSlug}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>
+          <a href="https://lavka.yandex.ru/good/${safeSlug}" target="_blank" rel="noopener noreferrer">${isWatched ? '❤️ ' : ''}${safeTitle}</a>
           <span class="item-right">
             <span>${escapeHtml(badge)}</span>
             <button type="button" class="item-del-btn" data-slug="${escapeHtml(item.slug || '')}" title="Удалить запись">×</button>
@@ -401,7 +402,6 @@ document.getElementById('copy-pass-btn').addEventListener('click', async () => {
 function hasPriceDiscrepancy(entry) {
   if (!entry) return false;
   if (entry.minPrice && entry.maxPrice && entry.maxPrice - entry.minPrice >= 3) return true;
-  if (entry.guestPrice && entry.lastPrice && Math.abs(entry.lastPrice - entry.guestPrice) >= 3) return true;
   return false;
 }
 
@@ -427,8 +427,9 @@ function loadPricesAndCartTab() {
   });
 
   // 2. Загружаем базу цен (из локального хранилища + синхронизируем с :8765 если запущен)
-  chrome.storage.local.get([PRICE_DB_KEY, SETTINGS_KEY], async (res) => {
+  chrome.storage.local.get([PRICE_DB_KEY, WATCHLIST_KEY, SETTINGS_KEY], async (res) => {
     const localDb = { ...(res[PRICE_DB_KEY] || {}) };
+    const watchlistMap = { ...(res[WATCHLIST_KEY] || {}) };
     const cfg = { ...DEFAULT_SETTINGS, ...(res[SETTINGS_KEY] || {}) };
 
     try {
@@ -456,6 +457,8 @@ function loadPricesAndCartTab() {
 
     const q = priceSearchQuery.trim().toLowerCase();
     const filtered = allItems.filter((item) => {
+      const isWatched = Boolean(item.isWatched || watchlistMap[item.slug]);
+      if (currentPriceFilter === 'watched' && !isWatched) return false;
       if (currentPriceFilter === 'diff' && !hasPriceDiscrepancy(item)) return false;
       if (q) {
         const hay = `${item.title || ''} ${item.slug || ''} ${item.competitorSummary || ''}`.toLowerCase();
@@ -474,7 +477,8 @@ function loadPricesAndCartTab() {
       div.className = 'item';
       const safeSlug = encodeURIComponent(item.slug || '');
       const safeTitle = escapeHtml(item.title || item.slug);
-      const accEntries = item.accounts ? Object.entries(item.accounts) : [];
+      const isWatched = Boolean(item.isWatched || watchlistMap[item.slug]);
+      const accEntries = item.accounts ? Object.entries(item.accounts).filter(([k]) => k !== 'Гость (без куки)') : [];
       const accSummary = accEntries.map(([k, v]) => `${escapeHtml(k)}: <b>${v.price} ₽</b>`).join(' | ');
       const spread = (item.maxPrice && item.minPrice && item.maxPrice > item.minPrice)
         ? `<span style="color:#b91c1c;font-weight:700;">Δ ${Math.round(item.maxPrice - item.minPrice)} ₽</span>`
@@ -487,7 +491,6 @@ function loadPricesAndCartTab() {
         </div>
         <div class="item-note">
           Мин: <b>${item.minPrice ?? '?'} ₽</b> • Макс: <b>${item.maxPrice ?? '?'} ₽</b>
-          ${item.guestPrice ? ` • Без куки: <b>${item.guestPrice} ₽</b>` : ''}
           ${accSummary ? `<br>${accSummary}` : ''}
           ${item.competitorSummary ? `<br>🏪 Сети: ${escapeHtml(item.competitorSummary)}` : ''}
         </div>
@@ -563,7 +566,6 @@ document.getElementById('compare-cart-btn').addEventListener('click', () => {
         return `<div style="border-bottom:1px solid #f0eee9;padding:3px 0;">
           <b>${escapeHtml(it.title.slice(0, 32))}</b> (${it.qty} шт):
           было ${it.sourcePrice}₽ -> тут <b>${it.currentPrice}₽</b> (${dStr})
-          ${it.guestPrice ? ` | Гость: ${it.guestPrice}₽` : ''}
         </div>`;
       })
       .join('');
@@ -571,7 +573,7 @@ document.getElementById('compare-cart-btn').addEventListener('click', () => {
     out.innerHTML = `
       <div style="margin-bottom:5px;">
         • <b>${escapeHtml(resp.sourceAccount)}:</b> ${resp.sourceTotal} ₽<br>
-        • <b>${escapeHtml(resp.currentAccount)}:</b> ${resp.currentTotal} ₽ (Без куки: ${resp.guestTotal} ₽)<br>
+        • <b>${escapeHtml(resp.currentAccount)}:</b> ${resp.currentTotal} ₽<br>
         • Итог: ${diffBadge}
       </div>
       ${rowsHtml}
@@ -644,7 +646,10 @@ function loadSettings() {
     document.getElementById('chk-auto-run-ai').checked = cfg.autoRunAiOnProductPage !== false;
     document.getElementById('chk-auto-open-drawer').checked = cfg.autoOpenDrawerOnAi !== false;
     document.getElementById('chk-auto-warmup').checked = cfg.autoWarmupGeminiTab !== false;
-    document.getElementById('chk-guest-probe').checked = cfg.enableGuestPriceProbe !== false;
+    const popChk = document.getElementById('chk-price-chart-popover');
+    if (popChk) popChk.checked = Boolean(cfg.priceChartWindowMode);
+    const wlSel = document.getElementById('sel-watchlist-interval');
+    if (wlSel) wlSel.value = String(cfg.watchlistCheckIntervalHours ?? 6);
     if (cfg.lavkaAccountLabel) {
       const sel = document.getElementById('lavka-account-select');
       if (sel && Array.from(sel.options).some((o) => o.value === cfg.lavkaAccountLabel)) {
@@ -654,7 +659,7 @@ function loadSettings() {
   });
 }
 
-['chk-auto-run-ai', 'chk-auto-open-drawer', 'chk-auto-warmup', 'chk-guest-probe'].forEach((id) => {
+['chk-auto-run-ai', 'chk-auto-open-drawer', 'chk-auto-warmup', 'chk-price-chart-popover', 'sel-watchlist-interval'].forEach((id) => {
   const el = document.getElementById(id);
   if (el) {
     el.addEventListener('change', () => {
@@ -662,11 +667,29 @@ function loadSettings() {
         autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
         autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
         autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked,
-        enableGuestPriceProbe: document.getElementById('chk-guest-probe').checked
+        priceChartWindowMode: Boolean(document.getElementById('chk-price-chart-popover')?.checked),
+        watchlistCheckIntervalHours: Number(document.getElementById('sel-watchlist-interval')?.value ?? 6)
       });
     });
   }
 });
+
+const checkWatchlistNowBtn = document.getElementById('check-watchlist-now-btn');
+if (checkWatchlistNowBtn) {
+  checkWatchlistNowBtn.addEventListener('click', () => {
+    checkWatchlistNowBtn.disabled = true;
+    checkWatchlistNowBtn.textContent = '⏳...';
+    chrome.runtime.sendMessage({ type: 'LQS_CHECK_WATCHLIST_NOW', maxItems: 15 }, (resp) => {
+      checkWatchlistNowBtn.disabled = false;
+      const upd = resp && resp.ok ? resp.updated : 0;
+      checkWatchlistNowBtn.textContent = `✅ ${upd}`;
+      loadPricesAndCartTab();
+      setTimeout(() => {
+        checkWatchlistNowBtn.textContent = '🔄 Проверить';
+      }, 2200);
+    });
+  });
+}
 
 document.getElementById('clear-ai-cache-btn').addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'LQS_CLEAR_AI_CACHE' }, () => {
@@ -941,7 +964,8 @@ document.getElementById('save-ai-btn').addEventListener('click', () => {
     autoRunAiOnProductPage: document.getElementById('chk-auto-run-ai').checked,
     autoOpenDrawerOnAi: document.getElementById('chk-auto-open-drawer').checked,
     autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked,
-    enableGuestPriceProbe: document.getElementById('chk-guest-probe').checked,
+    priceChartWindowMode: Boolean(document.getElementById('chk-price-chart-popover')?.checked),
+    watchlistCheckIntervalHours: Number(document.getElementById('sel-watchlist-interval')?.value ?? 6),
     lavkaAccountLabel: document.getElementById('lavka-account-select').value
   };
   const tokEl = document.getElementById('inp-backend-token');
