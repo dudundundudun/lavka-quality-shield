@@ -306,3 +306,51 @@ def get_latest_cart_snapshot():
             },
             "cartsByAccount": carts_by_account,
         }
+
+
+class ProductStoreLinkInput(BaseModel):
+    storeId: str
+    storeName: Optional[str] = ""
+    url: str
+    title: Optional[str] = ""
+    sourceRetailer: Optional[str] = None
+    lastPrice: Optional[float] = None
+    lastCheckedAt: Optional[str] = None
+
+
+class SaveProductStoreLinksRequest(BaseModel):
+    slug: str
+    links: List[ProductStoreLinkInput] = Field(default_factory=list)
+
+
+@router.get("/api/price/links/{slug}", dependencies=[Depends(verify_trusted_extension_request)])
+def get_product_links_endpoint(slug: str):
+    clean_slug = slug.strip().lower()
+    with db.get_db_connection() as conn:
+        links = db.get_product_store_links(conn, clean_slug)
+    return {"status": "ok", "slug": clean_slug, "links": links}
+
+
+@router.post("/api/price/links", dependencies=[Depends(verify_trusted_extension_request)])
+def save_product_links_endpoint(req: SaveProductStoreLinksRequest):
+    clean_slug = req.slug.strip().lower()
+    raw_links = [
+        it.model_dump() if hasattr(it, "model_dump") else it.dict()
+        for it in (req.links or [])
+    ]
+    with db.get_db_connection() as conn:
+        saved = db.upsert_product_store_links(conn, clean_slug, raw_links)
+        conn.commit()
+        links = db.get_product_store_links(conn, clean_slug)
+    db.log_event("PRICE_DB", f"Saved {saved} direct store link(s) for '{clean_slug}'")
+    return {"status": "ok", "slug": clean_slug, "saved": saved, "links": links}
+
+
+@router.delete("/api/price/links/{slug}/{store_id}", dependencies=[Depends(verify_trusted_extension_request)])
+def delete_product_link_endpoint(slug: str, store_id: str):
+    clean_slug = slug.strip().lower()
+    clean_store = store_id.strip().lower()
+    with db.get_db_connection() as conn:
+        deleted = db.delete_product_store_link(conn, clean_slug, clean_store)
+        conn.commit()
+    return {"status": "ok", "slug": clean_slug, "storeId": clean_store, "deleted": deleted}

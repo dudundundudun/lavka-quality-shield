@@ -47,6 +47,7 @@
   const userManualDrawerStateBySlug = new Map();
   const autoAiTriggeredSlugs = new Set();
   const priceIntelRequestedSlugs = new Set();
+  const autoRadarTriggeredSlugs = new Set();
   const lastAiResultBySlug = new Map();
   const priceSummaryBySlug = new Map();
   let autoAiDebounceTimer = null;
@@ -193,23 +194,7 @@
     return buildFullProductSearchQuery(bestTitle, '', amount);
   }
 
-  function extractVerdictBadgeFromText(verdictText) {
-    if (!verdictText) return null;
-    const t = String(verdictText);
-    if (t.includes('Отличный выбор') || t.includes('✅')) {
-      return { cls: 'verdict-good', text: '🤖 ✅ Стоит брать', shortCatalog: '🤖✅' };
-    }
-    if (t.includes('Хороший вариант') || t.includes('👍')) {
-      return { cls: 'verdict-ok', text: '🤖 👍 Хороший', shortCatalog: '🤖👍' };
-    }
-    if (t.includes('Не рекомендую') || t.includes('❌')) {
-      return { cls: 'verdict-bad', text: '🤖 ❌ Не брать', shortCatalog: '🤖❌' };
-    }
-    if (t.includes('На любителя') || t.includes('⚠️')) {
-      return { cls: 'verdict-warn', text: '🤖 ⚠️ На любителя', shortCatalog: '🤖⚠️' };
-    }
-    return { cls: 'verdict-ok', text: '🤖 ИИ-вердикт готов', shortCatalog: '🤖' };
-  }
+  const { extractVerdictBadgeFromText } = globalThis.LQS_VERDICT_BADGE;
 
   function detectCurrentAccountLabel() {
     try {
@@ -237,6 +222,9 @@
   }
 
   if (globalThis.LQS_STORE_HARVESTER && globalThis.LQS_STORE_HARVESTER.initStoreHarvesterIfNeeded()) {
+    if (globalThis.LQS_STORE_ASSISTANT_UI && typeof globalThis.LQS_STORE_ASSISTANT_UI.initStoreAssistantIfNeeded === 'function') {
+      globalThis.LQS_STORE_ASSISTANT_UI.initStoreAssistantIfNeeded();
+    }
     return;
   }
 
@@ -746,304 +734,20 @@
   });
 
   // ==========================================================================
-  // ПАРСЕР СТРАНИЦЫ ТОВАРА И КАЛЬКУЛЯТОР КБЖУ / ЦЕНЫ ЗА КГ
+  // ПАРСЕР СТРАНИЦЫ ТОВАРА И КАЛЬКУЛЯТОР КБЖУ (вынесено в content/product-parser.js)
   // ==========================================================================
   function extractProductPageMetadata() {
-    const mainPage = document.querySelector('main[data-testid="good-page-desktop"]');
-    const titleEl = (mainPage && mainPage.querySelector('h1[data-testid="product-title"]')) ||
-                    document.querySelector('h1[data-testid="product-title"]');
-    const amountEl = (mainPage && mainPage.querySelector('span[data-testid="product-amount"]')) ||
-                     document.querySelector('span[data-testid="product-amount"]');
-    const priceEl = (mainPage && mainPage.querySelector('span[data-testid="price-text"]')) ||
-                    document.querySelector('span[data-testid="price-text"]');
-    const oldPriceEl = (mainPage && mainPage.querySelector('span[data-testid="price-old-text"]')) ||
-                       document.querySelector('span[data-testid="price-old-text"]');
-    const ingredientsEl = document.querySelector('section[data-testid="ingredients-block"]');
-    const traitsEl = document.querySelector('section[data-testid="traits-block"]');
-    const snippetImg = (mainPage && mainPage.querySelector('img[data-testid="snippet-image"]')) ||
-                       document.querySelector('img[data-testid="snippet-image"]');
-
-    let ldData = {};
-    document.querySelectorAll('script[data-testid="ldjson"], script[type="application/ld+json"]').forEach((el) => {
-      try {
-        const parsed = JSON.parse(el.textContent);
-        const graph = parsed['@graph'] || [parsed];
-        const prod = graph.find((item) => item && item['@type'] === 'Product');
-        if (prod) {
-          ldData = {
-            productId: prod['@id'] || null,
-            brand: prod.brand ? (typeof prod.brand === 'string' ? prod.brand : prod.brand.name) : null,
-            description: prod.description || ''
-          };
-        }
-      } catch {
-        // ignore
-      }
+    return globalThis.LQS_PRODUCT_PARSER.extractProductPageMetadata({
+      normalizeTitle,
+      extractImageKey,
+      recorder: LQS_RECORDER
     });
-
-    const rawTitle = titleEl ? titleEl.textContent : document.title.split('—')[0];
-    const title = rawTitle ? rawTitle.replace(/[\u00ad\u200b]/g, '').trim() : '';
-    const cleanTitle = normalizeTitle(title);
-    const amountText = amountEl ? amountEl.textContent.replace(/[\u00ad\u200b\u00a0]/g, ' ').trim() : '';
-    const priceText = priceEl ? priceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.') : '';
-    const oldPriceText = oldPriceEl ? oldPriceEl.textContent.replace(/[^\d.,]/g, '').replace(',', '.') : '';
-    const ingredientsText = ingredientsEl ? ingredientsEl.innerText.trim() : '';
-
-    const traitsPairs = [];
-    if (traitsEl) {
-      const children = traitsEl.querySelectorAll('li, div > div, dl > div');
-      children.forEach((node) => {
-        const t = (node.innerText || '').replace(/\s+/g, ' ').trim();
-        if (t && t.length < 45 && /\d/.test(t)) {
-          traitsPairs.push(t);
-        }
-      });
-    }
-    const traitsText = traitsPairs.length > 0
-      ? Array.from(new Set(traitsPairs)).join(' | ')
-      : (traitsEl ? traitsEl.innerText.replace(/\n+/g, ' | ').trim() : '');
-
-    const imageKey = snippetImg ? extractImageKey(snippetImg.getAttribute('src')) : null;
-
-    const meta = {
-      title,
-      cleanTitle,
-      amountText,
-      price: parseFloat(priceText) || null,
-      oldPrice: parseFloat(oldPriceText) || null,
-      ingredientsText,
-      traitsText,
-      imageKey,
-      ...ldData
-    };
-
-    const parserStatus = (meta.title && meta.price) ? 'OK' : 'WARN';
-    LQS_RECORDER.updateModule(
-      'parser',
-      parserStatus,
-      `Товар: "${meta.title.slice(0, 32)}", цена=${meta.price ?? '?'}₽, вес="${meta.amountText || '?'}"`,
-      meta
-    );
-
-    return meta;
-  }
-
-  function extractNutrientValue(traitsText, keywordRegex, unitHintRegex) {
-    if (!traitsText) return null;
-    const segments = traitsText.split(/[|\n;]+/);
-    for (const seg of segments) {
-      if (keywordRegex.test(seg)) {
-        const m = seg.match(/([\d]+(?:[.,]\d+)?)/);
-        if (m) {
-          const val = parseFloat(m[1].replace(',', '.'));
-          if (!isNaN(val)) return val;
-        }
-      }
-    }
-    const directAfter = new RegExp(keywordRegex.source + '[^\\d|\\n]{0,12}([\\d]+(?:[.,]\\d+)?)', 'i');
-    const m1 = traitsText.match(directAfter);
-    if (m1) return parseFloat(m1[1].replace(',', '.'));
-
-    const directBefore = new RegExp('([\\d]+(?:[.,]\\d+)?)\\s*' + unitHintRegex.source + '\\s*' + keywordRegex.source, 'i');
-    const m2 = traitsText.match(directBefore);
-    if (m2) return parseFloat(m2[1].replace(',', '.'));
-
-    return null;
-  }
-
-  function normalizePieceUnit(rawUnit) {
-    const u = String(rawUnit || '').toLowerCase();
-    if (u.startsWith('пакет') || u.startsWith('пак') || u.startsWith('саше')) return 'пак';
-    if (u.startsWith('капс')) return 'капс';
-    if (u.startsWith('табл')) return 'табл';
-    if (u.startsWith('рул')) return 'рул';
-    if (u.startsWith('лист')) return 'лист';
-    if (u.startsWith('порц')) return 'порц';
-    if (u.startsWith('пар')) return 'пар';
-    if (u.startsWith('уп')) return 'уп';
-    return 'шт';
-  }
-
-  function parseWeightAndPiecesFromString(rawStr) {
-    if (globalThis.LQS_PRICE_PARSER && typeof globalThis.LQS_PRICE_PARSER.parseWeightAndPieces === 'function') {
-      return globalThis.LQS_PRICE_PARSER.parseWeightAndPieces(rawStr);
-    }
-    if (!rawStr) return { weightGrams: null, unitLabel: 'кг', piecesCount: null, pieceUnitLabel: 'шт' };
-    const text = String(rawStr).replace(/[\u00ad\u200b\u00a0]/g, ' ').trim();
-
-    let weightGrams = null;
-    let unitLabel = 'кг';
-    let piecesCount = null;
-    let pieceUnitLabel = 'шт';
-
-    const multiMatch =
-      text.match(/(\d+)\s*[×xх*]\s*([\d.,]+)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i) ||
-      text.match(/(\d+)\s*(шт|штук[а-я]*|пакет[а-я]*|пак|саше|капс[а-я]*|порц[а-я]*|уп[а-я]*)\.?\s*(?:по|[×xх*]|\s)\s*([\d.,]+)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i);
-
-    if (multiMatch) {
-      if (multiMatch.length === 4) {
-        const count = parseInt(multiMatch[1], 10) || 1;
-        const val = parseFloat(multiMatch[2].replace(',', '.'));
-        const unit = multiMatch[3].toLowerCase();
-        unitLabel = (unit.startsWith('мл') || unit.startsWith('л')) ? 'л' : 'кг';
-        if (val > 0) {
-          const singleGrams = (unit.startsWith('кг') || unit.startsWith('л')) ? val * 1000 : val;
-          weightGrams = count * singleGrams;
-          piecesCount = count;
-        }
-      } else if (multiMatch.length >= 5) {
-        const count = parseInt(multiMatch[1], 10) || 1;
-        pieceUnitLabel = normalizePieceUnit(multiMatch[2]);
-        const val = parseFloat(multiMatch[3].replace(',', '.'));
-        const unit = multiMatch[4].toLowerCase();
-        unitLabel = (unit.startsWith('мл') || unit.startsWith('л')) ? 'л' : 'кг';
-        if (val > 0) {
-          const singleGrams = (unit.startsWith('кг') || unit.startsWith('л')) ? val * 1000 : val;
-          weightGrams = count * singleGrams;
-          piecesCount = count;
-        }
-      }
-    }
-
-    if (!weightGrams) {
-      const singleMatch = text.match(/(?:^|[^\d.,])([\d]+(?:[.,]\d+)?)\s*(г|гр|грамм[а-я]*|кг|мл|л|литр[а-я]*)(?![а-яёa-z])/i);
-      if (singleMatch) {
-        const val = parseFloat(singleMatch[1].replace(',', '.'));
-        const unit = singleMatch[2].toLowerCase();
-        unitLabel = (unit.startsWith('мл') || unit.startsWith('л')) ? 'л' : 'кг';
-        if (val > 0) {
-          weightGrams = (unit.startsWith('кг') || unit.startsWith('л')) ? val * 1000 : val;
-        }
-      }
-    }
-
-    const pieceMatch = text.match(/(?:^|[^\d.,])(\d+)\s*(шт|штук[а-я]*|пакет[а-я]*|пак|саше|капс[а-я]*|табл[а-я]*|рулон[а-я]*|лист[а-я]*|порц[а-я]*|пар[а-я]*|уп[а-я]*)(?![а-яёa-z])/i);
-    if (pieceMatch) {
-      const cnt = parseInt(pieceMatch[1], 10);
-      if (cnt > 0) {
-        piecesCount = cnt;
-        pieceUnitLabel = normalizePieceUnit(pieceMatch[2]);
-      }
-    }
-
-    return { weightGrams, unitLabel, piecesCount, pieceUnitLabel };
   }
 
   function analyzeProductQuality(meta) {
-    const flags = [];
-    let pricePerKg = null;
-    let weightGrams = null;
-    let unitLabel = 'кг';
-    let piecesCount = null;
-    let pieceUnitLabel = 'шт';
-    let pricePerPiece = null;
-    let proteinPer100g = null;
-    let fatPer100g = null;
-    let carbsPer100g = null;
-    let kcalPer100g = null;
-    let pricePer100gProtein = null;
-
-    const fromAmount = parseWeightAndPiecesFromString(meta.amountText);
-    const fromTitle = parseWeightAndPiecesFromString(meta.title);
-
-    if (fromAmount.weightGrams) {
-      weightGrams = fromAmount.weightGrams;
-      unitLabel = fromAmount.unitLabel;
-    } else if (fromTitle.weightGrams) {
-      weightGrams = fromTitle.weightGrams;
-      unitLabel = fromTitle.unitLabel;
-    }
-
-    if (fromAmount.piecesCount) {
-      piecesCount = fromAmount.piecesCount;
-      pieceUnitLabel = fromAmount.pieceUnitLabel;
-    } else if (fromTitle.piecesCount) {
-      piecesCount = fromTitle.piecesCount;
-      pieceUnitLabel = fromTitle.pieceUnitLabel;
-    }
-
-    if (weightGrams && weightGrams > 0 && meta.price) {
-      pricePerKg = Math.round((meta.price / weightGrams) * 1000);
-    }
-
-    if (piecesCount && piecesCount > 0 && meta.price) {
-      pricePerPiece = Math.round(meta.price / piecesCount);
-    }
-
-    if (meta.traitsText) {
-      proteinPer100g = extractNutrientValue(meta.traitsText, /белк[иао]?/i, /(?:г|гр)\.?/);
-      fatPer100g = extractNutrientValue(meta.traitsText, /жир[ыаов]?/i, /(?:г|гр)\.?/);
-      carbsPer100g = extractNutrientValue(meta.traitsText, /углевод[ыаов]?/i, /(?:г|гр)\.?/);
-      kcalPer100g = extractNutrientValue(meta.traitsText, /(?:ккал|калор)/i, /(?:ккал)?/);
-
-      if (proteinPer100g !== null && proteinPer100g >= 3 && proteinPer100g <= 100 && pricePerKg) {
-        const totalProteinInKg = proteinPer100g * 10;
-        pricePer100gProtein = Math.round((pricePerKg / totalProteinInKg) * 100);
-      }
-
-      if (carbsPer100g !== null && !isNaN(carbsPer100g)) {
-        if (carbsPer100g <= 5) {
-          flags.push({ type: 'good', text: `🥑 Кето (${carbsPer100g}г угл)` });
-        } else if (carbsPer100g >= 22) {
-          flags.push({ type: 'bad', text: `🍞 ${carbsPer100g}г угл` });
-        }
-      }
-
-      if (proteinPer100g !== null && proteinPer100g >= 15) {
-        flags.push({ type: 'good', text: `💪 Много белка (${proteinPer100g}г)` });
-      }
-    }
-
-    const ingLower = (meta.ingredientsText || '').toLowerCase();
-    if (ingLower) {
-      const badMatchers = [
-        { regex: /механической обвалки|ммо/i, label: '⚠️ ММО' },
-        { regex: /мальтодекстрин|патока|глюкозно-фруктозный/i, label: '🍬 Сахар/патока' },
-        { regex: /заменитель молочного жира|пальмовое масло/i, label: '🛢️ ЗМЖ/пальма' },
-        { regex: /соевый белок|соевая мука|клетчатка пшеничная/i, label: '🌾 Соя/клетчатка' },
-        { regex: /глутамат|е621|ароматизатор/i, label: '🧪 Ароматизатор' },
-        { regex: /крахмал/i, label: '🥔 Крахмал' }
-      ];
-
-      badMatchers.forEach((item) => {
-        if (item.regex.test(ingLower)) {
-          flags.push({ type: 'bad', text: item.label });
-        }
-      });
-
-      const hasBad = flags.some((f) => f.type === 'bad');
-      if (!hasBad && ingLower.length > 10) {
-        flags.push({ type: 'good', text: '✅ Чистый состав' });
-      }
-    }
-
-    const result = {
-      weightGrams,
-      pricePerKg,
-      unitLabel,
-      piecesCount,
-      pieceUnitLabel,
-      pricePerPiece,
-      proteinPer100g,
-      fatPer100g,
-      carbsPer100g,
-      kcalPer100g,
-      pricePer100gProtein,
-      flags: flags.slice(0, 6)
-    };
-
-    const unitSummary = pricePerKg
-      ? `Цена/${unitLabel}: ~${pricePerKg}₽`
-      : (pricePerPiece && piecesCount > 1 ? `Цена/${pieceUnitLabel}: ~${pricePerPiece}₽ (${piecesCount} ${pieceUnitLabel})` : 'Поштучно/без веса');
-
-    LQS_RECORDER.updateModule(
-      'calculator',
-      (pricePerKg || pricePerPiece) ? 'OK' : 'WARN',
-      `${unitSummary}, Белок/100г: ${proteinPer100g ?? '—'}г (${pricePer100gProtein ? pricePer100gProtein + '₽/100г' : '—'}), Флагов: ${result.flags.length}`,
-      result
-    );
-
-    return result;
+    return globalThis.LQS_PRODUCT_PARSER.analyzeProductQuality(meta, {
+      recorder: LQS_RECORDER
+    });
   }
 
   function buildPriceShieldAlertPill(slug, currentPrice, title = '', imageKey = null) {
@@ -1163,6 +867,7 @@
         oldPrice: offer.oldPrice || null,
         url: offer.url || null,
         offerTitle: offer.title || '',
+        sourceRetailer: offer.sourceRetailer || null,
         isCompetitor: true,
         badge: diff > 2
           ? `✅ Выгоднее на -${diff} ₽`
@@ -1195,9 +900,11 @@
                   ? ` <s style="color:#94a3b8;font-size:10.5px;">${row.oldPrice} ₽</s>`
                   : '';
                 const safeRowUrl = safeHttpUrl(row.url);
+                const retailerTooltipSuffix = row.sourceRetailer ? ` (через Купер — ${row.sourceRetailer})` : '';
+                const rowTooltip = `${row.offerTitle || row.source}${retailerTooltipSuffix}`;
                 const nameHtml = safeRowUrl
-                  ? `<a href="${escapeHtml(safeRowUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;font-weight:700;text-decoration:underline;" title="${escapeHtml(row.offerTitle || row.source)}">${escapeHtml(row.source)} ↗</a>`
-                  : `<span style="font-weight:600;">${escapeHtml(row.source)}</span>`;
+                  ? `<a href="${escapeHtml(safeRowUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;font-weight:700;text-decoration:underline;" title="${escapeHtml(rowTooltip)}">${escapeHtml(row.source)} ↗</a>`
+                  : `<span style="font-weight:600;" title="${escapeHtml(rowTooltip)}">${escapeHtml(row.source)}</span>`;
                 return `
                   <div class="lqs-price-matrix-row ${isBest ? 'is-best-price' : ''}">
                     <div class="lqs-price-matrix-cell-name">
@@ -1240,7 +947,8 @@
               const hrefUrl = safeOfferUrl || s.url;
               const pillCls = offerPrice ? (isCheaper ? 'lqs-store-link has-price is-cheaper' : 'lqs-store-link has-price') : 'lqs-store-link is-search';
               const priceSuffix = offerPrice ? ` <span class="lqs-store-pill-price">${offerPrice}₽</span>` : '';
-              return `<a href="${escapeHtml(hrefUrl)}" target="_blank" rel="noopener noreferrer" class="${pillCls}" title="[${escapeHtml(s.category || 'Магазин')}] ${offerPrice ? `Найдена цена ${offerPrice} ₽ — ` : ''}Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)}${priceSuffix} ↗</a>`;
+              const kuperRetailerNote = matchedOffer && matchedOffer.sourceRetailer ? ` (витрина: ${matchedOffer.sourceRetailer})` : '';
+              return `<a href="${escapeHtml(hrefUrl)}" target="_blank" rel="noopener noreferrer" class="${pillCls}" title="[${escapeHtml(s.category || 'Магазин')}] ${offerPrice ? `Найдена цена ${offerPrice} ₽${escapeHtml(kuperRetailerNote)} — ` : ''}Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)}${priceSuffix} ↗</a>`;
             })
             .join('')}
         </div>`
@@ -1314,7 +1022,8 @@
     } else if (cachedAi && cachedAi.verdict) {
       const vBadge = extractVerdictBadgeFromText(cachedAi.verdict);
       if (vBadge) {
-        aiVerdictPill = `<span class="lqs-metric-pill ${vBadge.cls}" title="Вердикт ИИ-ревизора">${escapeHtml(vBadge.text)}</span>`;
+        const badgeTitle = vBadge.title || 'Вердикт ИИ-ревизора';
+        aiVerdictPill = `<span class="lqs-metric-pill ${vBadge.cls}" title="${escapeHtml(badgeTitle)}">${escapeHtml(vBadge.text)}</span>`;
       }
     } else if (paidInfo.isPaid) {
       aiVerdictPill = `<button type="button" class="lqs-metric-pill lqs-paid-ai-btn" data-action="run-paid-ai" title="Автозапуск отключён для защиты баланса — нажмите для разбора">🤖 Разобрать через ${escapeHtml(paidInfo.shortName)}</button>`;
@@ -1388,7 +1097,9 @@
               brand: latestMeta ? latestMeta.brand : '',
               amount: latestMeta ? latestMeta.amountText : '',
               price: latestMeta ? latestMeta.price : null,
-              imageKey: latestMeta ? latestMeta.imageKey : null
+              imageKey: latestMeta ? latestMeta.imageKey : null,
+              isAuto: false,
+              forceRefresh: true
             }
           },
           (resp) => {
@@ -1404,20 +1115,7 @@
             const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(targetSlug)}"]`) || panel;
             if (activePanel) {
               syncExistingPanelUI(activePanel, currentReviewCache, extractProductPageMetadata() || latestMeta);
-              const rb = activePanel.querySelector('#lqs-price-radar-bar');
-              if (rb) {
-                let note = rb.querySelector('.lqs-scan-status-note');
-                if (!note) {
-                  note = document.createElement('div');
-                  note.className = 'lqs-scan-status-note';
-                  rb.prepend(note);
-                }
-                const checkedList = Array.isArray(resp.storesChecked) ? resp.storesChecked.join(', ') : 'сети';
-                note.textContent = resp.matchedCount > 0
-                  ? `✅ Проверено (${checkedList}): найдено совпадений — ${resp.matchedCount}`
-                  : `ℹ️ Проверено (${checkedList}), просмотрено ${resp.harvestedCount || 0} карточек — точных совпадений по весу не нашлось`;
-                setTimeout(() => { if (note && note.parentElement) note.remove(); }, 6000);
-              }
+              showRadarDiagnosticNote(activePanel, resp, false);
             }
           }
         );
@@ -1594,6 +1292,88 @@
     }
   }
 
+  function showRadarDiagnosticNote(activePanel, resp, isAuto = false) {
+    if (!activePanel || !resp) return;
+    const rb = activePanel.querySelector('#lqs-price-radar-bar');
+    if (!rb) return;
+    const diags = Array.isArray(resp.storeDiagnostics) ? resp.storeDiagnostics : [];
+    const needAddr = diags.filter((d) => d && d.reason === 'needs_address').map((d) => d.store);
+    const captchas = diags.filter((d) => d && d.reason === 'captcha').map((d) => d.store);
+    const checkedList = Array.isArray(resp.storesChecked) && resp.storesChecked.length > 0
+      ? resp.storesChecked.join(', ')
+      : 'сети';
+
+    let text = '';
+    if (resp.matchedCount > 0) {
+      text = isAuto
+        ? `✅ Авто-радар (${checkedList}): найдено цен — ${resp.matchedCount}`
+        : `✅ Проверено (${checkedList}): найдено совпадений — ${resp.matchedCount}`;
+      if (needAddr.length > 0) {
+        text += ` • Укажите адрес 1 раз на сайте: ${needAddr.join(', ')}`;
+      }
+    } else if (needAddr.length > 0) {
+      text = `📍 ${needAddr.join(', ')}: выберите адрес доставки на сайте 1 раз в Chrome — после этого цены будут подтягиваться автоматически`;
+    } else if (captchas.length > 0) {
+      text = `🛡️ ${captchas.join(', ')}: сайт показал проверку от роботов (капчу) — откройте магазин вручную по кнопке ниже`;
+    } else if (!isAuto) {
+      text = `ℹ️ Проверено (${checkedList}), просмотрено ${resp.harvestedCount || 0} карточек — точных совпадений по весу не нашлось`;
+    }
+    if (!text) return;
+
+    let note = rb.querySelector('.lqs-scan-status-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'lqs-scan-status-note';
+      rb.prepend(note);
+    }
+    note.textContent = text;
+    setTimeout(() => { if (note && note.parentElement) note.remove(); }, needAddr.length > 0 ? 11000 : 7000);
+  }
+
+  function triggerAutoRadarIfNeeded(slug, meta, summary, panel) {
+    if (!slug || !meta || !meta.title) return;
+    if (cachedSettings.autoRadarOnProductPage === false) return;
+    if (autoRadarTriggeredSlugs.has(slug)) return;
+    if (!window.location.pathname.includes('/good/')) return;
+
+    const ttlMs = (globalThis.LQS_CONFIG?.LIMITS?.AUTO_RADAR_TTL_MS) || (24 * 60 * 60 * 1000);
+    const lastScanMs = summary && summary.lastRadarScanAt ? Date.parse(summary.lastRadarScanAt) : 0;
+    if (lastScanMs && Number.isFinite(lastScanMs) && (Date.now() - lastScanMs) < ttlMs) {
+      return;
+    }
+
+    autoRadarTriggeredSlugs.add(slug);
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage(
+        {
+          type: 'LQS_SCAN_STORES_LIVE',
+          payload: {
+            slug,
+            title: meta.title || '',
+            brand: meta.brand || '',
+            amount: meta.amountText || '',
+            price: meta.price || null,
+            imageKey: meta.imageKey || null,
+            isAuto: true,
+            forceRefresh: false
+          }
+        },
+        (resp) => {
+          if (chrome.runtime.lastError || !resp || !resp.ok || resp.skipped) return;
+          if (resp.summary) {
+            priceSummaryBySlug.set(slug, resp.summary);
+            if (priceDbMemory) priceDbMemory[slug] = resp.summary;
+          }
+          const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(slug)}"]`) || panel;
+          if (activePanel) {
+            syncExistingPanelUI(activePanel, currentReviewCache, extractProductPageMetadata() || meta);
+            showRadarDiagnosticNote(activePanel, resp, true);
+          }
+        }
+      );
+    }
+  }
+
   function triggerPriceIntelForProduct(slug, meta, panel) {
     if (!slug || !meta || !meta.price) return;
     if (priceIntelRequestedSlugs.has(slug)) return;
@@ -1621,6 +1401,7 @@
           if (activePanel) {
             const latestMeta = extractProductPageMetadata();
             syncExistingPanelUI(activePanel, currentReviewCache, latestMeta);
+            triggerAutoRadarIfNeeded(slug, latestMeta || meta, resp.summary, activePanel);
           }
         }
       );

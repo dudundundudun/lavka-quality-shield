@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Радар 16 Магазинов, График Цен, Сейф Аккаунтов и Zero-Click ИИ",
-  "version": "2.9.5",
+  "version": "2.10.0",
   "description": "История и график цен товаров (как в Alitools), светофор состава, фоновое отслеживание скидок, сравнение цен по 16 сетям, сейф аккаунтов и Zero-Click ИИ.",
   "icons": {
     "16": "icons/icon16.png",
@@ -31,8 +31,6 @@
     "https://lite.duckduckgo.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*",
-    "http://127.0.0.1:8083/*",
-    "http://localhost:8083/*",
     "https://moduleapi.pro/*",
     "https://api.openai.com/*",
     "https://api.anthropic.com/*",
@@ -57,7 +55,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.9.5 — Price History Chart, Watchlist, 16-Store Radar, Account Vault & Zero-Click AI",
+    "default_title": "Lavka Quality Shield v2.10.0 — Price History Chart, Watchlist, 16-Store Radar, Account Vault & Zero-Click AI",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -97,9 +95,12 @@
         "shared/utils.js",
         "shared/ingredients-guard.js",
         "content/store-harvester.js",
+        "content/store-assistant-ui.js",
         "content/passport-helper.js",
         "content/cart-audit.js",
         "content/price-chart.js",
+        "content/verdict-badge.js",
+        "content/product-parser.js",
         "content.js"
       ],
       "run_at": "document_idle"

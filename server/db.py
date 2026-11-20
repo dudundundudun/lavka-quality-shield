@@ -11,8 +11,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from matcher import normalize_title_for_match
 from security import DEFAULT_DB_PATH, migrate_legacy_db_if_needed
 
-APP_VERSION = "2.9.5"
-SCHEMA_VERSION = 3
+APP_VERSION = "2.10.0"
+SCHEMA_VERSION = 4
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
 
@@ -154,6 +154,23 @@ def init_db(db_path: Optional[str] = None) -> None:
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_store_links (
+                slug TEXT NOT NULL,
+                store_id TEXT NOT NULL,
+                store_name TEXT,
+                product_url TEXT NOT NULL,
+                product_title TEXT,
+                source_retailer TEXT,
+                last_price REAL,
+                last_checked_at TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (slug, store_id)
+            )
+            """
+        )
+
         # Schema migrations via PRAGMA user_version
         current_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
         if current_version < 1:
@@ -193,6 +210,10 @@ def init_db(db_path: Optional[str] = None) -> None:
                         (json.dumps(acc_map, ensure_ascii=False), slug_val),
                     )
             conn.execute("PRAGMA user_version = 3")
+            current_version = 3
+
+        if current_version < 4:
+            conn.execute("PRAGMA user_version = 4")
 
         # Indexes for fast cache, price & watchlist lookups
         conn.execute("CREATE INDEX IF NOT EXISTS idx_price_obs_slug ON price_observations(slug)")
@@ -211,6 +232,9 @@ def init_db(db_path: Optional[str] = None) -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_price_watchlist_updated ON price_watchlist(updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_product_store_links_slug ON product_store_links(slug, updated_at DESC)"
         )
 
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
@@ -744,4 +768,97 @@ def list_ai_provider_keys_status(conn: sqlite3.Connection) -> Dict[str, Dict[str
 def delete_ai_provider_key(conn: sqlite3.Connection, provider: str) -> bool:
     clean_provider = (provider or "").strip().lower()
     cur = conn.execute("DELETE FROM ai_provider_keys WHERE provider = ?", (clean_provider,))
+    return cur.rowcount > 0
+
+
+def get_product_store_links(conn: sqlite3.Connection, slug: str) -> Dict[str, Dict[str, Any]]:
+    clean_slug = str(slug or "").strip().lower()
+    if not clean_slug:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT store_id, store_name, product_url, product_title, source_retailer,
+               last_price, last_checked_at, updated_at
+        FROM product_store_links
+        WHERE slug = ?
+        ORDER BY updated_at DESC
+        """,
+        (clean_slug,),
+    ).fetchall()
+    result: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        result[r[0]] = {
+            "storeId": r[0],
+            "storeName": r[1] or r[0],
+            "url": r[2],
+            "title": r[3] or "",
+            "sourceRetailer": r[4] or None,
+            "lastPrice": r[5],
+            "lastCheckedAt": r[6],
+            "updatedAt": r[7],
+        }
+    return result
+
+
+def upsert_product_store_links(
+    conn: sqlite3.Connection, slug: str, links: List[Dict[str, Any]]
+) -> int:
+    clean_slug = str(slug or "").strip().lower()
+    if not clean_slug or not links:
+        return 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    saved = 0
+    for item in links[:16]:
+        if not isinstance(item, dict):
+            continue
+        store_id = str(item.get("storeId") or "").strip().lower()
+        url = str(item.get("url") or "").strip()
+        if not store_id or not (url.startswith("https://") or url.startswith("http://")):
+            continue
+        store_name = str(item.get("storeName") or store_id).strip()[:80]
+        title = str(item.get("title") or "").strip()[:240]
+        source_retailer = str(item.get("sourceRetailer") or "").strip()[:80] or None
+        raw_price = item.get("lastPrice")
+        last_price = float(raw_price) if isinstance(raw_price, (int, float)) and raw_price > 0 else None
+        last_checked = str(item.get("lastCheckedAt") or now_iso)
+        conn.execute(
+            """
+            INSERT INTO product_store_links (
+                slug, store_id, store_name, product_url, product_title,
+                source_retailer, last_price, last_checked_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(slug, store_id) DO UPDATE SET
+                store_name = excluded.store_name,
+                product_url = excluded.product_url,
+                product_title = excluded.product_title,
+                source_retailer = excluded.source_retailer,
+                last_price = COALESCE(excluded.last_price, product_store_links.last_price),
+                last_checked_at = excluded.last_checked_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                clean_slug,
+                store_id,
+                store_name,
+                url[:1000],
+                title,
+                source_retailer,
+                last_price,
+                last_checked,
+                now_iso,
+            ),
+        )
+        saved += 1
+    return saved
+
+
+def delete_product_store_link(conn: sqlite3.Connection, slug: str, store_id: str) -> bool:
+    clean_slug = str(slug or "").strip().lower()
+    clean_store = str(store_id or "").strip().lower()
+    if not clean_slug or not clean_store:
+        return False
+    cur = conn.execute(
+        "DELETE FROM product_store_links WHERE slug = ? AND store_id = ?",
+        (clean_slug, clean_store),
+    )
     return cur.rowcount > 0

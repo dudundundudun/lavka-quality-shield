@@ -6,7 +6,7 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.9.5',
+    VERSION: '2.10.0',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
@@ -22,7 +22,9 @@
       ACCOUNTS_VAULT: 'lqs_accounts_vault_v1',
       DELETED_ACCOUNTS: 'lqs_deleted_accounts_v1',
       BACKEND_TOKEN: 'lqs_backend_token_v1',
-      CIRCUIT_BREAKER: 'lqs_circuit_breaker_v1'
+      CIRCUIT_BREAKER: 'lqs_circuit_breaker_v1',
+      RADAR_SCAN_LOG: 'lqs_radar_scan_log_v1',
+      PRODUCT_LINKS: 'lqs_product_links_v1'
     }),
     LIMITS: Object.freeze({
       MAX_LOCAL_AI_CACHE_ITEMS: 500,
@@ -30,7 +32,9 @@
       AI_DIRECT_TIMEOUT_MS: 28000,
       BACKEND_ANALYZE_TIMEOUT_MS: 35000,
       DEFAULT_PAID_AI_DAILY_LIMIT: 25,
-      DEFAULT_GEMINI_IDLE_CLOSE_MINUTES: 5
+      DEFAULT_GEMINI_IDLE_CLOSE_MINUTES: 5,
+      AUTO_RADAR_TTL_MS: 24 * 60 * 60 * 1000,
+      AUTO_RADAR_COOLDOWN_MS: 15 * 1000
     }),
     CLIENT_HEADER: Object.freeze({
       'X-LQS-Client': 'lavka-quality-shield'
@@ -57,7 +61,8 @@
       lavkaAccountLabel: 'Аккаунт #1 (Основной)',
       priceChartWindowMode: false,
       watchlistCheckIntervalHours: 6,
-      liveRadarStores: ['kuper']
+      autoRadarOnProductPage: true,
+      liveRadarStores: ['magnit', 'pyaterochka', 'kuper']
     })
   });
 

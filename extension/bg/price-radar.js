@@ -27,7 +27,11 @@
   const WATCHLIST_KEY = STORAGE_KEYS.WATCHLIST;
   const EXT_STORE_DB_KEY = STORAGE_KEYS.EXT_STORE_DB;
   const CIRCUIT_BREAKER_KEY = STORAGE_KEYS.CIRCUIT_BREAKER || 'lqs_circuit_breaker_v1';
+  const RADAR_SCAN_LOG_KEY = STORAGE_KEYS.RADAR_SCAN_LOG || 'lqs_radar_scan_log_v1';
+  const PRODUCT_LINKS_KEY = STORAGE_KEYS.PRODUCT_LINKS || 'lqs_product_links_v1';
   const MAX_LOCAL_PRICE_DB_ITEMS = LIMITS.MAX_LOCAL_PRICE_DB_ITEMS;
+  const AUTO_RADAR_TTL_MS = LIMITS.AUTO_RADAR_TTL_MS || (24 * 60 * 60 * 1000);
+  const AUTO_RADAR_COOLDOWN_MS = LIMITS.AUTO_RADAR_COOLDOWN_MS || (15 * 1000);
 
   // Ленивая подгрузка эталонных seed-офферов Магнита из extension/data/seed-magnit.json
   let magnitSeedCache = null;
@@ -730,6 +734,7 @@
       if (!raw || !raw.title || !raw.price || Number(raw.price) <= 0) continue;
       const cleanOffer = {
         store: raw.store || storeName || 'Магнит',
+        sourceRetailer: raw.sourceRetailer || null,
         goodId: raw.goodId || null,
         title: String(raw.title).trim(),
         amount: raw.amount || '',
@@ -779,6 +784,7 @@
       if (check.isSameProduct && check.isSameVolume) {
         matches.push({
           store: ext.store || 'Магнит',
+          sourceRetailer: ext.sourceRetailer || null,
           price: Math.round(Number(ext.price)),
           oldPrice: ext.oldPrice ? Math.round(Number(ext.oldPrice)) : null,
           url: ext.url,
@@ -1383,19 +1389,205 @@
     return new Promise((resolve) => {
       chrome.tabs.sendMessage(tabId, { type: 'LQS_HARVEST_STORE_PAGE_NOW' }, (resp) => {
         if (chrome.runtime.lastError || !resp || !resp.ok) {
-          resolve({ store: '', offers: [] });
+          const errMsg = chrome.runtime.lastError?.message || 'Вкладка магазина не ответила';
+          resolve({
+            store: '',
+            offers: [],
+            diagnostic: { status: 'error', reason: 'tab_error', message: errMsg }
+          });
           return;
         }
-        resolve({ store: resp.store || '', offers: Array.isArray(resp.offers) ? resp.offers : [] });
+        const offers = Array.isArray(resp.offers) ? resp.offers : [];
+        const diagnostic = resp.diagnostic || {
+          status: offers.length > 0 ? 'ok' : 'not_found',
+          reason: offers.length > 0 ? 'ok' : 'not_found',
+          message: offers.length > 0 ? '' : 'Товар не найден в выдаче магазина'
+        };
+        resolve({ store: resp.store || '', offers, diagnostic });
       });
     });
   }
 
-  async function harvestSingleStoreInBackgroundTab(storeId, query) {
-    const cfg = LIVE_RADAR_STORE_URLS[storeId];
-    if (!cfg || !query) return { storeId, store: cfg?.name || storeId, offers: [] };
+  function isDirectProductUrl(url, storeId = '') {
+    if (!url || typeof url !== 'string') return false;
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    const pathLower = parsed.pathname.toLowerCase();
+    const searchLower = parsed.search.toLowerCase();
+    if (
+      pathLower.includes('/search') ||
+      pathLower.includes('/multisearch') ||
+      /[?&](?:q|term|search|searchtext)=/i.test(searchLower)
+    ) {
+      return false;
+    }
+    const sid = String(storeId || '').toLowerCase();
+    if (sid === 'kuper') return /\/products?\//.test(pathLower);
+    if (sid === 'magnit') return /\/product\//.test(pathLower);
+    if (sid === 'pyaterochka') return /\/(product|catalog)\/[^/]+/.test(pathLower);
+    if (sid === 'perekrestok') return /\/(cat\/[^/]+\/p\/|product\/)/.test(pathLower);
+    if (sid === 'vkusvill') return /\/goods\//.test(pathLower);
+    if (sid === 'auchan' || sid === 'lenta') return /\/product\//.test(pathLower);
+    return /\/(products?|goods|cat\/[^/]+\/p)\//.test(pathLower);
+  }
 
-    const targetUrl = cfg.buildUrl(query);
+  async function getLocalProductLinksMap() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([PRODUCT_LINKS_KEY], (res) => {
+        const raw = res && res[PRODUCT_LINKS_KEY];
+        resolve(raw && typeof raw === 'object' ? { ...raw } : {});
+      });
+    });
+  }
+
+  async function saveLocalProductLinksMap(mapObj) {
+    const entries = Object.entries(mapObj || {});
+    if (entries.length > MAX_LOCAL_PRICE_DB_ITEMS) {
+      mapObj = Object.fromEntries(entries.slice(-MAX_LOCAL_PRICE_DB_ITEMS));
+    }
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ [PRODUCT_LINKS_KEY]: mapObj }, () => resolve(mapObj));
+    });
+  }
+
+  async function getRememberedProductLinks(slug) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    if (!cleanSlug) return {};
+    const allLocal = await getLocalProductLinksMap();
+    const merged = allLocal[cleanSlug] && typeof allLocal[cleanSlug] === 'object'
+      ? { ...allLocal[cleanSlug] }
+      : {};
+
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || '').replace(/\/+$/, '');
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0) && getBgDeps().getBackendAuthHeaders) {
+      try {
+        const resp = await fetchWithTimeout(
+          `${backendUrl}/api/price/links/${encodeURIComponent(cleanSlug)}`,
+          { method: 'GET', headers: await getBgDeps().getBackendAuthHeaders(backendUrl) },
+          1800
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.links && typeof data.links === 'object') {
+            let changed = false;
+            for (const [sid, linkObj] of Object.entries(data.links)) {
+              if (!linkObj || !linkObj.url) continue;
+              const localItem = merged[sid];
+              if (!localItem || String(linkObj.updatedAt || '') > String(localItem.updatedAt || '')) {
+                merged[sid] = linkObj;
+                changed = true;
+              }
+            }
+            if (changed) {
+              allLocal[cleanSlug] = merged;
+              await saveLocalProductLinksMap(allLocal);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[LQS] Backend links fetch failed:', err?.message || err);
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+      }
+    }
+    return merged;
+  }
+
+  async function saveRememberedProductLinks(slug, linksList = []) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    if (!cleanSlug || !Array.isArray(linksList) || linksList.length === 0) return {};
+    const nowIso = new Date().toISOString();
+    const allLocal = await getLocalProductLinksMap();
+    const current = allLocal[cleanSlug] && typeof allLocal[cleanSlug] === 'object'
+      ? { ...allLocal[cleanSlug] }
+      : {};
+
+    const validToSync = [];
+    for (const item of linksList) {
+      if (!item || !item.storeId || !isDirectProductUrl(item.url, item.storeId)) continue;
+      const sid = String(item.storeId).trim().toLowerCase();
+      const entry = {
+        storeId: sid,
+        storeName: item.storeName || LIVE_RADAR_STORE_URLS[sid]?.name || sid,
+        url: item.url,
+        title: item.title || '',
+        sourceRetailer: item.sourceRetailer || null,
+        lastPrice: item.lastPrice ? Math.round(Number(item.lastPrice)) : null,
+        lastCheckedAt: nowIso,
+        updatedAt: nowIso
+      };
+      current[sid] = entry;
+      validToSync.push(entry);
+    }
+
+    if (validToSync.length === 0) return current;
+    allLocal[cleanSlug] = current;
+    await saveLocalProductLinksMap(allLocal);
+
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || '').replace(/\/+$/, '');
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0) && getBgDeps().getBackendAuthHeaders) {
+      try {
+        await fetchWithTimeout(
+          `${backendUrl}/api/price/links`,
+          {
+            method: 'POST',
+            headers: await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ slug: cleanSlug, links: validToSync })
+          },
+          2000
+        );
+      } catch (err) {
+        console.warn('[LQS] Backend links save failed:', err?.message || err);
+        getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+      }
+    }
+    return current;
+  }
+
+  async function removeRememberedProductLink(slug, storeId) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    const cleanStore = String(storeId || '').trim().toLowerCase();
+    if (!cleanSlug || !cleanStore) return;
+    const allLocal = await getLocalProductLinksMap();
+    if (allLocal[cleanSlug] && allLocal[cleanSlug][cleanStore]) {
+      delete allLocal[cleanSlug][cleanStore];
+      await saveLocalProductLinksMap(allLocal);
+    }
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || '').replace(/\/+$/, '');
+    if (backendUrl && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0) && getBgDeps().getBackendAuthHeaders) {
+      try {
+        await fetchWithTimeout(
+          `${backendUrl}/api/price/links/${encodeURIComponent(cleanSlug)}/${encodeURIComponent(cleanStore)}`,
+          { method: 'DELETE', headers: await getBgDeps().getBackendAuthHeaders(backendUrl) },
+          1800
+        );
+      } catch (err) {
+        console.warn('[LQS] Backend link delete failed:', err?.message || err);
+      }
+    }
+  }
+
+  async function harvestSingleStoreInBackgroundTab(storeId, query, directUrl = null) {
+    const cfg = LIVE_RADAR_STORE_URLS[storeId];
+    if (!cfg || (!query && !directUrl)) {
+      return {
+        storeId,
+        store: cfg?.name || storeId,
+        offers: [],
+        usedDirectLink: false,
+        diagnostic: { status: 'not_found', reason: 'invalid_query', message: 'Не задан магазин или запрос' }
+      };
+    }
+
+    const useDirect = Boolean(directUrl && isDirectProductUrl(directUrl, storeId));
+    const targetUrl = useDirect ? directUrl : cfg.buildUrl(query);
     let tabId = null;
     try {
       const createdTab = await new Promise((resolve) => {
@@ -1404,7 +1596,12 @@
         });
       });
       if (!createdTab || typeof createdTab.id !== 'number') {
-        return { storeId, store: cfg.name, offers: [] };
+        return {
+          storeId,
+          store: cfg.name,
+          offers: [],
+          diagnostic: { status: 'error', reason: 'tab_create_failed', message: 'Не удалось открыть фоновую вкладку магазина' }
+        };
       }
       tabId = createdTab.id;
       await waitForTabComplete(tabId, 7500);
@@ -1412,35 +1609,117 @@
       // Give SPA stores (Kuper, Perekrestok, Magnit, 5ka, Lenta) time to render search results
       let bestOffers = [];
       let detectedStore = cfg.name;
+      let lastDiagnostic = { status: 'not_found', reason: 'not_found', message: 'Товар не найден в выдаче магазина' };
       for (let attempt = 0; attempt < 5; attempt++) {
         await new Promise((r) => setTimeout(r, attempt === 0 ? 1100 : 1000));
         const res = await requestHarvestFromTab(tabId);
         if (res.store) detectedStore = res.store;
+        if (res.diagnostic) lastDiagnostic = res.diagnostic;
         if (res.offers.length > bestOffers.length) {
           bestOffers = res.offers;
         }
         if (bestOffers.length >= 6 || (attempt >= 2 && bestOffers.length > 0)) {
           break;
         }
+        if (bestOffers.length === 0 && lastDiagnostic.reason === 'captcha') {
+          break;
+        }
+        if (bestOffers.length === 0 && attempt >= 1 && lastDiagnostic.reason === 'needs_address') {
+          break;
+        }
       }
-      return { storeId, store: detectedStore, offers: bestOffers };
-    } catch {
-      return { storeId, store: cfg.name, offers: [] };
+      const finalDiagnostic = bestOffers.length > 0
+        ? { status: 'ok', reason: 'ok', message: '' }
+        : lastDiagnostic;
+      return { storeId, store: detectedStore, offers: bestOffers, usedDirectLink: useDirect, targetUrl, diagnostic: finalDiagnostic };
+    } catch (err) {
+      return {
+        storeId,
+        store: cfg.name,
+        offers: [],
+        diagnostic: {
+          status: 'error',
+          reason: 'scan_error',
+          message: err?.message || String(err) || 'Ошибка фонового сканирования'
+        }
+      };
     } finally {
       if (tabId !== null) {
         try {
           chrome.tabs.remove(tabId, () => {
             void chrome.runtime.lastError;
           });
-        } catch {
-          // ignore
+        } catch (closeErr) {
+          console.warn('[LQS] Failed to close radar tab:', closeErr?.message || closeErr);
         }
       }
     }
   }
 
-  async function scanStoresInBackgroundTabs(payload = {}) {
+  async function getRadarScanLog() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([RADAR_SCAN_LOG_KEY], (res) => {
+        const raw = res && res[RADAR_SCAN_LOG_KEY];
+        resolve(raw && typeof raw === 'object' ? { ...raw } : {});
+      });
+    });
+  }
+
+  async function saveRadarScanLog(logMap) {
+    const entries = Object.entries(logMap || {});
+    if (entries.length > MAX_LOCAL_PRICE_DB_ITEMS) {
+      entries.sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0));
+      logMap = Object.fromEntries(entries.slice(0, MAX_LOCAL_PRICE_DB_ITEMS));
+    }
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ [RADAR_SCAN_LOG_KEY]: logMap }, () => resolve(logMap));
+    });
+  }
+
+  async function isRadarCacheFresh(slug, nowMs = Date.now(), ttlMs = AUTO_RADAR_TTL_MS) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    if (!cleanSlug) return { fresh: false, lastRadarScanAt: null, ageMs: null };
+    const logMap = await getRadarScanLog();
+    const lastTs = Number(logMap[cleanSlug] || 0);
+    if (!lastTs || !Number.isFinite(lastTs)) {
+      return { fresh: false, lastRadarScanAt: null, ageMs: null };
+    }
+    const ageMs = Math.max(0, nowMs - lastTs);
+    return {
+      fresh: ageMs < ttlMs,
+      lastRadarScanAt: lastTs,
+      ageMs
+    };
+  }
+
+  async function markRadarScanned(slug, nowMs = Date.now()) {
+    const cleanSlug = String(slug || '').trim().toLowerCase();
+    if (!cleanSlug) return;
+    const logMap = await getRadarScanLog();
+    logMap[cleanSlug] = nowMs;
+    await saveRadarScanLog(logMap);
+
+    const db = await getLocalPriceDb();
+    if (db[cleanSlug]) {
+      db[cleanSlug].lastRadarScanAt = new Date(nowMs).toISOString();
+      await new Promise((resolve) => chrome.storage.local.set({ [PRICE_DB_KEY]: db }, resolve));
+    }
+  }
+
+  // Serialized 1-active-scan queue with 15s cooldown between automatic product scans
+  let radarActiveScanCount = 0;
+  let lastRadarAutoFinishTs = 0;
+  let radarQueueChain = Promise.resolve();
+
+  function resetRadarRuntimeState() {
+    radarActiveScanCount = 0;
+    lastRadarAutoFinishTs = 0;
+    radarQueueChain = Promise.resolve();
+  }
+
+  async function runSingleBackgroundScanNow(payload = {}) {
     const stopKeepAlive = getBgDeps().startSwKeepAlive ? getBgDeps().startSwKeepAlive() : () => {};
+    radarActiveScanCount += 1;
     try {
       const settings = await getSettings();
       const slug = String(payload.slug || '').trim().toLowerCase();
@@ -1451,60 +1730,233 @@
       const oldPrice = payload.oldPrice ? Number(payload.oldPrice) : null;
       const accountId = payload.accountId || settings.lavkaAccountLabel || 'Аккаунт #1';
       const imageKey = payload.imageKey || null;
+      const isAuto = Boolean(payload.isAuto);
+      const forceRefresh = Boolean(payload.forceRefresh);
+      const ttlMs = Number(payload.ttlMs) > 0 ? Number(payload.ttlMs) : AUTO_RADAR_TTL_MS;
+      const cooldownMs = Number.isFinite(Number(payload.cooldownMs)) ? Number(payload.cooldownMs) : AUTO_RADAR_COOLDOWN_MS;
+
+      if (isAuto && !forceRefresh) {
+        if (settings.autoRadarOnProductPage === false) {
+          return { ok: true, skipped: true, reason: 'disabled', storesChecked: [], storeDiagnostics: [] };
+        }
+        const cacheState = await isRadarCacheFresh(slug, Date.now(), ttlMs);
+        if (cacheState.fresh) {
+          return {
+            ok: true,
+            skipped: true,
+            reason: 'cached_24h',
+            lastRadarScanAt: new Date(cacheState.lastRadarScanAt).toISOString(),
+            storesChecked: [],
+            storeDiagnostics: []
+          };
+        }
+        if (lastRadarAutoFinishTs > 0 && cooldownMs > 0) {
+          const waitMs = cooldownMs - (Date.now() - lastRadarAutoFinishTs);
+          if (waitMs > 0) {
+            await new Promise((r) => setTimeout(r, waitMs));
+          }
+        }
+      }
 
       const fullQuery = buildFullProductSearchQuery(title, brand, amount);
       if (!fullQuery) {
-        return { ok: false, error: 'Не удалось определить название товара для поиска' };
+        return { ok: false, error: 'Не удалось определить название товара для поиска', storeDiagnostics: [] };
       }
 
       const rawStores = Array.isArray(payload.stores) && payload.stores.length > 0
         ? payload.stores
         : (Array.isArray(settings.liveRadarStores) && settings.liveRadarStores.length > 0
             ? settings.liveRadarStores
-            : ['kuper']);
+            : ['magnit', 'pyaterochka', 'kuper']);
       const selectedStores = rawStores
         .filter((s) => Boolean(LIVE_RADAR_STORE_URLS[s]))
         .slice(0, 3);
       if (selectedStores.length === 0) selectedStores.push('kuper');
 
+      const rememberedLinks = slug ? await getRememberedProductLinks(slug) : {};
       const results = [];
-      // Run up to 2 background tabs in parallel for speed without lagging Chrome
-      for (let i = 0; i < selectedStores.length; i += 2) {
-        const chunk = selectedStores.slice(i, i + 2);
-        const chunkRes = await Promise.all(
-          chunk.map((storeId) => harvestSingleStoreInBackgroundTab(storeId, fullQuery))
-        );
-        results.push(...chunkRes);
+      // Strictly 1 background tab at a time; prefer remembered direct product URLs over search
+      for (const storeId of selectedStores) {
+        const savedLink = rememberedLinks[storeId]?.url || null;
+        let oneRes;
+        if (savedLink && isDirectProductUrl(savedLink, storeId)) {
+          oneRes = await harvestSingleStoreInBackgroundTab(storeId, fullQuery, savedLink);
+          if (oneRes.offers.length === 0 && oneRes.diagnostic?.reason === 'not_found') {
+            // Direct product link became stale -> drop it and fall back to search once
+            if (slug) await removeRememberedProductLink(slug, storeId);
+            oneRes = await harvestSingleStoreInBackgroundTab(storeId, fullQuery, null);
+          }
+        } else {
+          oneRes = await harvestSingleStoreInBackgroundTab(storeId, fullQuery, null);
+        }
+        results.push(oneRes);
       }
 
       let harvestedCount = 0;
+      let directLinksUsedCount = 0;
       const storesChecked = [];
+      const storeDiagnostics = [];
+      const newlyMatchedDirectLinks = [];
+      let hadNonFatalCheck = false;
+
       for (const r of results) {
         storesChecked.push(r.store);
+        if (r.usedDirectLink) directLinksUsedCount += 1;
+        const diag = r.diagnostic || {
+          status: r.offers.length > 0 ? 'ok' : 'not_found',
+          reason: r.offers.length > 0 ? 'ok' : 'not_found',
+          message: ''
+        };
+        if (diag.reason !== 'tab_error' && diag.reason !== 'tab_create_failed') {
+          hadNonFatalCheck = true;
+        }
+        storeDiagnostics.push({
+          storeId: r.storeId,
+          store: r.store,
+          status: diag.status,
+          reason: diag.reason,
+          message: diag.message || '',
+          offersCount: r.offers.length,
+          usedDirectLink: Boolean(r.usedDirectLink)
+        });
         if (r.offers.length > 0) {
           harvestedCount += r.offers.length;
           await recordExternalStoreOffers(r.store, r.offers);
+
+          // Remember best matching direct product URL for future 24h refreshes without search
+          if (slug && title) {
+            const matchingDirect = r.offers
+              .filter((o) => o && o.price > 0 && isDirectProductUrl(o.url, r.storeId))
+              .filter((o) => {
+                const chk = isSearchResultMatchingProduct(o.title || '', o.amount || '', title, amount);
+                return chk.isSameProduct && chk.isSameVolume;
+              })
+              .sort((a, b) => a.price - b.price);
+            if (matchingDirect.length > 0) {
+              const best = matchingDirect[0];
+              newlyMatchedDirectLinks.push({
+                storeId: r.storeId,
+                storeName: best.store || r.store,
+                url: best.url,
+                title: best.title || '',
+                sourceRetailer: best.sourceRetailer || null,
+                lastPrice: best.price
+              });
+            }
+          }
         }
       }
+
+      if (slug && newlyMatchedDirectLinks.length > 0) {
+        await saveRememberedProductLinks(slug, newlyMatchedDirectLinks);
+      }
+
+      const nowMs = Date.now();
+      if (slug && hadNonFatalCheck) {
+        await markRadarScanned(slug, nowMs);
+      }
+      lastRadarAutoFinishTs = nowMs;
 
       const summary = slug
         ? await getProductPriceIntelligence(slug, title, price, oldPrice, amount, accountId, true, imageKey, brand)
         : null;
+      if (summary && slug && hadNonFatalCheck) {
+        summary.lastRadarScanAt = new Date(nowMs).toISOString();
+      }
       const matchedCount = summary && Array.isArray(summary.competitorOffers)
         ? summary.competitorOffers.filter((o) => o && o.price > 0).length
         : 0;
 
       return {
         ok: true,
+        skipped: false,
+        isAuto,
         query: fullQuery,
         storesChecked,
+        storeDiagnostics,
+        directLinksUsedCount,
         harvestedCount,
         matchedCount,
+        lastRadarScanAt: slug && hadNonFatalCheck ? new Date(nowMs).toISOString() : null,
         summary
       };
     } finally {
+      radarActiveScanCount = Math.max(0, radarActiveScanCount - 1);
       stopKeepAlive();
     }
+  }
+
+  function scanStoresInBackgroundTabs(payload = {}) {
+    const task = radarQueueChain.then(
+      () => runSingleBackgroundScanNow(payload),
+      () => runSingleBackgroundScanNow(payload)
+    );
+    radarQueueChain = task.catch(() => {});
+    return task;
+  }
+
+
+  async function findLocalComparisonsForStoreProduct({ store = '', title = '', amount = '', price = null } = {}) {
+    const cleanTitle = String(title || '').trim();
+    const cleanStore = String(store || '').trim().toLowerCase();
+    if (!cleanTitle || cleanTitle.length < 3) {
+      return { ok: true, lavka: null, otherStores: [] };
+    }
+
+    const [priceDb, extList] = await Promise.all([
+      getLocalPriceDb(),
+      getExternalStoreOffersList()
+    ]);
+
+    // 1. Find best matching Yandex Lavka entry in local price DB
+    let bestLavka = null;
+    for (const entry of Object.values(priceDb || {})) {
+      if (!entry || !entry.title) continue;
+      const candidatePrice = Number(entry.lastPrice || entry.minPrice || 0);
+      if (!Number.isFinite(candidatePrice) || candidatePrice <= 0) continue;
+      const check = isSearchResultMatchingProduct(entry.title, entry.amount || '', cleanTitle, amount || '');
+      if (check.isSameProduct && check.isSameVolume) {
+        if (!bestLavka || candidatePrice < bestLavka.price) {
+          const slug = String(entry.slug || '').trim();
+          bestLavka = {
+            store: 'Яндекс Лавка',
+            slug,
+            title: entry.title,
+            price: Math.round(candidatePrice),
+            minPrice: entry.minPrice ? Math.round(Number(entry.minPrice)) : null,
+            url: slug ? `https://lavka.yandex.ru/good/${encodeURIComponent(slug)}` : 'https://lavka.yandex.ru/'
+          };
+        }
+      }
+    }
+
+    // 2. Find matching external store offers (excluding current store)
+    const matchedExt = findMatchingExternalStoreOffersFromList(extList, cleanTitle, amount || '');
+    const bestByStore = new Map();
+    for (const offer of matchedExt) {
+      if (!offer || !offer.store || !offer.price) continue;
+      const storeKey = String(offer.store).trim().toLowerCase();
+      if (cleanStore && storeKey === cleanStore) continue;
+      const existing = bestByStore.get(storeKey);
+      if (!existing || offer.price < existing.price) {
+        bestByStore.set(storeKey, {
+          store: offer.store,
+          sourceRetailer: offer.sourceRetailer || null,
+          price: Math.round(Number(offer.price)),
+          oldPrice: offer.oldPrice ? Math.round(Number(offer.oldPrice)) : null,
+          url: offer.url || null,
+          title: offer.title || ''
+        });
+      }
+    }
+
+    const otherStores = Array.from(bestByStore.values()).sort((a, b) => a.price - b.price);
+    return {
+      ok: true,
+      lavka: bestLavka,
+      otherStores,
+      currentPrice: Number.isFinite(Number(price)) ? Math.round(Number(price)) : null
+    };
   }
 
   const api = {
@@ -1538,6 +1990,14 @@
     mergeUniqueStoreOffers,
     auditCartCompetitorsAndAccounts,
     LIVE_RADAR_STORE_URLS,
+    isDirectProductUrl,
+    getRememberedProductLinks,
+    saveRememberedProductLinks,
+    removeRememberedProductLink,
+    getRadarScanLog,
+    isRadarCacheFresh,
+    resetRadarRuntimeState,
+    findLocalComparisonsForStoreProduct,
     scanStoresInBackgroundTabs
   };
 

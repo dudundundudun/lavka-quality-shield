@@ -86,5 +86,14 @@ class TestServerAiProviders(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Хороший йогурт", res["verdict"])
 
 
+
+    def test_build_ai_prompt_uses_concrete_caveat_verdict(self):
+        from routers import cache as cache_router
+        req = cache_router.AnalyzeRequest(title="Йогурт греческий", amount="140 г", price=89)
+        prompt = cache_router.build_ai_prompt(req, [])
+        self.assertIn("⚠️ **С оговорками:", prompt)
+        self.assertNotIn("На любителя — есть компромиссы", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

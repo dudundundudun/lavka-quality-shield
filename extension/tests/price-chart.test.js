@@ -99,3 +99,29 @@ test('buildPriceHistoryCardHtml renders embedded and popover modes with watch bu
   assert.match(popHtml, /lqs-ph-close-btn/);
   assert.doesNotMatch(popHtml, /\bonclick=/i);
 });
+
+test('price history inline card uses compact SVG height (~84px), 2-row layout, and full-width CSS', () => {
+  const chart = loadPriceChartModule();
+  const data = {
+    slug: 'cheese_200g',
+    days: 90,
+    isWatched: false,
+    points: [
+      { price: 210, ts: '2026-10-01T10:00:00Z' },
+      { price: 195, ts: '2026-11-19T10:00:00Z' }
+    ],
+    stats: { minPrice: 195, maxPrice: 210, avgPrice: 202.5, lastPrice: 195, count: 2 }
+  };
+  const inlineHtml = chart.buildPriceHistoryCardHtml(data, { mode: 'exact', days: 90, isPopover: false });
+  assert.match(inlineHtml, /viewBox="0 0 440 84"/);
+  assert.doesNotMatch(inlineHtml, /lqs-ph-mode-row/);
+  assert.match(inlineHtml, /lqs-ph-footer[\s\S]*lqs-ph-meta[\s\S]*lqs-ph-watch-btn/);
+
+  const popHtml = chart.buildPriceHistoryCardHtml(data, { mode: 'exact', days: 90, isPopover: true });
+  assert.match(popHtml, /viewBox="0 0 320 104"/);
+  assert.match(popHtml, /is-popover/);
+
+  const css = fs.readFileSync(path.join(extDir, 'styles.css'), 'utf8');
+  assert.match(css, /\.lqs-ph-card\.is-inline\s*\{[^}]*width:\s*100%\s*!important;[^}]*max-width:\s*none\s*!important;/);
+  assert.doesNotMatch(css, /\.lqs-ph-card\.is-inline\s*\{[^}]*max-width:\s*360px/);
+});

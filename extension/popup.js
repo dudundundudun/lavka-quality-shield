@@ -795,7 +795,7 @@ function loadSettings() {
     if (popChk) popChk.checked = Boolean(cfg.priceChartWindowMode);
     const wlSel = document.getElementById('sel-watchlist-interval');
     if (wlSel) wlSel.value = String(cfg.watchlistCheckIntervalHours ?? 6);
-    const liveStores = Array.isArray(cfg.liveRadarStores) && cfg.liveRadarStores.length > 0 ? cfg.liveRadarStores : ['kuper'];
+    const liveStores = Array.isArray(cfg.liveRadarStores) && cfg.liveRadarStores.length > 0 ? cfg.liveRadarStores : DEFAULT_SETTINGS.liveRadarStores;
     document.querySelectorAll('.chk-live-radar-store').forEach((chk) => {
       chk.checked = liveStores.includes(chk.value);
     });

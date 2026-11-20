@@ -413,5 +413,56 @@ class TestApiCrudEndpoints(unittest.TestCase):
         self.assertTrue(r_del.json()["removed"])
         self.assertEqual(self.client.get("/api/watchlist", headers=self.headers).json()["count"], 0)
 
+
+    def test_product_store_links_crud_and_auth(self):
+        # Unauthenticated request rejected
+        unauth = self.client.get("/api/price/links/lamber_230g")
+        self.assertIn(unauth.status_code, (401, 403))
+
+        # Save direct links
+        r_save = self.client.post(
+            "/api/price/links",
+            headers=self.headers,
+            json={
+                "slug": "lamber_230g",
+                "links": [
+                    {
+                        "storeId": "magnit",
+                        "storeName": "Магнит",
+                        "url": "https://magnit.ru/product/123456-lamber",
+                        "title": "Сыр Ламбер 230 г",
+                        "lastPrice": 279,
+                    },
+                    {
+                        "storeId": "kuper",
+                        "storeName": "Купер",
+                        "url": "https://kuper.ru/pyaterochka/products/lamber-230g",
+                        "title": "Сыр Ламбер 230 г",
+                        "sourceRetailer": "Пятёрочка",
+                        "lastPrice": 289,
+                    },
+                ],
+            },
+        )
+        self.assertEqual(r_save.status_code, 200)
+        self.assertEqual(r_save.json().get("saved"), 2)
+
+        # Fetch links
+        r_get = self.client.get("/api/price/links/lamber_230g", headers=self.headers)
+        self.assertEqual(r_get.status_code, 200)
+        links = r_get.json().get("links", {})
+        self.assertEqual(links["magnit"]["url"], "https://magnit.ru/product/123456-lamber")
+        self.assertEqual(links["kuper"]["sourceRetailer"], "Пятёрочка")
+
+        # Delete stale link
+        r_del = self.client.delete("/api/price/links/lamber_230g/magnit", headers=self.headers)
+        self.assertEqual(r_del.status_code, 200)
+        self.assertTrue(r_del.json().get("deleted"))
+
+        r_get2 = self.client.get("/api/price/links/lamber_230g", headers=self.headers)
+        self.assertNotIn("magnit", r_get2.json().get("links", {}))
+        self.assertIn("kuper", r_get2.json().get("links", {}))
+
+
 if __name__ == "__main__":
     unittest.main()

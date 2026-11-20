@@ -106,12 +106,12 @@
   }
 
   function buildPriceChartSvg(series, options = {}) {
-    const width = options.width || 330;
-    const height = options.height || 138;
-    const padLeft = 10;
-    const padRight = 60;
-    const padTop = 14;
-    const padBottom = 22;
+    const width = options.width || 440;
+    const height = options.height || 84;
+    const padLeft = 8;
+    const padRight = 56;
+    const padTop = 10;
+    const padBottom = 18;
     const plotW = width - padLeft - padRight;
     const plotH = height - padTop - padBottom;
 
@@ -167,8 +167,8 @@
     const lastCoord = coords[coords.length - 1];
     const ticks = buildAxisTicks(valid, padLeft, plotW);
 
-    const showMaxLabel = spread > 0 && Math.abs(yMaxLine - yLastLine) >= 13;
-    const showMinLabel = spread > 0 && Math.abs(yMinLine - yLastLine) >= 13;
+    const showMaxLabel = spread > 0 && Math.abs(yMaxLine - yLastLine) >= 12;
+    const showMinLabel = spread > 0 && Math.abs(yMinLine - yLastLine) >= 12;
 
     const hitCircles = coords
       .map((c, i) => {
@@ -196,7 +196,7 @@
         ${showMaxLabel ? `<text x="${padLeft + plotW + 6}" y="${yMaxLine + 4}" class="lqs-svg-axis-label">${esc(formatRub(maxP))}</text>` : ''}
         <text x="${padLeft + plotW + 6}" y="${yLastLine + 4}" class="lqs-svg-axis-current">${esc(formatRub(lastP))}</text>
         ${showMinLabel ? `<text x="${padLeft + plotW + 6}" y="${yMinLine + 4}" class="lqs-svg-axis-label">${esc(formatRub(minP))}</text>` : ''}
-        ${ticks.map((t) => `<text x="${Math.round(t.x)}" y="${height - 7}" text-anchor="middle" class="lqs-svg-axis-date">${esc(t.label)}</text>`).join('')}
+        ${ticks.map((t) => `<text x="${Math.round(t.x)}" y="${height - 4}" text-anchor="middle" class="lqs-svg-axis-date">${esc(t.label)}</text>`).join('')}
         ${hitCircles}
       </svg>
     `;
@@ -213,11 +213,11 @@
       ? (Array.isArray(data?.dailyAvg) && days === Number(data?.days) ? data.dailyAvg : aggregateDailyAverages(filteredPoints))
       : filteredPoints;
 
-    const svgHtml = buildPriceChartSvg(series);
+    const svgHtml = buildPriceChartSvg(series, isPopover ? { width: 320, height: 104 } : { width: 440, height: 84 });
     const pointCount = filteredPoints.length;
     const stats = data && data.stats ? data.stats : {};
     const hintText = pointCount <= 1
-      ? 'Пока 1 замер — график будет достраиваться при просмотрах и фоновой проверке'
+      ? 'Пока 1 замер — график достроится при просмотрах'
       : `Замеров: ${pointCount} • Мин: ${formatRub(stats.minPrice)} • Сред: ${formatRub(stats.avgPrice)} • Макс: ${formatRub(stats.maxPrice)}`;
 
     return `
@@ -226,31 +226,28 @@
           <div class="lqs-ph-title-wrap">
             <span class="lqs-ph-title">История цены</span>
             <select class="lqs-ph-period" aria-label="Период истории цены">
-              <option value="7" ${days === 7 ? 'selected' : ''}>за 7 дней</option>
-              <option value="30" ${days === 30 ? 'selected' : ''}>за 1 месяц</option>
-              <option value="90" ${days === 90 ? 'selected' : ''}>за 3 месяца</option>
-              <option value="0" ${days === 0 ? 'selected' : ''}>за всё время</option>
+              <option value="7" ${days === 7 ? 'selected' : ''}>7 дн.</option>
+              <option value="30" ${days === 30 ? 'selected' : ''}>1 мес.</option>
+              <option value="90" ${days === 90 ? 'selected' : ''}>3 мес.</option>
+              <option value="0" ${days === 0 ? 'selected' : ''}>всё время</option>
             </select>
+            <div class="lqs-ph-tabs" role="tablist" aria-label="Режим графика">
+              <button type="button" role="tab" aria-selected="${mode === 'exact' ? 'true' : 'false'}" class="lqs-ph-tab ${mode === 'exact' ? 'is-active' : ''}" data-mode="exact">Точная</button>
+              <button type="button" role="tab" aria-selected="${mode === 'avg' ? 'true' : 'false'}" class="lqs-ph-tab ${mode === 'avg' ? 'is-active' : ''}" data-mode="avg">Средняя</button>
+            </div>
           </div>
           <div class="lqs-ph-header-actions">
+            <span class="lqs-ph-tooltip" role="status" aria-live="polite"></span>
             ${isPopover
               ? '<button type="button" class="lqs-ph-close-btn" aria-label="Закрыть график" title="Закрыть (Esc)">✕</button>'
               : '<button type="button" class="lqs-ph-popout-btn" title="Открыть в отдельном окне">↗</button>'}
           </div>
         </div>
 
-        <div class="lqs-ph-mode-row">
-          <div class="lqs-ph-tabs" role="tablist" aria-label="Режим графика">
-            <button type="button" role="tab" aria-selected="${mode === 'exact' ? 'true' : 'false'}" class="lqs-ph-tab ${mode === 'exact' ? 'is-active' : ''}" data-mode="exact">Точная</button>
-            <button type="button" role="tab" aria-selected="${mode === 'avg' ? 'true' : 'false'}" class="lqs-ph-tab ${mode === 'avg' ? 'is-active' : ''}" data-mode="avg">Средняя</button>
-          </div>
-          <div class="lqs-ph-tooltip" role="status" aria-live="polite"></div>
-        </div>
-
         <div class="lqs-ph-svg-wrap">${svgHtml}</div>
-        <div class="lqs-ph-meta">${esc(hintText)}</div>
 
         <div class="lqs-ph-footer">
+          <div class="lqs-ph-meta">${esc(hintText)}</div>
           <button type="button" class="lqs-ph-watch-btn ${isWatched ? 'is-watched' : ''}">
             ${isWatched ? '❤️ Слежу за товаром' : '🤍 Следить за товаром'}
           </button>

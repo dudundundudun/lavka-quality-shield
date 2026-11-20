@@ -252,13 +252,15 @@
       const pr = extractPricePairFromText(rawText);
       if (!pr) return;
 
-      // Determine which retailer inside Kuper owns this card
+      // Kuper is always stored as an independent store ('Купер') because Kuper can add markups;
+      // original retailer inside Kuper is preserved in sourceRetailer for tooltip only.
       const section = card.closest('section, [data-qa*="retailer"], [class*="Retailer"], [class*="StoreGroup"], [class*="SearchGroup"]');
       const sectionHeader = section
         ? normalizeSpace((section.querySelector('h1, h2, h3, [class*="Title"], [class*="Retailer"], img[alt]')?.textContent ||
             section.querySelector('img[alt]')?.getAttribute('alt') || ''))
         : '';
-      const storeName = detectKuperRetailer(fullUrl, `${sectionHeader} ${winLoc.pathname}`);
+      const detectedRetailer = detectKuperRetailer(fullUrl, `${sectionHeader} ${winLoc.pathname}`);
+      const sourceRetailer = detectedRetailer && detectedRetailer !== 'Купер' ? detectedRetailer : null;
 
       const titleEl = card.querySelector('[data-qa*="title"], [class*="Title"], [class*="Name"], h3, h4, img[alt]');
       const rawTitle = titleEl
@@ -267,12 +269,13 @@
       const title = cleanCardTitle(rawTitle, rawText);
       if (!title || title.length < 4) return;
 
-      const dedupKey = `${storeName}|${title.toLowerCase()}|${pr.price}`;
+      const dedupKey = `Купер|${sourceRetailer || ''}|${title.toLowerCase()}|${pr.price}`;
       if (seen.has(dedupKey)) return;
       seen.add(dedupKey);
 
       offers.push({
-        store: storeName,
+        store: 'Купер',
+        sourceRetailer,
         goodId: null,
         title,
         amount: extractWeightFromText(`${title} ${rawText}`),
@@ -387,9 +390,41 @@
     return offers;
   }
 
+  function diagnoseStorePage(doc, winLoc, offersCount = 0) {
+    if (offersCount > 0) {
+      return { status: 'ok', reason: 'ok', message: '' };
+    }
+    const bodyText = normalizeSpace((doc?.body?.innerText || doc?.body?.textContent || '').slice(0, 4500));
+    const titleText = normalizeSpace(doc?.title || '');
+    const hrefText = String(winLoc?.href || '');
+    const sample = `${titleText} ${bodyText} ${hrefText}`;
+
+    if (/(captcha|showcaptcha|smartcaptcha|ddos-guard|cloudflare|are you a robot|вы не робот|подозрительный трафик|подтвердите,?\s+что вы не робот|проверка браузера|доступ ограничен)/i.test(sample)) {
+      return {
+        status: 'captcha',
+        reason: 'captcha',
+        message: 'Сайт показал проверку от роботов (капчу)'
+      };
+    }
+
+    if (/(укажите\s+адрес|выберите\s+адрес|введите\s+адрес|куда\s+доставить|адрес\s+доставки|выберите\s+магазин|выберите\s+город|укажите\s+ваш\s+адрес|введите\s+город)/i.test(sample)) {
+      return {
+        status: 'needs_address',
+        reason: 'needs_address',
+        message: 'Нужно 1 раз выбрать адрес доставки на сайте магазина'
+      };
+    }
+
+    return {
+      status: 'not_found',
+      reason: 'not_found',
+      message: 'Товар не найден в выдаче магазина'
+    };
+  }
+
   function parseOffersFromDocument(doc, winLoc) {
     const storeInfo = detectStoreFromHost(winLoc.hostname);
-    if (!storeInfo) return { store: null, offers: [] };
+    if (!storeInfo) return { store: null, offers: [], diagnostic: { status: 'not_found', reason: 'unsupported_host', message: 'Неподдерживаемый сайт' } };
 
     let offers = [];
     if (storeInfo.id === 'magnit') {
@@ -400,7 +435,9 @@
       offers = parseGenericRetailerOffers(doc, winLoc, storeInfo);
     }
 
-    return { store: storeInfo.store, offers: offers.slice(0, 80) };
+    const sliced = offers.slice(0, 80);
+    const diagnostic = diagnoseStorePage(doc, winLoc, sliced.length);
+    return { store: storeInfo.store, offers: sliced, diagnostic };
   }
 
   function showHarvesterToast(storeLabel, count, totalInDb) {
@@ -427,12 +464,14 @@
     let lastHarvestHash = '';
 
     const runHarvest = (silent = false) => {
-      const { store, offers } = parseOffersFromDocument(document, window.location);
-      if (!offers || offers.length === 0) return { store: store || storeInfo.store, offers: [] };
+      const { store, offers, diagnostic } = parseOffersFromDocument(document, window.location);
+      if (!offers || offers.length === 0) {
+        return { store: store || storeInfo.store, offers: [], diagnostic };
+      }
 
       const hash = offers.map((o) => `${o.store}:${o.title}:${o.price}`).join('|');
       if (!silent && hash === lastHarvestHash) {
-        return { store: store || storeInfo.store, offers };
+        return { store: store || storeInfo.store, offers, diagnostic };
       }
       lastHarvestHash = hash;
 
@@ -449,7 +488,7 @@
           }
         );
       }
-      return { store: store || storeInfo.store, offers };
+      return { store: store || storeInfo.store, offers, diagnostic };
     };
 
     // On-demand harvesting for 1-click background tab radar (works even when tab is hidden)
@@ -457,7 +496,7 @@
       chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (!msg || msg.type !== 'LQS_HARVEST_STORE_PAGE_NOW') return false;
         const result = runHarvest(true);
-        sendResponse({ ok: true, store: result.store, offers: result.offers });
+        sendResponse({ ok: true, store: result.store, offers: result.offers, diagnostic: result.diagnostic || { status: result.offers.length > 0 ? 'ok' : 'not_found', reason: result.offers.length > 0 ? 'ok' : 'not_found', message: '' } });
         return true;
       });
     }
@@ -481,6 +520,8 @@
     detectKuperRetailer,
     extractWeightFromText,
     extractPricePairFromText,
+    diagnoseStorePage,
+    parseKuperOffers,
     parseOffersFromDocument,
     initStoreHarvesterIfNeeded,
     initMagnitStoreHarvesterIfNeeded: initStoreHarvesterIfNeeded

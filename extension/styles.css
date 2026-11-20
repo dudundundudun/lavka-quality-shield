@@ -866,8 +866,8 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 .lqs-ph-card {
   background: #ffffff !important;
   border: 1px solid #e5e3df !important;
-  border-radius: 14px !important;
-  padding: 10px 12px !important;
+  border-radius: 12px !important;
+  padding: 8px 10px !important;
   color: #21201f !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   box-sizing: border-box !important;
@@ -875,8 +875,8 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 
 .lqs-ph-card.is-inline {
   width: 100% !important;
-  max-width: 360px !important;
-  margin: 0 auto !important;
+  max-width: none !important;
+  margin: 0 !important;
 }
 
 .lqs-ph-card.is-popover {
@@ -890,33 +890,44 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
-  gap: 8px !important;
-  margin-bottom: 8px !important;
+  gap: 6px !important;
+  margin-bottom: 4px !important;
+  flex-wrap: wrap !important;
 }
 
 .lqs-ph-title-wrap {
   display: flex !important;
   align-items: center !important;
-  gap: 8px !important;
+  gap: 6px !important;
   flex-wrap: wrap !important;
+  min-width: 0 !important;
+}
+
+.lqs-ph-header-actions {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  margin-left: auto !important;
+  min-width: 0 !important;
 }
 
 .lqs-ph-title {
-  font-size: 15px !important;
+  font-size: 13px !important;
   font-weight: 700 !important;
   color: #21201f !important;
+  white-space: nowrap !important;
 }
 
 .lqs-ph-period {
   border: 1px solid #e5e3df !important;
   background: #f5f4f2 !important;
   color: #21201f !important;
-  border-radius: 8px !important;
-  font-size: 12px !important;
+  border-radius: 7px !important;
+  font-size: 11px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
   outline: none !important;
-  padding: 2px 6px !important;
+  padding: 2px 5px !important;
 }
 
 .lqs-ph-close-btn,
@@ -924,15 +935,16 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   border: 1px solid #e5e3df !important;
   background: #f5f4f2 !important;
   color: #5c5955 !important;
-  border-radius: 8px !important;
-  width: 26px !important;
-  height: 26px !important;
+  border-radius: 7px !important;
+  width: 24px !important;
+  height: 24px !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
   cursor: pointer !important;
-  font-size: 13px !important;
+  font-size: 12px !important;
   font-weight: 700 !important;
+  flex-shrink: 0 !important;
 }
 
 .lqs-ph-close-btn:hover,
@@ -963,9 +975,9 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   border: none !important;
   background: transparent !important;
   color: #6e6a66 !important;
-  border-radius: 7px !important;
-  padding: 4px 11px !important;
-  font-size: 12px !important;
+  border-radius: 6px !important;
+  padding: 2px 8px !important;
+  font-size: 11px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
   transition: background 0.15s, color 0.15s !important;
@@ -996,6 +1008,10 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   width: 100% !important;
   height: auto !important;
   display: block !important;
+}
+
+.lqs-ph-card.is-inline .lqs-price-svg {
+  max-height: 86px !important;
 }
 
 .lqs-svg-axis-label {
@@ -1040,25 +1056,42 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
 .lqs-ph-meta {
   font-size: 11px !important;
   color: #7a7773 !important;
-  margin-top: 4px !important;
-  text-align: center !important;
+  margin-top: 0 !important;
+  text-align: left !important;
+  flex: 1 1 160px !important;
+  min-width: 0 !important;
 }
 
 .lqs-ph-footer {
-  margin-top: 8px !important;
+  margin-top: 4px !important;
   display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+
+.lqs-ph-card.is-popover .lqs-ph-footer {
+  margin-top: 8px !important;
   justify-content: center !important;
+}
+
+.lqs-ph-card.is-popover .lqs-ph-meta {
+  text-align: center !important;
+  flex-basis: 100% !important;
 }
 
 .lqs-ph-watch-btn {
   border: 1px solid #e5e3df !important;
   background: #f5f4f2 !important;
   color: #21201f !important;
-  border-radius: 10px !important;
-  padding: 6px 16px !important;
-  font-size: 12.5px !important;
+  border-radius: 8px !important;
+  padding: 4px 10px !important;
+  font-size: 11.5px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
   transition: background 0.15s, border-color 0.15s !important;
 }
 
@@ -1228,7 +1261,13 @@ div.lqs-product-panel .lqs-metric-pill.verdict-bad {
   flex-shrink: 1 !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
-  max-width: 135px !important;
+  max-width: 150px !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.verdict-warn {
+  display: inline-block !important;
+  line-height: 22px !important;
+  max-width: 240px !important;
 }
 
 div.lqs-product-panel button.lqs-drawer-toggle-btn {

@@ -140,6 +140,7 @@ test('scanStoresInBackgroundTabs opens background tab, harvests offers, and clos
     console,
     URL,
     URLSearchParams,
+    AbortController,
     Date,
     Math,
     JSON,
@@ -184,4 +185,390 @@ test('scanStoresInBackgroundTabs opens background tab, harvests offers, and clos
   assert.deepEqual(removedTabs, [777]);
   assert.equal(res.harvestedCount, 6);
   assert.ok(res.matchedCount >= 2);
+});
+
+test('parseKuperOffers always saves store as "Купер" and preserves sourceRetailer separately', () => {
+  const h = loadHarvesterModule();
+  const mockLink = {
+    tagName: 'A',
+    getAttribute: (attr) => (attr === 'href' ? '/pyaterochka/products/milk-930ml' : attr === 'title' ? 'Молоко Простоквашино 930 мл' : null),
+    textContent: 'Молоко Простоквашино 930 мл'
+  };
+  const mockCard = {
+    tagName: 'ARTICLE',
+    innerText: 'Молоко Простоквашино 930 мл 109 ₽ 129 ₽',
+    textContent: 'Молоко Простоквашино 930 мл 109 ₽ 129 ₽',
+    querySelector: (sel) => (sel.includes('a[href') ? mockLink : null),
+    closest: () => ({
+      querySelector: () => ({ textContent: 'Пятёрочка', getAttribute: () => '' })
+    })
+  };
+  const mockDoc = {
+    title: 'Купер — поиск',
+    body: { innerText: 'Молоко Простоквашино 930 мл 109 ₽' },
+    querySelectorAll: () => [mockCard]
+  };
+  const res = h.parseOffersFromDocument(mockDoc, {
+    hostname: 'kuper.ru',
+    origin: 'https://kuper.ru',
+    pathname: '/multisearch',
+    href: 'https://kuper.ru/multisearch?q=молоко'
+  });
+  assert.equal(res.store, 'Купер');
+  assert.equal(res.offers.length, 1);
+  assert.equal(res.offers[0].store, 'Купер');
+  assert.equal(res.offers[0].sourceRetailer, 'Пятёрочка');
+  assert.equal(res.offers[0].price, 109);
+  assert.equal(res.diagnostic.status, 'ok');
+});
+
+test('diagnoseStorePage returns honest reasons: ok, needs_address, captcha, not_found', () => {
+  const h = loadHarvesterModule();
+  assert.equal(h.diagnoseStorePage({ title: '', body: { innerText: '' } }, { href: 'https://magnit.ru' }, 3).reason, 'ok');
+  assert.equal(
+    h.diagnoseStorePage({ title: 'Магнит', body: { innerText: 'Укажите адрес доставки, чтобы увидеть цены' } }, { href: 'https://magnit.ru/search' }, 0).reason,
+    'needs_address'
+  );
+  assert.equal(
+    h.diagnoseStorePage({ title: 'Проверка браузера', body: { innerText: 'Подтвердите, что вы не робот (SmartCaptcha)' } }, { href: 'https://5ka.ru/search' }, 0).reason,
+    'captcha'
+  );
+  assert.equal(
+    h.diagnoseStorePage({ title: 'Поиск', body: { innerText: 'По вашему запросу ничего не найдено' } }, { href: 'https://kuper.ru/multisearch' }, 0).reason,
+    'not_found'
+  );
+});
+
+test('auto-radar enforces 24h cache per slug, manual scan bypasses cache, and returns honest diagnostics', async () => {
+  const createdTabs = [];
+  const storageData = {};
+  let activeTabs = 0;
+  let maxConcurrentTabs = 0;
+  const sleepCalls = [];
+
+  const chromeMock = {
+    runtime: {
+      lastError: null,
+      getURL: (p) => `chrome-extension://test/${p}`
+    },
+    storage: {
+      local: {
+        get: (keys, cb) => {
+          const out = {};
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const k of list) if (k in storageData) out[k] = storageData[k];
+          cb(out);
+        },
+        set: (obj, cb) => {
+          Object.assign(storageData, obj || {});
+          if (cb) cb();
+        }
+      }
+    },
+    tabs: {
+      onUpdated: { addListener: () => {}, removeListener: () => {} },
+      get: (id, cb) => cb({ id, status: 'complete' }),
+      create: (opts, cb) => {
+        activeTabs += 1;
+        maxConcurrentTabs = Math.max(maxConcurrentTabs, activeTabs);
+        const id = 900 + createdTabs.length;
+        createdTabs.push({ id, ...opts });
+        cb({ id, status: 'complete' });
+      },
+      sendMessage: (tabId, msg, cb) => {
+        const tab = createdTabs.find((t) => t.id === tabId);
+        if (tab && tab.url.includes('magnit.ru')) {
+          cb({
+            ok: true,
+            store: 'Магнит',
+            offers: [],
+            diagnostic: { status: 'needs_address', reason: 'needs_address', message: 'Нужно 1 раз выбрать адрес доставки' }
+          });
+          return;
+        }
+        cb({
+          ok: true,
+          store: 'Купер',
+          offers: [
+            {
+              store: 'Купер',
+              sourceRetailer: 'Пятёрочка',
+              title: 'Молоко Простоквашино 930 мл',
+              amount: '930 мл',
+              price: 109,
+              url: 'https://kuper.ru/pyaterochka/products/milk-930'
+            }
+          ],
+          diagnostic: { status: 'ok', reason: 'ok', message: '' }
+        });
+      },
+      remove: (_id, cb) => {
+        activeTabs = Math.max(0, activeTabs - 1);
+        if (cb) cb();
+      }
+    }
+  };
+
+  const sandbox = {
+    chrome: chromeMock,
+    console,
+    URL,
+    URLSearchParams,
+    AbortController,
+    Date,
+    Math,
+    JSON,
+    Map,
+    Set,
+    Promise,
+    RegExp,
+    Array,
+    Object,
+    Number,
+    String,
+    Boolean,
+    setTimeout: (fn, ms) => { sleepCalls.push(ms); fn(); return 1; },
+    clearTimeout: () => {},
+    fetch: async () => ({ ok: false, status: 503, text: async () => '', json: async () => ({}) })
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  const ctx = vm.createContext(sandbox);
+
+  for (const rel of ['shared/config.js', 'shared/utils.js', 'shared/product-matcher.js', 'bg/price-radar.js']) {
+    vm.runInContext(fs.readFileSync(path.join(extDir, rel), 'utf8'), ctx);
+  }
+  sandbox.LQS_BG_DEPS = {
+    startSwKeepAlive: () => () => {},
+    getBackendOfflineUntilTs: () => Date.now() + 60000,
+    probeDirectRetailStoresForProduct: async () => []
+  };
+  sandbox.LQS_PRICE_RADAR.resetRadarRuntimeState();
+
+  // 1. First auto-scan runs and returns honest diagnostics (magnit needs_address, kuper ok)
+  const res1 = await sandbox.LQS_PRICE_RADAR.scanStoresInBackgroundTabs({
+    slug: 'milk_930',
+    title: 'Молоко Простоквашино 930 мл',
+    amount: '930 мл',
+    price: 119,
+    stores: ['magnit', 'kuper'],
+    isAuto: true,
+    forceRefresh: false
+  });
+  assert.equal(res1.ok, true);
+  assert.equal(res1.skipped, false);
+  assert.equal(maxConcurrentTabs, 1);
+  assert.equal(createdTabs.length, 2);
+  assert.equal(res1.storeDiagnostics.find((d) => d.storeId === 'magnit')?.reason, 'needs_address');
+  assert.equal(res1.storeDiagnostics.find((d) => d.storeId === 'kuper')?.reason, 'ok');
+  assert.ok(res1.lastRadarScanAt);
+
+  // 2. Second auto-scan for same slug within 24h is skipped with 0 new tabs
+  const res2 = await sandbox.LQS_PRICE_RADAR.scanStoresInBackgroundTabs({
+    slug: 'milk_930',
+    title: 'Молоко Простоквашино 930 мл',
+    amount: '930 мл',
+    price: 119,
+    stores: ['magnit', 'kuper'],
+    isAuto: true,
+    forceRefresh: false
+  });
+  assert.equal(res2.ok, true);
+  assert.equal(res2.skipped, true);
+  assert.equal(res2.reason, 'cached_24h');
+  assert.equal(createdTabs.length, 2);
+
+  // 3. Auto-scan for ANOTHER slug enforces 15s cooldown wait
+  sleepCalls.length = 0;
+  const res3 = await sandbox.LQS_PRICE_RADAR.scanStoresInBackgroundTabs({
+    slug: 'kefir_930',
+    title: 'Кефир Простоквашино 930 мл',
+    amount: '930 мл',
+    price: 115,
+    stores: ['kuper'],
+    isAuto: true,
+    forceRefresh: false,
+    cooldownMs: 15000
+  });
+  assert.equal(res3.ok, true);
+  assert.equal(res3.skipped, false);
+  assert.ok(sleepCalls.some((ms) => ms >= 14000 && ms <= 15000), `Expected ~15s cooldown wait, got: ${sleepCalls}`);
+
+  // 4. Manual scan bypasses 24h cache for milk_930
+  const beforeManualTabs = createdTabs.length;
+  const res4 = await sandbox.LQS_PRICE_RADAR.scanStoresInBackgroundTabs({
+    slug: 'milk_930',
+    title: 'Молоко Простоквашино 930 мл',
+    amount: '930 мл',
+    price: 119,
+    stores: ['kuper'],
+    isAuto: false,
+    forceRefresh: true
+  });
+  assert.equal(res4.ok, true);
+  assert.equal(res4.skipped, false);
+  assert.equal(createdTabs.length, beforeManualTabs + 1);
+});
+
+test('direct product URL memory: first scan searches and remembers URL, next scan visits direct URL, stale link falls back to search', async () => {
+  const openedUrls = [];
+  const backendCalls = [];
+  const storageData = {};
+  let simulateStaleDirect = false;
+
+  const chromeMock = {
+    runtime: { lastError: null, getURL: (p) => `chrome-extension://test/${p}` },
+    storage: {
+      local: {
+        get: (keys, cb) => {
+          const out = {};
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const k of list) if (k in storageData) out[k] = storageData[k];
+          cb(out);
+        },
+        set: (obj, cb) => {
+          Object.assign(storageData, obj || {});
+          if (cb) cb();
+        }
+      }
+    },
+    tabs: {
+      onUpdated: { addListener: () => {}, removeListener: () => {} },
+      get: (id, cb) => cb({ id, status: 'complete' }),
+      create: (opts, cb) => {
+        const id = 1200 + openedUrls.length;
+        openedUrls.push({ id, url: opts.url });
+        cb({ id, status: 'complete' });
+      },
+      sendMessage: (tabId, _msg, cb) => {
+        const tab = openedUrls.find((t) => t.id === tabId);
+        if (simulateStaleDirect && tab && tab.url.includes('/product/123456')) {
+          cb({
+            ok: true,
+            store: 'Магнит',
+            offers: [],
+            diagnostic: { status: 'not_found', reason: 'not_found', message: 'Товар не найден' }
+          });
+          return;
+        }
+        cb({
+          ok: true,
+          store: 'Магнит',
+          offers: [
+            {
+              store: 'Магнит',
+              title: 'Сыр Ламбер 230 г',
+              amount: '230 г',
+              price: simulateStaleDirect ? 299 : 279,
+              url: simulateStaleDirect
+                ? 'https://magnit.ru/product/999888-syr-lamber-230g'
+                : 'https://magnit.ru/product/123456-syr-lamber-230g'
+            }
+          ],
+          diagnostic: { status: 'ok', reason: 'ok', message: '' }
+        });
+      },
+      remove: (_id, cb) => { if (cb) cb(); }
+    }
+  };
+
+  const sandbox = {
+    chrome: chromeMock,
+    console,
+    URL,
+    URLSearchParams,
+    AbortController,
+    Date,
+    Math,
+    JSON,
+    Map,
+    Set,
+    Promise,
+    RegExp,
+    Array,
+    Object,
+    Number,
+    String,
+    Boolean,
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+    fetch: async (url, opts = {}) => {
+      backendCalls.push({ url, method: opts.method || 'GET', body: opts.body || null });
+      if (String(url).includes('/api/price/links') && (opts.method || 'GET') === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ status: 'ok', links: {} }) };
+      }
+      if (String(url).includes('/api/price/links')) {
+        return { ok: true, status: 200, json: async () => ({ status: 'ok', saved: 1 }) };
+      }
+      return { ok: false, status: 404, text: async () => '', json: async () => ({}) };
+    }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  const ctx = vm.createContext(sandbox);
+
+  for (const rel of ['shared/config.js', 'shared/utils.js', 'shared/product-matcher.js', 'bg/price-radar.js']) {
+    vm.runInContext(fs.readFileSync(path.join(extDir, rel), 'utf8'), ctx);
+  }
+  sandbox.LQS_BG_DEPS = {
+    startSwKeepAlive: () => () => {},
+    getBackendOfflineUntilTs: () => 0,
+    getBackendAuthHeaders: async (_u, extra = {}) => ({ 'X-LQS-Token': 'test-tok', ...extra }),
+    probeDirectRetailStoresForProduct: async () => []
+  };
+  const radar = sandbox.LQS_PRICE_RADAR;
+  radar.resetRadarRuntimeState();
+
+  // Check URL classifier
+  assert.equal(radar.isDirectProductUrl('https://magnit.ru/product/123456-syr', 'magnit'), true);
+  assert.equal(radar.isDirectProductUrl('https://kuper.ru/pyaterochka/products/milk-1l', 'kuper'), true);
+  assert.equal(radar.isDirectProductUrl('https://magnit.ru/search?term=сыр', 'magnit'), false);
+  assert.equal(radar.isDirectProductUrl('https://kuper.ru/multisearch?q=сыр', 'kuper'), false);
+
+  // 1. First scan uses search and saves direct link to storage + backend
+  const res1 = await radar.scanStoresInBackgroundTabs({
+    slug: 'lamber_230g',
+    title: 'Сыр Ламбер 230 г',
+    amount: '230 г',
+    price: 319,
+    stores: ['magnit'],
+    isAuto: false,
+    forceRefresh: true
+  });
+  assert.equal(res1.ok, true);
+  assert.equal(res1.directLinksUsedCount, 0);
+  assert.match(openedUrls[0].url, /^https:\/\/magnit\.ru\/search\?term=/);
+  assert.ok(backendCalls.some((c) => c.method === 'POST' && c.url.includes('/api/price/links')));
+
+  // 2. Second scan opens remembered direct product URL directly (skipping search!)
+  const res2 = await radar.scanStoresInBackgroundTabs({
+    slug: 'lamber_230g',
+    title: 'Сыр Ламбер 230 г',
+    amount: '230 г',
+    price: 319,
+    stores: ['magnit'],
+    isAuto: false,
+    forceRefresh: true
+  });
+  assert.equal(res2.ok, true);
+  assert.equal(res2.directLinksUsedCount, 1);
+  assert.equal(openedUrls[1].url, 'https://magnit.ru/product/123456-syr-lamber-230g');
+
+  // 3. Stale direct URL returns not_found -> deletes stale link and falls back to search, saving new URL
+  simulateStaleDirect = true;
+  const res3 = await radar.scanStoresInBackgroundTabs({
+    slug: 'lamber_230g',
+    title: 'Сыр Ламбер 230 г',
+    amount: '230 г',
+    price: 319,
+    stores: ['magnit'],
+    isAuto: false,
+    forceRefresh: true
+  });
+  assert.equal(res3.ok, true);
+  assert.equal(openedUrls[2].url, 'https://magnit.ru/product/123456-syr-lamber-230g');
+  assert.match(openedUrls[3].url, /^https:\/\/magnit\.ru\/search\?term=/);
+  assert.ok(backendCalls.some((c) => c.method === 'DELETE' && c.url.includes('/api/price/links/lamber_230g/magnit')));
+  const savedAfter = await radar.getRememberedProductLinks('lamber_230g');
+  assert.equal(savedAfter.magnit.url, 'https://magnit.ru/product/999888-syr-lamber-230g');
 });
