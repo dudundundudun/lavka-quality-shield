@@ -6,7 +6,7 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.8.0',
+    VERSION: '2.8.1',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',

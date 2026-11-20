@@ -1158,3 +1158,130 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   background: #fef2f2 !important;
   border-color: #fecaca !important;
 }
+
+/* ===== Lavka Quality Shield v2.8.1 — Compact 1-Line Top Bar & Priced Store Pills ===== */
+div.lqs-product-panel {
+  padding: 6px 10px !important;
+}
+
+div.lqs-product-panel .lqs-main-bar {
+  flex-wrap: nowrap !important;
+  gap: 5px !important;
+  min-height: 26px !important;
+}
+
+div.lqs-product-panel .lqs-core-left {
+  flex-wrap: nowrap !important;
+  gap: 4px !important;
+  overflow: hidden !important;
+}
+
+div.lqs-product-panel .lqs-stars-inline {
+  height: 24px !important;
+  min-height: 24px !important;
+  padding: 0 4px !important;
+  border-radius: 7px !important;
+  gap: 0 !important;
+}
+
+div.lqs-product-panel button.lqs-star-btn {
+  width: 15px !important;
+  min-width: 15px !important;
+  height: 22px !important;
+  min-height: 22px !important;
+  font-size: 14px !important;
+  padding: 0 !important;
+}
+
+div.lqs-product-panel .lqs-metrics-inline {
+  flex-wrap: nowrap !important;
+  gap: 4px !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill {
+  height: 24px !important;
+  min-height: 24px !important;
+  padding: 0 6px !important;
+  font-size: 11px !important;
+  border-radius: 7px !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+div.lqs-product-panel .lqs-metric-pill.verdict-good,
+div.lqs-product-panel .lqs-metric-pill.verdict-warn,
+div.lqs-product-panel .lqs-metric-pill.verdict-bad {
+  flex-shrink: 1 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  max-width: 135px !important;
+}
+
+div.lqs-product-panel button.lqs-drawer-toggle-btn {
+  height: 24px !important;
+  min-height: 24px !important;
+  padding: 0 8px !important;
+  font-size: 11px !important;
+  border-radius: 7px !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+.lqs-top3-empty-hint {
+  font-size: 11px !important;
+  color: #64748b !important;
+  margin-top: 5px !important;
+}
+
+.lqs-stores-strip {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 4px !important;
+  margin-top: 7px !important;
+  padding-top: 6px !important;
+  border-top: 1px dashed #bae6fd !important;
+  align-items: center !important;
+}
+
+.lqs-stores-strip-label {
+  font-size: 11px !important;
+  color: #0f172a !important;
+  font-weight: 700 !important;
+  margin-right: 2px !important;
+}
+
+a.lqs-store-link {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 3px !important;
+  font-size: 11px !important;
+  padding: 2px 7px !important;
+  border-radius: 6px !important;
+  background: #f1f5f9 !important;
+  border: 1px solid #cbd5e1 !important;
+  color: #1e293b !important;
+  text-decoration: none !important;
+  font-weight: 600 !important;
+}
+
+a.lqs-store-link:hover {
+  background: #e2e8f0 !important;
+}
+
+a.lqs-store-link.has-price {
+  background: #eff6ff !important;
+  border-color: #93c5fd !important;
+  color: #1e3a8a !important;
+}
+
+a.lqs-store-link.is-cheaper {
+  background: #dcfce7 !important;
+  border-color: #86efac !important;
+  color: #166534 !important;
+}
+
+.lqs-store-pill-price {
+  font-weight: 800 !important;
+}

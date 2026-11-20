@@ -1132,23 +1132,43 @@
       }
     }
 
+    // Строим карту лучших известных цен по каждой сети (для Топ-3 и для отображения цены прямо на кнопках 16 сетей)
+    const bestOfferByStoreKey = new Map();
+    const normStoreKey = (name) => String(name || '').toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '');
+    const pricedCompetitorOffers = [];
     if (pIntel && Array.isArray(pIntel.competitorOffers)) {
       for (const offer of pIntel.competitorOffers) {
         if (!offer || !offer.store) continue;
         const oPrice = offer.price && offer.price > 0 ? Math.round(offer.price) : null;
-        const diff = (lavkaNow && oPrice) ? lavkaNow - oPrice : 0;
-        comparisonRows.push({
-          source: `🏪 ${offer.store}`,
-          price: oPrice,
-          oldPrice: offer.oldPrice || null,
-          url: offer.url || null,
-          offerTitle: offer.title || '',
-          badge: oPrice
-            ? (diff > 2 ? `✅ Выгоднее на -${diff} ₽` : (diff < -2 ? `В Лавке дешевле на ${Math.abs(diff)} ₽` : 'Такая же цена'))
-            : 'Открыть карточку ↗'
-        });
+        if (!oPrice) continue;
+        const sKey = normStoreKey(offer.store);
+        const prev = bestOfferByStoreKey.get(sKey);
+        if (!prev || oPrice < prev.price) {
+          bestOfferByStoreKey.set(sKey, { ...offer, price: oPrice });
+        }
       }
+      bestOfferByStoreKey.forEach((val) => pricedCompetitorOffers.push(val));
+      pricedCompetitorOffers.sort((a, b) => a.price - b.price);
     }
+
+    // Топ-3 лучшие цены в других магазинах
+    const top3Competitors = pricedCompetitorOffers.slice(0, 3);
+    top3Competitors.forEach((offer, idx) => {
+      const oPrice = offer.price;
+      const diff = lavkaNow ? lavkaNow - oPrice : 0;
+      const medal = idx === 0 ? '🥇 ' : idx === 1 ? '🥈 ' : '🥉 ';
+      comparisonRows.push({
+        source: `${medal}${offer.store}`,
+        price: oPrice,
+        oldPrice: offer.oldPrice || null,
+        url: offer.url || null,
+        offerTitle: offer.title || '',
+        isCompetitor: true,
+        badge: diff > 2
+          ? `✅ Выгоднее на -${diff} ₽`
+          : (diff < -2 ? `В Лавке дешевле на ${Math.abs(diff)} ₽` : 'Такая же цена')
+      });
+    });
 
     const pricedRows = comparisonRows.filter((r) => r.price && r.price > 0);
     const absoluteMinPrice = pricedRows.length > 0 ? Math.min(...pricedRows.map((r) => r.price)) : null;
@@ -1156,7 +1176,7 @@
     const matrixTableHtml = comparisonRows.length > 0
       ? `<div class="lqs-price-matrix-box">
           <div class="lqs-price-matrix-title">
-            <span>📊 <b>Окно сравнения цен: где выгоднее купить именно этот товар</b></span>
+            <span>📊 <b>Сравнение цен: Лавка и Топ-3 лучших в сетях</b></span>
             ${
               pIntel && pIntel.minPrice && pIntel.maxPrice
                 ? `<span style="font-size:10.5px;color:#475569;">История в БД: мин <b>${pIntel.minPrice} ₽</b> / макс <b>${pIntel.maxPrice} ₽</b></span>`
@@ -1192,20 +1212,40 @@
         </div>`
       : `<div>💰 <b>Радар цен:</b> собираю данные по истории цены и другим магазинам...</div>`;
 
+    const top3EmptyHint = top3Competitors.length === 0
+      ? `<div class="lqs-top3-empty-hint">🔎 В других сетях цены для этого товара ещё не найдены — выберите магазин ниже для быстрого сравнения</div>`
+      : '';
+
     const storeButtonsHtml = title
-      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:7px;padding-top:6px;border-top:1px dashed #bae6fd;align-items:center;">
-          <span style="font-size:11px;color:#0f172a;font-weight:700;margin-right:3px;">🔍 Сравнить в 16 сетях (полное название из карточки):</span>
+      ? `<div class="lqs-stores-strip">
+          <span class="lqs-stores-strip-label">🔍 Сети:</span>
           ${storeLinks
-            .map(
-              (s) =>
-                `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" class="lqs-store-link is-search" style="font-size:11px !important;padding:2px 7px !important;border-radius:6px !important;background:#f1f5f9 !important;border:1px solid #cbd5e1 !important;color:#1e293b !important;text-decoration:none !important;font-weight:600 !important;" title="[${escapeHtml(s.category || 'Магазин')}] Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)} ↗</a>`
-            )
+            .map((s) => {
+              const sKey = normStoreKey(s.store);
+              let matchedOffer = bestOfferByStoreKey.get(sKey) || null;
+              if (!matchedOffer) {
+                for (const [k, v] of bestOfferByStoreKey.entries()) {
+                  if (k && sKey && (k.includes(sKey) || sKey.includes(k))) {
+                    matchedOffer = v;
+                    break;
+                  }
+                }
+              }
+              const offerPrice = matchedOffer && matchedOffer.price > 0 ? Math.round(matchedOffer.price) : null;
+              const isCheaper = Boolean(offerPrice && lavkaNow && offerPrice < lavkaNow - 2);
+              const safeOfferUrl = matchedOffer && matchedOffer.url ? safeHttpUrl(matchedOffer.url) : null;
+              const hrefUrl = safeOfferUrl || s.url;
+              const pillCls = offerPrice ? (isCheaper ? 'lqs-store-link has-price is-cheaper' : 'lqs-store-link has-price') : 'lqs-store-link is-search';
+              const priceSuffix = offerPrice ? ` <span class="lqs-store-pill-price">${offerPrice}₽</span>` : '';
+              return `<a href="${escapeHtml(hrefUrl)}" target="_blank" rel="noopener noreferrer" class="${pillCls}" title="[${escapeHtml(s.category || 'Магазин')}] ${offerPrice ? `Найдена цена ${offerPrice} ₽ — ` : ''}Искать «${escapeHtml(s.query)}» в ${escapeHtml(s.store)}">${escapeHtml(s.store)}${priceSuffix} ↗</a>`;
+            })
             .join('')}
         </div>`
       : '';
 
     return `<div>
       ${matrixTableHtml}
+      ${top3EmptyHint}
       ${storeButtonsHtml}
     </div>`;
   }
@@ -1217,17 +1257,17 @@
       const pieceHint = (smart.pricePerPiece && smart.piecesCount > 1)
         ? ` (~${smart.pricePerPiece} ₽/${smart.pieceUnitLabel})`
         : '';
-      primaryPill = `<span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}${pieceHint}">⚖️ ~${smart.pricePerKg} ₽/${smart.unitLabel}</span>`;
+      primaryPill = `<span class="lqs-metric-pill" title="Честная цена за 1 ${smart.unitLabel}${pieceHint}">⚖️ ${smart.pricePerKg}₽/${smart.unitLabel}</span>`;
     } else if (smart.pricePerPiece && smart.piecesCount && smart.piecesCount > 1) {
-      primaryPill = `<span class="lqs-metric-pill" title="Товар продаётся поштучно (${smart.piecesCount} ${smart.pieceUnitLabel} в упаковке)">🔢 ~${smart.pricePerPiece} ₽/${smart.pieceUnitLabel}</span>`;
+      primaryPill = `<span class="lqs-metric-pill" title="Товар продаётся поштучно (${smart.piecesCount} ${smart.pieceUnitLabel} в упаковке)">🔢 ${smart.pricePerPiece}₽/${smart.pieceUnitLabel}</span>`;
     } else if (meta && meta.price) {
-      primaryPill = `<span class="lqs-metric-pill" title="Товар продаётся поштучно (вес в граммах не указан)">🔢 ${Math.round(meta.price)} ₽/шт</span>`;
+      primaryPill = `<span class="lqs-metric-pill" title="Товар продаётся поштучно (вес в граммах не указан)">🔢 ${Math.round(meta.price)}₽/шт</span>`;
     } else {
       primaryPill = `<span class="lqs-metric-pill" title="Вес или объём не указан на карточке">⚖️ Поштучно</span>`;
     }
 
     const proteinPill = smart.pricePer100gProtein
-      ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ~${smart.pricePer100gProtein} ₽ / 100г белка</span>`
+      ? `<span class="lqs-metric-pill protein-pill" title="Стоимость 100 г чистого белка (${smart.proteinPer100g}г белка на 100г)">🥩 ${smart.pricePer100gProtein}₽/100г</span>`
       : '';
 
     const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null, meta ? meta.title : '', meta ? meta.imageKey : null);
@@ -1826,12 +1866,6 @@
             </div>
 
             <div class="lqs-drawer-flags" id="lqs-drawer-flags">${initialFlagsHtml}</div>
-          </div>
-
-          <div class="lqs-tags-row">
-            ${PRESET_TAGS.map((tag) => `
-              <span class="lqs-tag-chip ${current.tags.includes(tag) ? 'selected' : ''}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</span>
-            `).join('')}
           </div>
 
           <div class="lqs-note-wrap">
