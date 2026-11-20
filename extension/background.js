@@ -85,7 +85,8 @@ const {
   recordExternalStoreOffers,
   findMatchingExternalStoreOffersFromList,
   mergeUniqueStoreOffers,
-  auditCartCompetitorsAndAccounts
+  auditCartCompetitorsAndAccounts,
+  scanStoresInBackgroundTabs
 } = globalThis.LQS_PRICE_RADAR;
 
 const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER, TOKEN_HEADER_NAME = 'X-LQS-Token' } = globalThis.LQS_CONFIG;
@@ -1912,19 +1913,32 @@ function isPassportOrPopupSender(sender) {
   return u.startsWith('https://passport.yandex.ru/') || u.startsWith('https://id.yandex.ru/');
 }
 
-function isTrustedMagnitSender(sender) {
+const TRUSTED_EXTERNAL_STORE_DOMAINS = [
+  'magnit.ru',
+  'kuper.ru',
+  'perekrestok.ru',
+  'vprok.ru',
+  '5ka.ru',
+  'vkusvill.ru',
+  'auchan.ru',
+  'lenta.com'
+];
+
+function isTrustedRetailStoreSender(sender) {
   const u = sender && typeof sender.url === 'string' ? sender.url : '';
   if (!u) return false;
   try {
     const parsed = new URL(u);
-    return parsed.protocol === 'https:' && (parsed.hostname === 'magnit.ru' || parsed.hostname.endsWith('.magnit.ru'));
+    if (parsed.protocol !== 'https:') return false;
+    const h = parsed.hostname.toLowerCase();
+    return TRUSTED_EXTERNAL_STORE_DOMAINS.some((d) => h === d || h.endsWith(`.${d}`));
   } catch {
     return false;
   }
 }
 
 function isTrustedExternalStoreSender(sender) {
-  return isTrustedLavkaOrPopupSender(sender) || isTrustedMagnitSender(sender);
+  return isTrustedLavkaOrPopupSender(sender) || isTrustedRetailStoreSender(sender);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -1948,6 +1962,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     recordPricesBatch(msg.accountId, msg.items || [])
       .then((summaries) => sendResponse({ ok: true, summaries }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_SCAN_STORES_LIVE') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    scanStoresInBackgroundTabs(msg.payload || {})
+      .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
   }

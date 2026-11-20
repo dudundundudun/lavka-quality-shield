@@ -650,6 +650,10 @@ function loadSettings() {
     if (popChk) popChk.checked = Boolean(cfg.priceChartWindowMode);
     const wlSel = document.getElementById('sel-watchlist-interval');
     if (wlSel) wlSel.value = String(cfg.watchlistCheckIntervalHours ?? 6);
+    const liveStores = Array.isArray(cfg.liveRadarStores) && cfg.liveRadarStores.length > 0 ? cfg.liveRadarStores : ['kuper'];
+    document.querySelectorAll('.chk-live-radar-store').forEach((chk) => {
+      chk.checked = liveStores.includes(chk.value);
+    });
     if (cfg.lavkaAccountLabel) {
       const sel = document.getElementById('lavka-account-select');
       if (sel && Array.from(sel.options).some((o) => o.value === cfg.lavkaAccountLabel)) {
@@ -672,6 +676,25 @@ function loadSettings() {
       });
     });
   }
+});
+
+
+function readSelectedLiveRadarStores() {
+  const checked = Array.from(document.querySelectorAll('.chk-live-radar-store'))
+    .filter((c) => c.checked)
+    .map((c) => c.value);
+  return checked.length > 0 ? checked.slice(0, 3) : ['kuper'];
+}
+
+document.querySelectorAll('.chk-live-radar-store').forEach((chk) => {
+  chk.addEventListener('change', () => {
+    const allChecked = Array.from(document.querySelectorAll('.chk-live-radar-store')).filter((c) => c.checked);
+    if (allChecked.length > 3) {
+      chk.checked = false;
+      return;
+    }
+    saveSettingsPatch({ liveRadarStores: readSelectedLiveRadarStores() });
+  });
 });
 
 const checkWatchlistNowBtn = document.getElementById('check-watchlist-now-btn');
@@ -966,6 +989,7 @@ document.getElementById('save-ai-btn').addEventListener('click', () => {
     autoWarmupGeminiTab: document.getElementById('chk-auto-warmup').checked,
     priceChartWindowMode: Boolean(document.getElementById('chk-price-chart-popover')?.checked),
     watchlistCheckIntervalHours: Number(document.getElementById('sel-watchlist-interval')?.value ?? 6),
+    liveRadarStores: readSelectedLiveRadarStores(),
     lavkaAccountLabel: document.getElementById('lavka-account-select').value
   };
   const tokEl = document.getElementById('inp-backend-token');

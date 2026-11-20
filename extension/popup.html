@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.8.2</title>
+  <title>Lavka Quality Shield v2.9.0</title>
   <style>
     body {
       width: 430px;
@@ -530,7 +530,7 @@
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.8.2 Account &amp; Cart</span>
+    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.9.0 Account &amp; Cart</span>
   </div>
 
   <div class="tabs">
@@ -691,6 +691,18 @@
           <option value="0">Выкл (вручную)</option>
         </select>
       </label>
+      <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #d1d5db;">
+        <div style="font-size:11px;font-weight:700;color:#1f2937;margin-bottom:4px;">Сети для кнопки «🔄 Найти цены в сетях» (до 3):</div>
+        <div id="live-radar-stores-group" style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px;">
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="kuper" checked> Купер (все сети)</label>
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="magnit"> Магнит</label>
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="perekrestok"> Перекрёсток</label>
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="pyaterochka"> Пятёрочка</label>
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="vkusvill"> ВкусВилл</label>
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="auchan"> Ашан</label>
+          <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" class="chk-live-radar-store" value="lenta"> Лента</label>
+        </div>
+      </div>
       <div style="display:flex;justify-content:flex-end;margin-top:3px;">
         <button type="button" id="clear-ai-cache-btn" style="border:1px solid #86efac;background:#ffffff;color:#166534;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700;cursor:pointer;">🗑️ Очистить кэш ИИ</button>
       </div>

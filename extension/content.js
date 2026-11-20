@@ -236,7 +236,7 @@
     return;
   }
 
-  if (globalThis.LQS_MAGNIT_PARSER && globalThis.LQS_MAGNIT_PARSER.initMagnitStoreHarvesterIfNeeded()) {
+  if (globalThis.LQS_STORE_HARVESTER && globalThis.LQS_STORE_HARVESTER.initStoreHarvesterIfNeeded()) {
     return;
   }
 
@@ -1177,11 +1177,14 @@
       ? `<div class="lqs-price-matrix-box">
           <div class="lqs-price-matrix-title">
             <span>📊 <b>Сравнение цен: Лавка и Топ-3 лучших в сетях</b></span>
-            ${
-              pIntel && pIntel.minPrice && pIntel.maxPrice
-                ? `<span style="font-size:10.5px;color:#475569;">История в БД: мин <b>${pIntel.minPrice} ₽</b> / макс <b>${pIntel.maxPrice} ₽</b></span>`
-                : ''
-            }
+            <div class="lqs-price-matrix-actions">
+              ${
+                pIntel && pIntel.minPrice && pIntel.maxPrice
+                  ? `<span style="font-size:10.5px;color:#6e6a66;">Мин <b>${pIntel.minPrice} ₽</b> / макс <b>${pIntel.maxPrice} ₽</b></span>`
+                  : ''
+              }
+              <button type="button" class="lqs-scan-stores-btn" data-slug="${escapeHtml(slug)}" title="Тихо проверить актуальные цены в Купере / выбранных сетях в фоновой вкладке">🔄 Найти цены в сетях</button>
+            </div>
           </div>
           <div class="lqs-price-matrix-grid">
             ${comparisonRows
@@ -1213,7 +1216,7 @@
       : `<div>💰 <b>Радар цен:</b> собираю данные по истории цены и другим магазинам...</div>`;
 
     const top3EmptyHint = top3Competitors.length === 0
-      ? `<div class="lqs-top3-empty-hint">🔎 В других сетях цены для этого товара ещё не найдены — выберите магазин ниже для быстрого сравнения</div>`
+      ? `<div class="lqs-top3-empty-hint">🔎 Цены в других сетях ещё не собраны — нажмите «🔄 Найти цены в сетях» или откройте любой магазин ниже</div>`
       : '';
 
     const storeButtonsHtml = title
@@ -1332,6 +1335,60 @@
   function toggleDrawerState(panel, source = 'click') {
     if (!panel) return false;
     const drawer = panel.querySelector('#lqs-drawer');
+    const radarBarRoot = panel.querySelector('#lqs-price-radar-bar');
+    if (radarBarRoot && !radarBarRoot.dataset.lqsScanBound) {
+      radarBarRoot.dataset.lqsScanBound = '1';
+      radarBarRoot.addEventListener('click', (ev) => {
+        const scanBtn = ev.target && ev.target.closest ? ev.target.closest('.lqs-scan-stores-btn') : null;
+        if (!scanBtn || scanBtn.disabled) return;
+        const targetSlug = scanBtn.getAttribute('data-slug') || slug;
+        const latestMeta = extractProductPageMetadata() || meta;
+        scanBtn.disabled = true;
+        scanBtn.textContent = '⏳ Ищу в сетях...';
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_SCAN_STORES_LIVE',
+            payload: {
+              slug: targetSlug,
+              title: latestMeta ? latestMeta.title : '',
+              brand: latestMeta ? latestMeta.brand : '',
+              amount: latestMeta ? latestMeta.amountText : '',
+              price: latestMeta ? latestMeta.price : null,
+              imageKey: latestMeta ? latestMeta.imageKey : null
+            }
+          },
+          (resp) => {
+            if (chrome.runtime.lastError || !resp || !resp.ok) {
+              scanBtn.disabled = false;
+              scanBtn.textContent = '🔄 Найти цены в сетях';
+              return;
+            }
+            if (resp.summary) {
+              priceSummaryBySlug.set(targetSlug, resp.summary);
+              if (priceDbMemory) priceDbMemory[targetSlug] = resp.summary;
+            }
+            const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(targetSlug)}"]`) || panel;
+            if (activePanel) {
+              syncExistingPanelUI(activePanel, currentReviewCache, extractProductPageMetadata() || latestMeta);
+              const rb = activePanel.querySelector('#lqs-price-radar-bar');
+              if (rb) {
+                let note = rb.querySelector('.lqs-scan-status-note');
+                if (!note) {
+                  note = document.createElement('div');
+                  note.className = 'lqs-scan-status-note';
+                  rb.prepend(note);
+                }
+                const checkedList = Array.isArray(resp.storesChecked) ? resp.storesChecked.join(', ') : 'сети';
+                note.textContent = resp.matchedCount > 0
+                  ? `✅ Проверено (${checkedList}): найдено совпадений — ${resp.matchedCount}`
+                  : `ℹ️ Проверено (${checkedList}), просмотрено ${resp.harvestedCount || 0} карточек — точных совпадений по весу не нашлось`;
+                setTimeout(() => { if (note && note.parentElement) note.remove(); }, 6000);
+              }
+            }
+          }
+        );
+      });
+    }
     if (!drawer) return false;
 
     const isOpen = drawer.classList.toggle('open');

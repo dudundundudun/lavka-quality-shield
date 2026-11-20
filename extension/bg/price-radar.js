@@ -1315,6 +1315,195 @@
     }
   }
 
+
+  const LIVE_RADAR_STORE_URLS = {
+    kuper: {
+      name: 'Купер',
+      buildUrl: (q) => `https://kuper.ru/multisearch?q=${encodeURIComponent(q)}`
+    },
+    magnit: {
+      name: 'Магнит',
+      buildUrl: (q) => `https://magnit.ru/search?term=${encodeURIComponent(q)}`
+    },
+    perekrestok: {
+      name: 'Перекрёсток',
+      buildUrl: (q) => `https://www.perekrestok.ru/cat/search?search=${encodeURIComponent(q)}`
+    },
+    pyaterochka: {
+      name: 'Пятёрочка',
+      buildUrl: (q) => `https://5ka.ru/search/?q=${encodeURIComponent(q)}`
+    },
+    vkusvill: {
+      name: 'ВкусВилл',
+      buildUrl: (q) => `https://vkusvill.ru/search/?q=${encodeURIComponent(q)}`
+    },
+    auchan: {
+      name: 'Ашан',
+      buildUrl: (q) => `https://www.auchan.ru/search/?q=${encodeURIComponent(q)}`
+    },
+    lenta: {
+      name: 'Лента',
+      buildUrl: (q) => `https://lenta.com/search/?searchText=${encodeURIComponent(q)}`
+    }
+  };
+
+  function waitForTabComplete(tabId, timeoutMs = 8000) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (chrome.tabs?.onUpdated?.removeListener) {
+          chrome.tabs.onUpdated.removeListener(onUpdated);
+        }
+        resolve();
+      };
+      const onUpdated = (updatedId, changeInfo) => {
+        if (updatedId === tabId && changeInfo && changeInfo.status === 'complete') {
+          done();
+        }
+      };
+      const timer = setTimeout(done, timeoutMs);
+      if (chrome.tabs?.onUpdated?.addListener) {
+        chrome.tabs.onUpdated.addListener(onUpdated);
+      }
+      if (chrome.tabs?.get) {
+        chrome.tabs.get(tabId, (tab) => {
+          if (!chrome.runtime.lastError && tab && tab.status === 'complete') {
+            done();
+          }
+        });
+      }
+    });
+  }
+
+  function requestHarvestFromTab(tabId) {
+    return new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, { type: 'LQS_HARVEST_STORE_PAGE_NOW' }, (resp) => {
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          resolve({ store: '', offers: [] });
+          return;
+        }
+        resolve({ store: resp.store || '', offers: Array.isArray(resp.offers) ? resp.offers : [] });
+      });
+    });
+  }
+
+  async function harvestSingleStoreInBackgroundTab(storeId, query) {
+    const cfg = LIVE_RADAR_STORE_URLS[storeId];
+    if (!cfg || !query) return { storeId, store: cfg?.name || storeId, offers: [] };
+
+    const targetUrl = cfg.buildUrl(query);
+    let tabId = null;
+    try {
+      const createdTab = await new Promise((resolve) => {
+        chrome.tabs.create({ url: targetUrl, active: false }, (tab) => {
+          resolve(chrome.runtime.lastError ? null : tab);
+        });
+      });
+      if (!createdTab || typeof createdTab.id !== 'number') {
+        return { storeId, store: cfg.name, offers: [] };
+      }
+      tabId = createdTab.id;
+      await waitForTabComplete(tabId, 7500);
+
+      // Give SPA stores (Kuper, Perekrestok, Magnit, 5ka, Lenta) time to render search results
+      let bestOffers = [];
+      let detectedStore = cfg.name;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 1100 : 1000));
+        const res = await requestHarvestFromTab(tabId);
+        if (res.store) detectedStore = res.store;
+        if (res.offers.length > bestOffers.length) {
+          bestOffers = res.offers;
+        }
+        if (bestOffers.length >= 6 || (attempt >= 2 && bestOffers.length > 0)) {
+          break;
+        }
+      }
+      return { storeId, store: detectedStore, offers: bestOffers };
+    } catch {
+      return { storeId, store: cfg.name, offers: [] };
+    } finally {
+      if (tabId !== null) {
+        try {
+          chrome.tabs.remove(tabId, () => {
+            void chrome.runtime.lastError;
+          });
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  async function scanStoresInBackgroundTabs(payload = {}) {
+    const stopKeepAlive = getBgDeps().startSwKeepAlive ? getBgDeps().startSwKeepAlive() : () => {};
+    try {
+      const settings = await getSettings();
+      const slug = String(payload.slug || '').trim().toLowerCase();
+      const title = String(payload.title || '').trim();
+      const brand = String(payload.brand || '').trim();
+      const amount = String(payload.amount || '').trim();
+      const price = payload.price ? Number(payload.price) : null;
+      const imageKey = payload.imageKey || null;
+
+      const fullQuery = buildFullProductSearchQuery(title, brand, amount);
+      if (!fullQuery) {
+        return { ok: false, error: 'Не удалось определить название товара для поиска' };
+      }
+
+      const rawStores = Array.isArray(payload.stores) && payload.stores.length > 0
+        ? payload.stores
+        : (Array.isArray(settings.liveRadarStores) && settings.liveRadarStores.length > 0
+            ? settings.liveRadarStores
+            : ['kuper']);
+      const selectedStores = rawStores
+        .filter((s) => Boolean(LIVE_RADAR_STORE_URLS[s]))
+        .slice(0, 3);
+      if (selectedStores.length === 0) selectedStores.push('kuper');
+
+      const results = [];
+      // Run up to 2 background tabs in parallel for speed without lagging Chrome
+      for (let i = 0; i < selectedStores.length; i += 2) {
+        const chunk = selectedStores.slice(i, i + 2);
+        const chunkRes = await Promise.all(
+          chunk.map((storeId) => harvestSingleStoreInBackgroundTab(storeId, fullQuery))
+        );
+        results.push(...chunkRes);
+      }
+
+      let harvestedCount = 0;
+      const storesChecked = [];
+      for (const r of results) {
+        storesChecked.push(r.store);
+        if (r.offers.length > 0) {
+          harvestedCount += r.offers.length;
+          await recordExternalStoreOffers(r.store, r.offers);
+        }
+      }
+
+      const summary = slug
+        ? await getProductPriceIntelligence(slug, title, price, amount, imageKey, true, brand)
+        : null;
+      const matchedCount = summary && Array.isArray(summary.competitorOffers)
+        ? summary.competitorOffers.filter((o) => o && o.price > 0).length
+        : 0;
+
+      return {
+        ok: true,
+        query: fullQuery,
+        storesChecked,
+        harvestedCount,
+        matchedCount,
+        summary
+      };
+    } finally {
+      stopKeepAlive();
+    }
+  }
+
   const api = {
     getMagnitSeedOffers,
     RADAR_16_STORES_CATALOG,
@@ -1344,7 +1533,9 @@
     recordExternalStoreOffers,
     findMatchingExternalStoreOffersFromList,
     mergeUniqueStoreOffers,
-    auditCartCompetitorsAndAccounts
+    auditCartCompetitorsAndAccounts,
+    LIVE_RADAR_STORE_URLS,
+    scanStoresInBackgroundTabs
   };
 
   if (typeof module === 'object' && module.exports) {

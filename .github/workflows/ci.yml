@@ -39,7 +39,7 @@ jobs:
           node --check extension/bg/gemini-tab.js
           node --check extension/bg/price-radar.js
           node --check extension/background.js
-          node --check extension/content/magnit-parser.js
+          node --check extension/content/store-harvester.js
           node --check extension/content/passport-helper.js
           node --check extension/content/cart-audit.js
           node --check extension/content/price-chart.js

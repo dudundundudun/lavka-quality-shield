@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lavka Quality Shield — Радар 16 Магазинов, График Цен, Сейф Аккаунтов и Zero-Click ИИ",
-  "version": "2.8.2",
+  "version": "2.9.0",
   "description": "История и график цен товаров (как в Alitools), фоновое отслеживание скидок, сравнение цен по 16 торговым сетям, менеджер аккаунтов и Zero-Click ИИ.",
   "icons": {
     "16": "icons/icon16.png",
@@ -32,14 +32,26 @@
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*",
     "http://127.0.0.1:8083/*",
-    "http://localhost:8083/*"
+    "http://localhost:8083/*",
+    "https://kuper.ru/*",
+    "https://*.kuper.ru/*",
+    "https://perekrestok.ru/*",
+    "https://*.perekrestok.ru/*",
+    "https://vprok.ru/*",
+    "https://*.vprok.ru/*",
+    "https://5ka.ru/*",
+    "https://*.5ka.ru/*",
+    "https://auchan.ru/*",
+    "https://*.auchan.ru/*",
+    "https://lenta.com/*",
+    "https://*.lenta.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Lavka Quality Shield v2.8.2 — Price History Chart, Watchlist, 16-Store Radar, Account Vault & Zero-Click AI",
+    "default_title": "Lavka Quality Shield v2.9.0 — Price History Chart, Watchlist, 16-Store Radar, Account Vault & Zero-Click AI",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -54,7 +66,21 @@
         "https://passport.yandex.ru/*",
         "https://id.yandex.ru/*",
         "https://magnit.ru/*",
-        "https://*.magnit.ru/*"
+        "https://*.magnit.ru/*",
+        "https://kuper.ru/*",
+        "https://*.kuper.ru/*",
+        "https://perekrestok.ru/*",
+        "https://*.perekrestok.ru/*",
+        "https://vprok.ru/*",
+        "https://*.vprok.ru/*",
+        "https://5ka.ru/*",
+        "https://*.5ka.ru/*",
+        "https://vkusvill.ru/*",
+        "https://*.vkusvill.ru/*",
+        "https://auchan.ru/*",
+        "https://*.auchan.ru/*",
+        "https://lenta.com/*",
+        "https://*.lenta.com/*"
       ],
       "css": [
         "styles.css"
@@ -63,7 +89,7 @@
         "shared/config.js",
         "shared/price-parser.js",
         "shared/utils.js",
-        "content/magnit-parser.js",
+        "content/store-harvester.js",
         "content/passport-helper.js",
         "content/cart-audit.js",
         "content/price-chart.js",

@@ -6,7 +6,7 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.8.2',
+    VERSION: '2.9.0',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
@@ -44,7 +44,8 @@
       autoWarmupGeminiTab: true,
       lavkaAccountLabel: 'Аккаунт #1 (Основной)',
       priceChartWindowMode: false,
-      watchlistCheckIntervalHours: 6
+      watchlistCheckIntervalHours: 6,
+      liveRadarStores: ['kuper']
     })
   });
 
