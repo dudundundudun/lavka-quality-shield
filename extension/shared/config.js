@@ -6,12 +6,13 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.9.2',
+    VERSION: '2.9.3',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
       FLIGHT_LOG: 'lqs_flight_log_v1',
       AI_CACHE: 'lqs_ai_cache_v1',
+      AI_USAGE: 'lqs_ai_usage_v1',
       PRICE_DB: 'lqs_price_db_v1',
       WATCHLIST: 'lqs_watchlist_v1',
       EXT_STORE_DB: 'lqs_ext_store_prices_v1',
@@ -26,7 +27,8 @@
       MAX_LOCAL_AI_CACHE_ITEMS: 500,
       MAX_LOCAL_PRICE_DB_ITEMS: 1500,
       AI_DIRECT_TIMEOUT_MS: 28000,
-      BACKEND_ANALYZE_TIMEOUT_MS: 35000
+      BACKEND_ANALYZE_TIMEOUT_MS: 35000,
+      DEFAULT_PAID_AI_DAILY_LIMIT: 25
     }),
     CLIENT_HEADER: Object.freeze({
       'X-LQS-Client': 'lavka-quality-shield'
@@ -38,6 +40,7 @@
       aiBaseUrl: 'http://localhost:8083/v1',
       aiApiKey: '',
       aiModel: '',
+      paidAiDailyLimit: 25,
       preferBrowserGeminiTab: true,
       useDirectBrowserAiFallback: true,
       geminiAccountIndex: 'auto',

@@ -277,3 +277,45 @@ test('testProviderConnection loads GET /models list and reports Russian error on
   assert.equal(badRes.status, 401);
   assert.match(badRes.error, /неверный/i);
 });
+
+test('checkPaidAiDailyLimit enforces daily limit and recordPaidAiUsage tracks today/month USD spend and rollovers', () => {
+  const mod = loadAiProvidersModule();
+  const day1 = new Date('2026-11-20T10:00:00Z');
+  const day2 = new Date('2026-11-21T09:00:00Z');
+  const nextMonth = new Date('2026-12-01T09:00:00Z');
+
+  let ledger = mod.recordPaidAiUsage({}, { costUsd: 0.0025, providerId: 'moduleapi', model: 'gpt-4o-mini' }, day1);
+  ledger = mod.recordPaidAiUsage(
+    ledger,
+    { costUsd: null, usage: { promptTokens: 1000, completionTokens: 500 }, providerId: 'openai', model: 'gpt-4o-mini' },
+    day1
+  );
+  const plainDay1 = JSON.parse(JSON.stringify(ledger));
+  assert.equal(plainDay1.todayCount, 2);
+  assert.equal(plainDay1.monthCount, 2);
+  assert.ok(plainDay1.todayCostUsd > 0.0025);
+  assert.equal(plainDay1.todayCostUsd, plainDay1.monthCostUsd);
+
+  const allowedCheck = JSON.parse(JSON.stringify(mod.checkPaidAiDailyLimit(ledger, 25, day1)));
+  assert.equal(allowedCheck.allowed, true);
+  assert.equal(allowedCheck.remaining, 23);
+
+  const blockedCheck = JSON.parse(JSON.stringify(mod.checkPaidAiDailyLimit(ledger, 2, day1)));
+  assert.equal(blockedCheck.allowed, false);
+  assert.equal(blockedCheck.remaining, 0);
+  assert.match(blockedCheck.error, /лимит/i);
+  assert.match(blockedCheck.error, /2\/2/);
+
+  // Rollover to next day resets todayCount/todayCostUsd but keeps month totals
+  const day2Ledger = JSON.parse(JSON.stringify(mod.normalizeUsageLedger(ledger, day2)));
+  assert.equal(day2Ledger.todayCount, 0);
+  assert.equal(day2Ledger.todayCostUsd, 0);
+  assert.equal(day2Ledger.monthCount, 2);
+  assert.equal(day2Ledger.monthCostUsd, plainDay1.monthCostUsd);
+
+  // Rollover to next month resets both day and month totals
+  const nextMonthLedger = JSON.parse(JSON.stringify(mod.normalizeUsageLedger(ledger, nextMonth)));
+  assert.equal(nextMonthLedger.todayCount, 0);
+  assert.equal(nextMonthLedger.monthCount, 0);
+  assert.equal(nextMonthLedger.monthCostUsd, 0);
+});

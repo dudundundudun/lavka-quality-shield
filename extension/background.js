@@ -92,6 +92,9 @@ const {
 
 const {
   AI_DIRECT_TIMEOUT_MS,
+  normalizeUsageLedger,
+  checkPaidAiDailyLimit,
+  recordPaidAiUsage,
   resolveProviderConfig,
   formatCostUsd,
   fetchProviderModelsList,
@@ -101,6 +104,7 @@ const {
 
 const { STORAGE_KEYS, LIMITS, CLIENT_HEADER: LQS_CLIENT_HEADER, TOKEN_HEADER_NAME = 'X-LQS-Token' } = globalThis.LQS_CONFIG;
 const AI_CACHE_KEY = STORAGE_KEYS.AI_CACHE;
+const AI_USAGE_KEY = STORAGE_KEYS.AI_USAGE || 'lqs_ai_usage_v1';
 const SAVED_CARTS_KEY = STORAGE_KEYS.SAVED_CARTS;
 const BACKEND_TOKEN_KEY = STORAGE_KEYS.BACKEND_TOKEN || 'lqs_backend_token_v1';
 
@@ -255,6 +259,29 @@ function extractImageKeyFromUrl(src) {
 // ============================================================================
 // 1. ВСТРОЕННЫЙ КЭШ ИИ-ОБЗОРОВ (lqs_ai_cache_v1)
 // ============================================================================
+async function getAiUsageLedger() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([AI_USAGE_KEY], (res) => {
+      resolve(normalizeUsageLedger(res?.[AI_USAGE_KEY] || {}));
+    });
+  });
+}
+
+async function saveAiUsageLedger(ledger) {
+  const normalized = normalizeUsageLedger(ledger);
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [AI_USAGE_KEY]: normalized }, () => resolve(normalized));
+  });
+}
+
+async function getAiUsageStatsWithLimit() {
+  const [settings, ledger] = await Promise.all([getSettings(), getAiUsageLedger()]);
+  const dailyLimit = Number.isFinite(Number(settings.paidAiDailyLimit))
+    ? Math.max(0, Math.floor(Number(settings.paidAiDailyLimit)))
+    : (LIMITS.DEFAULT_PAID_AI_DAILY_LIMIT || 25);
+  return { ok: true, ...ledger, dailyLimit };
+}
+
 async function getLocalAiCacheMap() {
   return new Promise((resolve) => {
     chrome.storage.local.get([AI_CACHE_KEY], (res) => {
@@ -1586,6 +1613,25 @@ async function orchestrateProductAnalysisInternal(payload) {
 
     let webSources = [];
     let backendOnline = false;
+    const paidDailyLimit = Number.isFinite(Number(settings.paidAiDailyLimit))
+      ? Math.max(0, Math.floor(Number(settings.paidAiDailyLimit)))
+      : (LIMITS.DEFAULT_PAID_AI_DAILY_LIMIT || 25);
+
+    if (providerCfg.isPaid) {
+      const currentLedger = await getAiUsageLedger();
+      const limitCheck = checkPaidAiDailyLimit(currentLedger, paidDailyLimit);
+      if (!limitCheck.allowed) {
+        return {
+          ok: false,
+          limitReached: true,
+          mode: providerCfg.label,
+          error: limitCheck.error,
+          sources: webSources,
+          priceSummary: priceIntel,
+          usageStats: { ...currentLedger, dailyLimit: paidDailyLimit }
+        };
+      }
+    }
 
     if (backendUrl && Date.now() > backendOfflineUntilTs) {
       try {
@@ -1630,6 +1676,17 @@ async function orchestrateProductAnalysisInternal(payload) {
                 ? 'FastAPI SQLite Cache (:8765)'
                 : `FastAPI (:8765) + ${modelTag}${costSuffix}`;
               await saveLocalAiCacheEntry(payload.slug, authoritativeTitle, data.verdict, webSources, modeLabel, payload.imageKey);
+              let updatedUsage = null;
+              if (providerCfg.isPaid && !data.cached) {
+                const prevLedger = await getAiUsageLedger();
+                updatedUsage = await saveAiUsageLedger(
+                  recordPaidAiUsage(prevLedger, {
+                    costUsd,
+                    providerId: providerCfg.providerId,
+                    model: modelTag
+                  })
+                );
+              }
               const resObj = {
                 ok: true,
                 cached: Boolean(data.cached),
@@ -1637,7 +1694,8 @@ async function orchestrateProductAnalysisInternal(payload) {
                 verdict: data.verdict,
                 sources: webSources,
                 priceSummary: priceIntel,
-                costUsd
+                costUsd,
+                usageStats: updatedUsage ? { ...updatedUsage, dailyLimit: paidDailyLimit } : null
               };
               broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
               return resObj;
@@ -1699,6 +1757,18 @@ async function orchestrateProductAnalysisInternal(payload) {
           if (backendOnline) {
             saveVerdictToBackendCache(backendUrl, payload.slug, authoritativeTitle, cleanReply, webSources);
           }
+          let updatedUsage = null;
+          if (providerCfg.isPaid) {
+            const prevLedger = await getAiUsageLedger();
+            updatedUsage = await saveAiUsageLedger(
+              recordPaidAiUsage(prevLedger, {
+                costUsd,
+                usage: aiResult.usage || null,
+                providerId: providerCfg.providerId,
+                model: aiResult.model
+              })
+            );
+          }
           const resObj = {
             ok: true,
             cached: false,
@@ -1707,7 +1777,8 @@ async function orchestrateProductAnalysisInternal(payload) {
             sources: webSources,
             priceSummary: priceIntel,
             costUsd,
-            usage: aiResult.usage || null
+            usage: aiResult.usage || null,
+            usageStats: updatedUsage ? { ...updatedUsage, dailyLimit: paidDailyLimit } : null
           };
           broadcastAiVerdictToLavkaTabs(payload.slug, authoritativeTitle, resObj);
           return resObj;
@@ -2148,6 +2219,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, models: [], error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_AI_USAGE_STATS') {
+    if (!isTrustedLavkaOrPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    getAiUsageStatsWithLimit()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
   }
 

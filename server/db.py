@@ -11,7 +11,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from matcher import normalize_title_for_match
 from security import DEFAULT_DB_PATH, migrate_legacy_db_if_needed
 
-APP_VERSION = "2.9.2"
+APP_VERSION = "2.9.3"
 SCHEMA_VERSION = 3
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)

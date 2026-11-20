@@ -1253,6 +1253,35 @@
     </div>`;
   }
 
+  const PAID_AI_PROVIDER_LABELS = Object.freeze({
+    moduleapi: 'ModuleAPI',
+    openai: 'OpenAI',
+    anthropic: 'Claude',
+    gemini_api: 'Gemini API',
+    deepseek: 'DeepSeek',
+    openrouter: 'OpenRouter'
+  });
+
+  function getPaidProviderUiInfo(settings) {
+    const id = String((settings && settings.aiProvider) || 'gemini_tab').trim().toLowerCase();
+    const shortName = PAID_AI_PROVIDER_LABELS[id] || '';
+    return {
+      isPaid: Boolean(shortName),
+      providerId: id,
+      shortName: shortName || 'ИИ'
+    };
+  }
+
+  function buildIngredientsGuardPillHtml(meta) {
+    const guardApi = globalThis.LQS_INGREDIENTS_GUARD;
+    if (!guardApi || typeof guardApi.analyzeIngredientsTrafficLight !== 'function' || !meta) {
+      return '';
+    }
+    const res = guardApi.analyzeIngredientsTrafficLight(meta.ingredients || '', meta.title || '');
+    if (!res || res.level === 'none' || !res.badgeText) return '';
+    return `<span class="lqs-metric-pill lqs-ing-pill is-${escapeHtml(res.level)}" title="${escapeHtml(res.summary)}">${escapeHtml(res.badgeText)}</span>`;
+  }
+
   function buildMetricsInlineHtml(smart, meta, slug) {
     if (!smart) return '';
     let primaryPill = '';
@@ -1275,18 +1304,23 @@
 
     const priceShieldPill = buildPriceShieldAlertPill(slug, meta ? meta.price : null, meta ? meta.title : '', meta ? meta.imageKey : null);
 
+    const ingGuardPill = buildIngredientsGuardPillHtml(meta);
+
     let aiVerdictPill = '';
     const cachedAi = findAiCacheInMemory(slug, meta ? meta.title : '', meta ? meta.imageKey : null);
+    const paidInfo = getPaidProviderUiInfo(cachedSettings);
     if (cachedAi && cachedAi.loading) {
-      aiVerdictPill = `<span class="lqs-metric-pill ai-pill-loading" title="Zero-Click Автопилот анализирует товар...">🤖 ⏳ ИИ...</span>`;
+      aiVerdictPill = `<span class="lqs-metric-pill ai-pill-loading" title="ИИ анализирует товар...">🤖 ⏳ ИИ...</span>`;
     } else if (cachedAi && cachedAi.verdict) {
       const vBadge = extractVerdictBadgeFromText(cachedAi.verdict);
       if (vBadge) {
         aiVerdictPill = `<span class="lqs-metric-pill ${vBadge.cls}" title="Вердикт ИИ-ревизора">${escapeHtml(vBadge.text)}</span>`;
       }
+    } else if (paidInfo.isPaid) {
+      aiVerdictPill = `<button type="button" class="lqs-metric-pill lqs-paid-ai-btn" data-action="run-paid-ai" title="Автозапуск отключён для защиты баланса — нажмите для разбора">🤖 Разобрать через ${escapeHtml(paidInfo.shortName)}</button>`;
     }
 
-    return `${primaryPill} ${proteinPill} ${priceShieldPill} ${aiVerdictPill}`.trim();
+    return `${primaryPill} ${proteinPill} ${ingGuardPill} ${priceShieldPill} ${aiVerdictPill}`.trim();
   }
 
   // ==========================================================================
@@ -1809,6 +1843,23 @@
       if (currentSlug !== slug) return;
 
       const settings = await getSettings();
+      cachedSettings = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+      const paidInfo = getPaidProviderUiInfo(cachedSettings);
+      const aiBtnEl = panel.querySelector('#lqs-ai-btn');
+      if (aiBtnEl) {
+        aiBtnEl.textContent = paidInfo.isPaid
+          ? `🤖 Разобрать через ${paidInfo.shortName}`
+          : '🤖 ИИ-обзор';
+      }
+      if (paidInfo.isPaid) {
+        // Защита кошелька: никогда не тратим платный API автоматически при просмотре карточки
+        const mBox = panel.querySelector('#lqs-metrics-inline');
+        const mNow = extractProductPageMetadata();
+        if (mBox && mNow) {
+          setHtmlIfChanged(mBox, buildMetricsInlineHtml(analyzeProductQuality(mNow), mNow, slug), 'metrics-paid-guard');
+        }
+        return;
+      }
       if (settings.autoRunAiOnProductPage === false) return;
 
       const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(slug)}"]`) || panel;
@@ -1912,7 +1963,7 @@
           <div class="lqs-drawer-toolbar">
             <div class="lqs-drawer-actions">
               <button type="button" class="lqs-mini-btn ai-btn" id="lqs-ai-btn" title="Найти отзывы в сети и спросить ИИ">
-                🤖 ИИ-обзор
+                ${getPaidProviderUiInfo(cachedSettings).isPaid ? `🤖 Разобрать через ${escapeHtml(getPaidProviderUiInfo(cachedSettings).shortName)}` : '🤖 ИИ-обзор'}
               </button>
               <button type="button" class="lqs-mini-btn ${current.banned ? 'ban-active' : ''}" id="lqs-ban-toggle" title="В чёрный список">
                 ${current.banned ? '💀 В бане' : '🚫 В бан'}
@@ -2237,6 +2288,15 @@
       });
 
       panel.querySelector('#lqs-ai-btn').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const latestMeta = extractProductPageMetadata();
+        requestAiProductReview(latestMeta, panel, false, false, 0, true);
+      });
+
+      panel.addEventListener('click', (e) => {
+        const paidTrigger = e.target && e.target.closest ? e.target.closest('.lqs-paid-ai-btn') : null;
+        if (!paidTrigger) return;
         e.preventDefault();
         e.stopPropagation();
         const latestMeta = extractProductPageMetadata();

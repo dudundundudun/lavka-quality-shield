@@ -110,12 +110,12 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
         r = self.client.get("/api/health")
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(data.get("version"), "2.9.2")
+        self.assertEqual(data.get("version"), "2.9.3")
         self.assertEqual(data.get("schemaVersion"), server.SCHEMA_VERSION)
         self.assertEqual(str(data.get("journalMode", "")).lower(), "wal")
 
     def test_version_synchronized_across_project_files(self):
-        expected = "2.9.2"
+        expected = "2.9.3"
         manifest = json.loads((Path(REPO_ROOT) / "extension" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], expected)
         self.assertIn(f"v{expected}", manifest["action"]["default_title"])

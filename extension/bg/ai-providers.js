@@ -512,10 +512,141 @@
     };
   }
 
+
+  const PAID_PROVIDER_IDS = Object.freeze([
+    'moduleapi',
+    'openai',
+    'anthropic',
+    'gemini_api',
+    'deepseek',
+    'openrouter'
+  ]);
+
+  function isPaidProvider(providerId) {
+    return PAID_PROVIDER_IDS.includes(String(providerId || '').trim().toLowerCase());
+  }
+
+  function getTodayKey(now = new Date()) {
+    const d = now instanceof Date ? now : new Date(now);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  function getMonthKey(now = new Date()) {
+    const d = now instanceof Date ? now : new Date(now);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  }
+
+  function roundUsd(val) {
+    const n = Number(val || 0);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.round(n * 1e6) / 1e6;
+  }
+
+  function normalizeUsageLedger(rawLedger = {}, now = new Date()) {
+    const todayKey = getTodayKey(now);
+    const monthKey = getMonthKey(now);
+    const src = rawLedger && typeof rawLedger === 'object' ? rawLedger : {};
+
+    const sameDay = src.dayKey === todayKey;
+    const sameMonth = src.monthKey === monthKey;
+
+    return {
+      dayKey: todayKey,
+      monthKey,
+      todayCount: sameDay ? Math.max(0, Math.floor(Number(src.todayCount || 0))) : 0,
+      todayCostUsd: sameDay ? roundUsd(src.todayCostUsd || 0) : 0,
+      monthCount: sameMonth ? Math.max(0, Math.floor(Number(src.monthCount || 0))) : 0,
+      monthCostUsd: sameMonth ? roundUsd(src.monthCostUsd || 0) : 0,
+      lastUpdatedAt: src.lastUpdatedAt || null
+    };
+  }
+
+  function checkPaidAiDailyLimit(rawLedger = {}, dailyLimit = 25, now = new Date()) {
+    const ledger = normalizeUsageLedger(rawLedger, now);
+    const parsedLimit = Number(dailyLimit);
+    const limit = Number.isFinite(parsedLimit) && parsedLimit >= 0 ? Math.floor(parsedLimit) : 25;
+
+    if (limit > 0 && ledger.todayCount >= limit) {
+      return {
+        allowed: false,
+        todayCount: ledger.todayCount,
+        dailyLimit: limit,
+        remaining: 0,
+        todayCostUsd: ledger.todayCostUsd,
+        monthCostUsd: ledger.monthCostUsd,
+        error: `Защита кошелька: достигнут дневной лимит платного ИИ (${ledger.todayCount}/${limit} запросов за сегодня, потрачено ${formatCostUsd(ledger.todayCostUsd) || '$0.00'}). Измените лимит в настройках или переключитесь на бесплатный Gemini Web (Hydrogen).`
+      };
+    }
+
+    return {
+      allowed: true,
+      todayCount: ledger.todayCount,
+      dailyLimit: limit,
+      remaining: limit > 0 ? Math.max(0, limit - ledger.todayCount) : null,
+      todayCostUsd: ledger.todayCostUsd,
+      monthCostUsd: ledger.monthCostUsd,
+      error: null
+    };
+  }
+
+  function estimateCostUsdFromUsage(providerId, model = '', usage = null) {
+    if (!usage || typeof usage !== 'object') return 0;
+    const inTok = Math.max(0, Number(usage.promptTokens || 0));
+    const outTok = Math.max(0, Number(usage.completionTokens || 0));
+    if (inTok === 0 && outTok === 0) return 0;
+
+    const m = String(model || '').toLowerCase();
+    // Консервативные ориентировочные тарифы ($ за 1M токенов), если API не вернул точный x-moduleapi-cost
+    let inRate = 0.25;
+    let outRate = 1.0;
+    if (m.includes('opus') || m.includes('o1') || m.includes('gpt-5')) {
+      inRate = 5.0;
+      outRate = 15.0;
+    } else if (m.includes('sonnet') || m.includes('gpt-4o') && !m.includes('mini') || m.includes('claude')) {
+      inRate = 3.0;
+      outRate = 15.0;
+    } else if (m.includes('mini') || m.includes('flash') || m.includes('haiku') || m.includes('deepseek')) {
+      inRate = 0.15;
+      outRate = 0.6;
+    }
+    return roundUsd((inTok * inRate + outTok * outRate) / 1e6);
+  }
+
+  function recordPaidAiUsage(rawLedger = {}, info = {}, now = new Date()) {
+    const ledger = normalizeUsageLedger(rawLedger, now);
+    const hasExactCost = typeof info.costUsd === 'number' && Number.isFinite(info.costUsd) && info.costUsd >= 0;
+    const costDelta = hasExactCost
+      ? roundUsd(info.costUsd)
+      : estimateCostUsdFromUsage(info.providerId || '', info.model || '', info.usage || null);
+
+    return {
+      dayKey: ledger.dayKey,
+      monthKey: ledger.monthKey,
+      todayCount: ledger.todayCount + 1,
+      todayCostUsd: roundUsd(ledger.todayCostUsd + costDelta),
+      monthCount: ledger.monthCount + 1,
+      monthCostUsd: roundUsd(ledger.monthCostUsd + costDelta),
+      lastUpdatedAt: (now instanceof Date ? now : new Date(now)).toISOString()
+    };
+  }
+
   root.LQS_AI_PROVIDERS = Object.freeze({
     AI_DIRECT_TIMEOUT_MS,
     AI_MODELS_TIMEOUT_MS,
     AI_PROVIDER_PRESETS,
+    PAID_PROVIDER_IDS,
+    isPaidProvider,
+    getTodayKey,
+    getMonthKey,
+    normalizeUsageLedger,
+    checkPaidAiDailyLimit,
+    estimateCostUsdFromUsage,
+    recordPaidAiUsage,
     listProviderPresets,
     getProviderPreset,
     inferProviderFromBaseUrl,

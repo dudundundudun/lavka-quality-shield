@@ -1339,3 +1339,40 @@ a.lqs-store-link.is-cheaper {
   padding: 4px 8px !important;
   margin-bottom: 6px !important;
 }
+
+/* ===== Lavka Quality Shield v2.9.3 — Ingredients Traffic Light & Paid AI Guard ===== */
+.lqs-ing-pill {
+  font-weight: 700 !important;
+  cursor: help !important;
+}
+
+.lqs-ing-pill.is-green {
+  background: #ecfdf5 !important;
+  border-color: #a7f3d0 !important;
+  color: #065f46 !important;
+}
+
+.lqs-ing-pill.is-yellow {
+  background: #fffbeb !important;
+  border-color: #fde68a !important;
+  color: #92400e !important;
+}
+
+.lqs-ing-pill.is-red {
+  background: #fef2f2 !important;
+  border-color: #fecaca !important;
+  color: #991b1b !important;
+}
+
+.lqs-paid-ai-btn {
+  background: #fce000 !important;
+  border: 1px solid #e6cb00 !important;
+  color: #21201f !important;
+  font-weight: 700 !important;
+  cursor: pointer !important;
+  transition: background 0.15s ease !important;
+}
+
+.lqs-paid-ai-btn:hover {
+  background: #f2d200 !important;
+}
