@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -197,6 +197,10 @@ class TestBackendSecurityAndVault(unittest.TestCase):
             ("GET", "/api/cart/latest", None),
             ("POST", "/api/save-cache", {"slug": "test", "title": "Test", "verdict": "ok"}),
             ("POST", "/api/analyze-product", {"title": "Test"}),
+            ("POST", "/api/ai-keys/save", {"provider": "moduleapi", "apiKey": "sk-test-123456"}),
+            ("GET", "/api/ai-keys/status", None),
+            ("DELETE", "/api/ai-keys/moduleapi", None),
+            ("POST", "/api/ai-keys/test", {"aiProvider": "moduleapi"}),
         ]
         for method, path, body in endpoints:
             r = self.client.request(method, path, json=body)
@@ -334,6 +338,145 @@ class TestBackendSecurityAndVault(unittest.TestCase):
             )
             self.assertEqual(r.status_code, 400)
             self.assertEqual(r.json().get("detail"), "Invalid aiBaseUrl: host could not be resolved.")
+
+
+    @patch.object(security, "_unprotect_field", side_effect=_mock_unprotect)
+    @patch.object(security, "_protect_field", side_effect=_mock_protect)
+    def test_ai_key_vault_dpapi_save_mask_status_and_delete_roundtrip(self, _mock_enc, _mock_dec):
+        headers = self._pair_primary_extension()
+        raw_key = "sk-moduleapi-secret-value-1234"
+
+        # Save real key -> encrypted with DPAPI in SQLite, returns only mask
+        r_save = self.client.post(
+            "/api/ai-keys/save",
+            json={"provider": "moduleapi", "apiKey": raw_key},
+            headers=headers,
+        )
+        self.assertEqual(r_save.status_code, 200, r_save.text)
+        save_data = r_save.json()
+        self.assertTrue(save_data["hasKey"])
+        self.assertTrue(save_data["storedOnServer"])
+        self.assertEqual(save_data["mask"], "sk-...1234")
+        self.assertNotIn(raw_key, r_save.text)
+
+        # Verify raw DB row stores dpapi: ciphertext, never plaintext
+        with server.get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT encrypted_key, key_mask FROM ai_provider_keys WHERE provider = 'moduleapi'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertTrue(row[0].startswith("dpapi:"))
+        self.assertNotIn(raw_key, row[0])
+        self.assertEqual(row[1], "sk-...1234")
+
+        # Status endpoint returns mask & metadata only
+        r_status = self.client.get("/api/ai-keys/status?provider=moduleapi", headers=headers)
+        self.assertEqual(r_status.status_code, 200)
+        st = r_status.json()
+        self.assertTrue(st["hasKey"])
+        self.assertTrue(st["storedOnServer"])
+        self.assertEqual(st["mask"], "sk-...1234")
+        self.assertNotIn(raw_key, r_status.text)
+
+        # Saving a masked placeholder must be rejected (400)
+        r_masked = self.client.post(
+            "/api/ai-keys/save",
+            json={"provider": "moduleapi", "apiKey": "sk-...1234"},
+            headers=headers,
+        )
+        self.assertEqual(r_masked.status_code, 400)
+
+        # Delete key
+        r_del = self.client.delete("/api/ai-keys/moduleapi", headers=headers)
+        self.assertEqual(r_del.status_code, 200)
+        self.assertTrue(r_del.json().get("deleted"))
+
+        r_after = self.client.get("/api/ai-keys/status?provider=moduleapi", headers=headers)
+        self.assertFalse(r_after.json().get("hasKey"))
+
+    def test_ai_key_vault_dpapi_runtime_error_returns_503(self):
+        headers = self._pair_primary_extension()
+        with patch.object(security, "_protect_field", side_effect=RuntimeError("DPAPI unavailable")):
+            r_save = self.client.post(
+                "/api/ai-keys/save",
+                json={"provider": "openai", "apiKey": "sk-openai-real-key-9999"},
+                headers=headers,
+            )
+            self.assertEqual(r_save.status_code, 503)
+            self.assertIn("DPAPI unavailable", r_save.json().get("detail", ""))
+
+    @patch.object(security, "_unprotect_field", side_effect=_mock_unprotect)
+    @patch.object(security, "_protect_field", side_effect=_mock_protect)
+    def test_analyze_and_test_endpoints_decrypt_server_dpapi_key_when_masked_or_empty(self, _mock_enc, _mock_dec):
+        from routers import cache as cache_router
+
+        headers = self._pair_primary_extension()
+        real_key = "sk-mod-real-secret-9999"
+        r_save = self.client.post(
+            "/api/ai-keys/save",
+            json={"provider": "moduleapi", "apiKey": real_key},
+            headers=headers,
+        )
+        self.assertEqual(r_save.status_code, 200)
+
+        # 1. /api/ai-keys/test with empty aiApiKey decrypts DPAPI key and loads /models
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_models_resp.json.return_value = {"data": [{"id": "gpt-4o-mini"}, {"id": "claude-3-5-sonnet"}]}
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_models_resp
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = False
+
+        with (
+            patch.object(cache_router, "validate_ai_base_url", return_value="https://moduleapi.pro/v1"),
+            patch.object(cache_router.httpx, "AsyncClient", return_value=mock_client),
+        ):
+            r_test = self.client.post(
+                "/api/ai-keys/test",
+                json={"aiProvider": "moduleapi", "aiBaseUrl": "https://moduleapi.pro/v1", "aiApiKey": ""},
+                headers=headers,
+            )
+        self.assertEqual(r_test.status_code, 200, r_test.text)
+        t_data = r_test.json()
+        self.assertTrue(t_data["ok"])
+        self.assertTrue(t_data["usedServerKey"])
+        self.assertEqual(t_data["models"], ["gpt-4o-mini", "claude-3-5-sonnet"])
+        self.assertEqual(mock_client.get.call_args.kwargs["headers"]["Authorization"], f"Bearer {real_key}")
+
+        # 2. /api/analyze-product with masked aiApiKey decrypts DPAPI key
+        mock_chat_resp = MagicMock()
+        mock_chat_resp.status_code = 200
+        mock_chat_resp.headers = {"x-moduleapi-cost": "0.0015"}
+        mock_chat_resp.json.return_value = {
+            "choices": [{"message": {"content": "1. Отзывы хорошие. 2. Состав чистый. 3. Отличный выбор."}}]
+        }
+        mock_client.post.return_value = mock_chat_resp
+
+        with (
+            patch.object(cache_router, "validate_ai_base_url", return_value="https://moduleapi.pro/v1"),
+            patch.object(cache_router, "search_web_reviews", new=AsyncMock(return_value=[])),
+            patch.object(cache_router.httpx, "AsyncClient", return_value=mock_client),
+        ):
+            r_analyze = self.client.post(
+                "/api/analyze-product",
+                json={
+                    "slug": "dpapi_test_milk",
+                    "title": "Молоко 3.2% 1л",
+                    "aiProvider": "moduleapi",
+                    "aiBaseUrl": "https://moduleapi.pro/v1",
+                    "aiApiKey": "sk-...9999",
+                    "aiModel": "gpt-4o-mini",
+                    "forceRefresh": True,
+                },
+                headers=headers,
+            )
+        self.assertEqual(r_analyze.status_code, 200, r_analyze.text)
+        a_data = r_analyze.json()
+        self.assertTrue(a_data["aiOk"])
+        self.assertAlmostEqual(a_data["costUsd"], 0.0015)
+        self.assertEqual(mock_client.post.call_args.kwargs["headers"]["Authorization"], f"Bearer {real_key}")
 
 
 if __name__ == "__main__":

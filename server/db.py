@@ -11,7 +11,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from matcher import normalize_title_for_match
 from security import DEFAULT_DB_PATH, migrate_legacy_db_if_needed
 
-APP_VERSION = "2.9.4"
+APP_VERSION = "2.9.5"
 SCHEMA_VERSION = 3
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
@@ -138,6 +138,17 @@ def init_db(db_path: Optional[str] = None) -> None:
                 cookie_count INTEGER,
                 cookies_json TEXT,
                 local_storage_json TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_provider_keys (
+                provider TEXT PRIMARY KEY,
+                encrypted_key TEXT,
+                key_mask TEXT,
                 updated_at TEXT
             )
             """
@@ -678,3 +689,59 @@ def list_watchlist_items(conn: sqlite3.Connection, limit: int = 200) -> List[Dic
             }
         )
     return items
+
+
+def upsert_ai_provider_key(
+    conn: sqlite3.Connection,
+    provider: str,
+    encrypted_key: str,
+    key_mask: str,
+    updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    clean_provider = (provider or "").strip().lower()
+    now_iso = updated_at or datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO ai_provider_keys (provider, encrypted_key, key_mask, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (clean_provider, encrypted_key, key_mask, now_iso),
+    )
+    return {
+        "provider": clean_provider,
+        "hasKey": bool(encrypted_key),
+        "mask": key_mask,
+        "updatedAt": now_iso,
+    }
+
+
+def get_ai_provider_key_row(conn: sqlite3.Connection, provider: str) -> Optional[Tuple[str, str, str]]:
+    clean_provider = (provider or "").strip().lower()
+    if not clean_provider:
+        return None
+    row = conn.execute(
+        "SELECT encrypted_key, key_mask, updated_at FROM ai_provider_keys WHERE provider = ?",
+        (clean_provider,),
+    ).fetchone()
+    return row if row else None
+
+
+def list_ai_provider_keys_status(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT provider, key_mask, updated_at FROM ai_provider_keys ORDER BY updated_at DESC"
+    ).fetchall()
+    result: Dict[str, Dict[str, Any]] = {}
+    for prov, mask, upd in rows:
+        result[prov] = {
+            "provider": prov,
+            "hasKey": True,
+            "mask": mask or "",
+            "updatedAt": upd,
+        }
+    return result
+
+
+def delete_ai_provider_key(conn: sqlite3.Connection, provider: str) -> bool:
+    clean_provider = (provider or "").strip().lower()
+    cur = conn.execute("DELETE FROM ai_provider_keys WHERE provider = ?", (clean_provider,))
+    return cur.rowcount > 0

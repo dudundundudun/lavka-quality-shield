@@ -179,6 +179,27 @@ def _unprotect_field(stored: Optional[str]) -> str:
         kernel32.LocalFree(out_blob.pbData)
 
 
+def mask_api_key(raw_key: Optional[str]) -> str:
+    """Returns a safe display mask like 'sk-...1234' without exposing the full API key."""
+    key = (raw_key or "").strip()
+    if not key:
+        return ""
+    if len(key) <= 4:
+        return "***"
+    if len(key) <= 8:
+        return f"{key[:2]}...{key[-2:]}"
+    prefix = key[:3]
+    return f"{prefix}...{key[-4:]}"
+
+
+def is_masked_api_key(value: Optional[str]) -> bool:
+    """Detects whether a string is empty or a masked placeholder like 'sk-...1234'."""
+    val = (value or "").strip()
+    if not val:
+        return True
+    return bool(re.search(r"(\.\.\.|•{2,}|\*{3,})", val))
+
+
 def validate_ai_base_url(url: str) -> str:
     """Validates aiBaseUrl to prevent SSRF to link-local/cloud metadata or non-HTTP schemes."""
     clean = (url or "").strip().rstrip("/")

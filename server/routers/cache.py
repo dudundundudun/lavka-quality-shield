@@ -25,7 +25,8 @@ from matcher import (
     is_search_result_matching_product,
     normalize_title_for_match,
 )
-from security import validate_ai_base_url, verify_trusted_extension_request
+import security
+from security import is_masked_api_key, mask_api_key, validate_ai_base_url, verify_trusted_extension_request
 
 router = APIRouter()
 
@@ -74,6 +75,207 @@ class AnalyzeRequest(BaseModel):
     aiApiKey: str = ""
     aiModel: str = ""
     forceRefresh: bool = False
+
+
+def _safe_protect_ai_key(plaintext: str) -> str:
+    try:
+        return security._protect_field(plaintext)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI key encryption unavailable: {exc}",
+        )
+
+
+def _safe_unprotect_ai_key(stored: Optional[str]) -> str:
+    try:
+        return security._unprotect_field(stored)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI key decryption unavailable: {exc}",
+        )
+
+
+def _resolve_effective_ai_api_key(provider: str, raw_key: Optional[str]) -> Tuple[str, bool]:
+    """Returns (api_key, used_server_vault). Decrypts stored DPAPI key when raw_key is empty or masked."""
+    clean_key = (raw_key or "").strip()
+    if clean_key and not is_masked_api_key(clean_key):
+        return clean_key, False
+    clean_provider = (provider or "").strip().lower()
+    if not clean_provider:
+        return "", False
+    try:
+        with db.get_db_connection() as conn:
+            row = db.get_ai_provider_key_row(conn, clean_provider)
+    except Exception:
+        return "", False
+    if not row or not row[0]:
+        return "", False
+    decrypted = _safe_unprotect_ai_key(row[0])
+    return decrypted, bool(decrypted)
+
+
+class AiKeySaveRequest(BaseModel):
+    provider: str
+    apiKey: str
+
+
+class AiKeyTestRequest(BaseModel):
+    aiProvider: str = "custom_openai"
+    aiBaseUrl: str = ""
+    aiApiKey: str = ""
+
+
+@router.post("/api/ai-keys/save", dependencies=[Depends(verify_trusted_extension_request)])
+def save_ai_key_endpoint(req: AiKeySaveRequest):
+    provider = (req.provider or "").strip().lower()[:64]
+    raw_key = (req.apiKey or "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="Provider name is required.")
+    if not raw_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty.")
+    if is_masked_api_key(raw_key):
+        raise HTTPException(status_code=400, detail="Cannot save a masked API key placeholder.")
+
+    protected = _safe_protect_ai_key(raw_key)
+    mask = mask_api_key(raw_key)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db.get_db_connection() as conn:
+        db.upsert_ai_provider_key(conn, provider, protected, mask, now_iso)
+        conn.commit()
+    db.log_event("AI_KEY_VAULT", f"Saved DPAPI-encrypted API key for '{provider}' ({mask})")
+    return {
+        "status": "ok",
+        "provider": provider,
+        "hasKey": True,
+        "mask": mask,
+        "storedOnServer": True,
+        "updatedAt": now_iso,
+    }
+
+
+@router.get("/api/ai-keys/status", dependencies=[Depends(verify_trusted_extension_request)])
+def get_ai_keys_status_endpoint(provider: Optional[str] = None):
+    with db.get_db_connection() as conn:
+        keys_map = db.list_ai_provider_keys_status(conn)
+    clean_prov = (provider or "").strip().lower()
+    if clean_prov:
+        entry = keys_map.get(clean_prov)
+        return {
+            "status": "ok",
+            "provider": clean_prov,
+            "hasKey": bool(entry),
+            "mask": entry["mask"] if entry else "",
+            "storedOnServer": bool(entry),
+            "updatedAt": entry["updatedAt"] if entry else None,
+            "keys": keys_map,
+        }
+    return {"status": "ok", "keys": keys_map}
+
+
+@router.delete("/api/ai-keys/{provider}", dependencies=[Depends(verify_trusted_extension_request)])
+def delete_ai_key_endpoint(provider: str):
+    clean_prov = (provider or "").strip().lower()[:64]
+    with db.get_db_connection() as conn:
+        deleted = db.delete_ai_provider_key(conn, clean_prov)
+        conn.commit()
+    db.log_event("AI_KEY_VAULT", f"Deleted stored API key for '{clean_prov}' (deleted={deleted})")
+    return {"status": "ok", "provider": clean_prov, "deleted": deleted}
+
+
+@router.post("/api/ai-keys/test", dependencies=[Depends(verify_trusted_extension_request)])
+async def test_ai_key_endpoint(req: AiKeyTestRequest):
+    dummy = AnalyzeRequest(
+        title="test",
+        aiProvider=req.aiProvider or "custom_openai",
+        aiBaseUrl=req.aiBaseUrl or "",
+        aiApiKey=req.aiApiKey or "",
+    )
+    provider, target_url = _resolve_provider_target(dummy)
+    if provider == "gemini_tab":
+        return {
+            "ok": True,
+            "providerId": "gemini_tab",
+            "baseUrl": "https://gemini.google.com/app",
+            "models": ["Gemini Web (Hydrogen)"],
+            "error": None,
+            "status": 200,
+            "usedServerKey": False,
+        }
+
+    base_url = validate_ai_base_url(target_url)
+    effective_key, used_server_key = _resolve_effective_ai_api_key(provider, req.aiApiKey)
+    is_local = "localhost" in base_url or "127.0.0.1" in base_url
+
+    headers: Dict[str, str] = {}
+    if provider == "anthropic":
+        headers["anthropic-version"] = ANTHROPIC_API_VERSION
+        if effective_key:
+            headers["x-api-key"] = effective_key
+    else:
+        if effective_key:
+            headers["Authorization"] = f"Bearer {effective_key}"
+        if provider == "openrouter":
+            headers["HTTP-Referer"] = "https://lavka.yandex.ru"
+            headers["X-Title"] = "Lavka Quality Shield"
+
+    models_url = f"{re.sub(r'/(chat/completions|messages)$', '', base_url, flags=re.IGNORECASE)}/models"
+    timeout_cfg = httpx.Timeout(12.0, connect=2.0 if is_local else 5.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout_cfg, trust_env=not is_local) as client:
+            resp = await client.get(models_url, headers=headers)
+            if resp.status_code >= 400:
+                if provider == "anthropic" and resp.status_code == 404:
+                    return {
+                        "ok": True,
+                        "providerId": provider,
+                        "baseUrl": base_url,
+                        "models": [
+                            "claude-sonnet-4-20250514",
+                            "claude-3-7-sonnet-latest",
+                            "claude-3-5-sonnet-latest",
+                            "claude-3-5-haiku-latest",
+                        ],
+                        "error": None,
+                        "status": 200,
+                        "usedServerKey": used_server_key,
+                    }
+                return {
+                    "ok": False,
+                    "providerId": provider,
+                    "baseUrl": base_url,
+                    "models": [],
+                    "error": _format_provider_http_error(provider, resp.status_code, resp.text),
+                    "status": resp.status_code,
+                    "usedServerKey": used_server_key,
+                }
+            data = resp.json()
+            raw_list = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            models: List[str] = []
+            for item in raw_list:
+                mid = item.strip() if isinstance(item, str) else str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+                if mid and mid not in models:
+                    models.append(mid)
+            return {
+                "ok": True,
+                "providerId": provider,
+                "baseUrl": base_url,
+                "models": models,
+                "error": None,
+                "status": 200,
+                "usedServerKey": used_server_key,
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "providerId": provider,
+            "baseUrl": base_url,
+            "models": [],
+            "error": f"{provider}: ошибка подключения ({exc})",
+            "status": 0,
+            "usedServerKey": used_server_key,
+        }
 
 
 class SaveCacheRequest(BaseModel):
@@ -442,6 +644,7 @@ async def call_ai_model(
 
     provider, target_url = _resolve_provider_target(req)
     base_url = validate_ai_base_url(target_url)
+    effective_api_key, _used_vault_key = _resolve_effective_ai_api_key(provider, req.aiApiKey)
     is_local = "localhost" in base_url or "127.0.0.1" in base_url
 
     t0 = time.perf_counter()
@@ -454,8 +657,8 @@ async def call_ai_model(
                 "Content-Type": "application/json",
                 "anthropic-version": ANTHROPIC_API_VERSION,
             }
-            if req.aiApiKey:
-                headers["x-api-key"] = req.aiApiKey
+            if effective_api_key:
+                headers["x-api-key"] = effective_api_key
             if not model_id:
                 model_id = AI_PROVIDER_DEFAULT_MODELS["anthropic"]
             endpoint = base_url if base_url.lower().endswith("/messages") else f"{base_url}/messages"
@@ -478,8 +681,8 @@ async def call_ai_model(
             return {"verdict": reply, "costUsd": cost_usd, "model": model_id, "provider": provider}
 
         headers = {"Content-Type": "application/json"}
-        if req.aiApiKey:
-            headers["Authorization"] = f"Bearer {req.aiApiKey}"
+        if effective_api_key:
+            headers["Authorization"] = f"Bearer {effective_api_key}"
         if provider == "openrouter":
             headers["HTTP-Referer"] = "https://lavka.yandex.ru"
             headers["X-Title"] = "Lavka Quality Shield"

@@ -102,6 +102,8 @@ const {
   checkPaidAiDailyLimit,
   recordPaidAiUsage,
   resolveProviderConfig,
+  maskApiKey,
+  isMaskedApiKey,
   formatCostUsd,
   fetchProviderModelsList,
   testProviderConnection,
@@ -241,11 +243,266 @@ async function getBackendAuthHeaders(backendUrl, extraHeaders = {}) {
   return headers;
 }
 
+async function saveAiKeySecurely(providerId, rawApiKey) {
+  const settings = await getSettings();
+  const resolved = resolveProviderConfig({ ...settings, aiProvider: providerId || settings.aiProvider });
+  const provider = resolved.providerId;
+  const cleanKey = String(rawApiKey || '').trim();
+
+  if (!cleanKey) {
+    return {
+      ok: true,
+      unchanged: true,
+      provider,
+      storedOnServer: Boolean(settings.aiKeyStoredOnServer),
+      mask: settings.aiKeyMask || (settings.aiApiKey ? maskApiKey(settings.aiApiKey) : '')
+    };
+  }
+  if (isMaskedApiKey(cleanKey)) {
+    return {
+      ok: true,
+      unchanged: true,
+      provider,
+      storedOnServer: Boolean(settings.aiKeyStoredOnServer),
+      mask: settings.aiKeyMask || cleanKey
+    };
+  }
+
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+  let fallbackReason = '';
+
+  if (backendUrl) {
+    try {
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/ai-keys/save`,
+        {
+          method: 'POST',
+          headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ provider, apiKey: cleanKey })
+        },
+        2500
+      );
+      if (resp.ok) {
+        backendOfflineUntilTs = 0;
+        const data = await resp.json();
+        const mask = data.mask || maskApiKey(cleanKey);
+        await saveSettingsPatch({
+          aiProvider: provider,
+          aiApiKey: '',
+          aiKeyMask: mask,
+          aiKeyStoredOnServer: true
+        });
+        return {
+          ok: true,
+          storedOnServer: true,
+          provider,
+          mask,
+          updatedAt: data.updatedAt || null
+        };
+      }
+      const errData = await resp.json().catch(() => ({}));
+      fallbackReason = errData.detail || `HTTP ${resp.status}`;
+    } catch {
+      backendOfflineUntilTs = Date.now() + 10000;
+      fallbackReason = 'Локальный сервер :8765 не запущен';
+    }
+  } else {
+    fallbackReason = 'Адрес локального сервера не задан';
+  }
+
+  // Резервное хранение в chrome.storage.local (если локальный сервер выключен)
+  const mask = maskApiKey(cleanKey);
+  await saveSettingsPatch({
+    aiProvider: provider,
+    aiApiKey: cleanKey,
+    aiKeyMask: mask,
+    aiKeyStoredOnServer: false
+  });
+  return {
+    ok: true,
+    storedOnServer: false,
+    provider,
+    mask,
+    fallbackReason
+  };
+}
+
+async function getAiKeyVaultStatus(providerId = '') {
+  const settings = await getSettings();
+  const resolved = resolveProviderConfig({ ...settings, aiProvider: providerId || settings.aiProvider });
+  const provider = resolved.providerId;
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+
+  let serverOnline = false;
+  let serverEntry = null;
+  let keysMap = {};
+
+  if (backendUrl) {
+    try {
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/ai-keys/status?provider=${encodeURIComponent(provider)}`,
+        { method: 'GET', headers: await getBackendAuthHeaders(backendUrl) },
+        1500
+      );
+      if (resp.ok) {
+        serverOnline = true;
+        backendOfflineUntilTs = 0;
+        const data = await resp.json();
+        keysMap = data && typeof data.keys === 'object' && data.keys ? data.keys : {};
+        if (data && data.hasKey) {
+          serverEntry = {
+            hasKey: true,
+            mask: data.mask || '',
+            updatedAt: data.updatedAt || null
+          };
+        }
+      }
+    } catch {
+      // backend offline
+    }
+  }
+
+  if (serverEntry) {
+    return {
+      ok: true,
+      provider,
+      serverOnline,
+      storedOnServer: true,
+      hasKey: true,
+      mask: serverEntry.mask,
+      updatedAt: serverEntry.updatedAt,
+      keysMap
+    };
+  }
+
+  const localKey = String(settings.aiApiKey || '').trim();
+  const hasLocalKey = Boolean(localKey && !isMaskedApiKey(localKey));
+  return {
+    ok: true,
+    provider,
+    serverOnline,
+    storedOnServer: false,
+    hasKey: hasLocalKey,
+    mask: hasLocalKey ? maskApiKey(localKey) : '',
+    updatedAt: null,
+    keysMap
+  };
+}
+
+async function deleteAiKeySecurely(providerId = '') {
+  const settings = await getSettings();
+  const resolved = resolveProviderConfig({ ...settings, aiProvider: providerId || settings.aiProvider });
+  const provider = resolved.providerId;
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+
+  let serverDeleted = false;
+  if (backendUrl) {
+    try {
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/ai-keys/${encodeURIComponent(provider)}`,
+        { method: 'DELETE', headers: await getBackendAuthHeaders(backendUrl) },
+        2000
+      );
+      if (resp.ok) {
+        serverDeleted = true;
+      }
+    } catch {
+      // backend offline
+    }
+  }
+
+  await saveSettingsPatch({
+    aiApiKey: '',
+    aiKeyMask: '',
+    aiKeyStoredOnServer: false
+  });
+  return { ok: true, provider, serverDeleted, deleted: true };
+}
+
+async function testAiProviderWithVault(options = {}) {
+  const settings = await getSettings();
+  const providerCfg = resolveProviderConfig({
+    ...settings,
+    aiProvider: options.aiProvider || settings.aiProvider,
+    aiBaseUrl: options.aiBaseUrl || settings.aiBaseUrl
+  });
+  if (providerCfg.protocol === 'gemini_tab') {
+    return await testProviderConnection({ aiProvider: 'gemini_tab' });
+  }
+
+  const rawInputKey = String(options.aiApiKey || '').trim();
+  const hasDirectInputKey = Boolean(rawInputKey && !isMaskedApiKey(rawInputKey));
+  const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+
+  // Если пользователь не ввёл новый ключ, а ключ лежит зашифрованным на сервере — тестируем через локальный сервер
+  if (!hasDirectInputKey && backendUrl) {
+    try {
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/ai-keys/test`,
+        {
+          method: 'POST',
+          headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            aiProvider: providerCfg.providerId,
+            aiBaseUrl: providerCfg.baseUrl,
+            aiApiKey: ''
+          })
+        },
+        options.timeoutMs || 12000
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && (data.ok || data.usedServerKey)) {
+          return {
+            ok: Boolean(data.ok),
+            providerId: data.providerId || providerCfg.providerId,
+            label: providerCfg.label,
+            baseUrl: data.baseUrl || providerCfg.baseUrl,
+            models: Array.isArray(data.models) ? data.models : [],
+            error: data.error || null,
+            status: data.status || (data.ok ? 200 : 0),
+            usedServerKey: Boolean(data.usedServerKey)
+          };
+        }
+      }
+    } catch {
+      // fallback to direct browser check
+    }
+  }
+
+  const effectiveKey = hasDirectInputKey
+    ? rawInputKey
+    : (settings.aiApiKey && !isMaskedApiKey(settings.aiApiKey) ? settings.aiApiKey : '');
+
+  if (!effectiveKey && providerCfg.requiresKey && settings.aiKeyStoredOnServer) {
+    return {
+      ok: false,
+      providerId: providerCfg.providerId,
+      label: providerCfg.label,
+      baseUrl: providerCfg.baseUrl,
+      models: [],
+      error: 'Ключ зашифрован на локальном сервере (:8765), но сервер сейчас выключен. Запустите start_server.bat или введите ключ заново.',
+      status: 0
+    };
+  }
+
+  return await testProviderConnection({
+    aiProvider: providerCfg.providerId,
+    aiBaseUrl: providerCfg.baseUrl,
+    aiApiKey: effectiveKey,
+    timeoutMs: options.timeoutMs
+  });
+}
+
 async function fetchAiModelsList(aiBaseUrl, aiApiKey = '', aiProvider = '') {
   const cleanUrl = String(aiBaseUrl || '').trim().replace(/\/$/, '');
   if (!cleanUrl && !aiProvider) return [];
   const provider = aiProvider || (cleanUrl ? 'custom_openai' : 'gemini_tab');
-  return await fetchProviderModelsList({ aiProvider: provider, aiBaseUrl: cleanUrl, aiApiKey });
+  const res = await testAiProviderWithVault({ aiProvider: provider, aiBaseUrl: cleanUrl, aiApiKey });
+  if (!res.ok) {
+    throw new Error(res.error || 'Не удалось загрузить список моделей.');
+  }
+  return Array.isArray(res.models) ? res.models : [];
 }
 
 function normalizeCacheKey(slug, title) {
@@ -1507,7 +1764,7 @@ async function checkAllConnections() {
       bridgeOfflineUntilTs = Date.now() + 12000;
     }
   } else {
-    const connTest = await testProviderConnection({
+    const connTest = await testAiProviderWithVault({
       aiProvider: providerCfg.providerId,
       aiBaseUrl: providerCfg.baseUrl,
       aiApiKey: settings.aiApiKey,
@@ -1659,7 +1916,7 @@ async function orchestrateProductAnalysisInternal(payload) {
                 accountId: acc,
                 aiProvider: providerCfg.providerId,
                 aiBaseUrl: providerCfg.baseUrl || settings.aiBaseUrl,
-                aiApiKey: settings.aiApiKey,
+                aiApiKey: settings.aiKeyStoredOnServer ? (settings.aiKeyMask || '') : (settings.aiApiKey || ''),
                 aiModel: settings.aiModel || providerCfg.model
               })
             },
@@ -1742,12 +1999,16 @@ async function orchestrateProductAnalysisInternal(payload) {
 
     if (providerCfg.protocol !== 'gemini_tab' && aiBaseUrl && (providerCfg.isPaid || Date.now() > bridgeOfflineUntilTs)) {
       try {
+        const directKey = settings.aiApiKey && !isMaskedApiKey(settings.aiApiKey) ? settings.aiApiKey : '';
+        if (providerCfg.requiresKey && !directKey && settings.aiKeyStoredOnServer) {
+          throw new Error('API-ключ зашифрован на локальном сервере (:8765), но сервер сейчас выключен. Запустите start_server.bat или пересохраните ключ в настройках.');
+        }
         const promptForBridge = buildProductReviewPrompt({ ...payload, title: authoritativeTitle }, webSources, false, priceIntel);
         const aiResult = await callAiProvider(
           {
             aiProvider: providerCfg.providerId,
             aiBaseUrl: providerCfg.baseUrl,
-            aiApiKey: settings.aiApiKey,
+            aiApiKey: directKey,
             aiModel: settings.aiModel,
             timeoutMs: directAiTimeoutMs
           },
@@ -2258,13 +2519,46 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, models: [], error: 'Forbidden' });
       return true;
     }
-    testProviderConnection({
+    testAiProviderWithVault({
       aiProvider: msg.aiProvider || '',
       aiBaseUrl: msg.aiBaseUrl || '',
       aiApiKey: msg.aiApiKey || ''
     })
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, models: [], error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_SAVE_AI_KEY') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    saveAiKeySecurely(msg.aiProvider || '', msg.aiApiKey || '')
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_GET_AI_KEY_STATUS') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    getAiKeyVaultStatus(msg.aiProvider || '')
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_DELETE_AI_KEY') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    deleteAiKeySecurely(msg.aiProvider || '')
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;
   }
 

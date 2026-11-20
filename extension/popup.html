@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Lavka Quality Shield v2.9.4</title>
+  <title>Lavka Quality Shield v2.9.5</title>
   <style>
     body {
       width: 430px;
@@ -525,12 +525,172 @@
       word-break: break-word;
       margin: 2px 0;
     }
+
+    /* КАРТОЧКА НАСТРОЕК ИИ В СТИЛЕ ЯНДЕКС ЛАВКИ (#FCE000, #21201F, #F5F4F2) */
+    .lqs-ai-card {
+      background: #f5f4f2;
+      border: 1px solid #e5e2dd;
+      border-radius: 12px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .lqs-ai-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .lqs-ai-card-title {
+      font-size: 12.5px;
+      font-weight: 800;
+      color: #21201f;
+    }
+    .lqs-ai-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #fce000;
+      color: #21201f;
+      white-space: nowrap;
+    }
+    .lqs-ai-badge.free {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .lqs-ai-subbox {
+      background: #ffffff;
+      border: 1px solid #e5e2dd;
+      border-radius: 10px;
+      padding: 8px 9px;
+      margin-top: 7px;
+    }
+    .lqs-key-status {
+      font-size: 10.5px;
+      line-height: 1.35;
+      color: #5c5a57;
+      margin-top: 4px;
+      padding: 4px 7px;
+      border-radius: 7px;
+      background: #f5f4f2;
+    }
+    .lqs-key-status.secure {
+      background: #ecfdf5;
+      color: #166534;
+      border: 1px solid #bbf7d0;
+    }
+    .lqs-key-status.warn {
+      background: #fffbeb;
+      color: #92400e;
+      border: 1px solid #fde68a;
+    }
+    .lqs-test-btn {
+      width: 100%;
+      background: #21201f;
+      color: #fce000;
+      border: none;
+      border-radius: 9px;
+      padding: 7px 10px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    .lqs-test-btn:hover {
+      background: #363432;
+    }
+    .lqs-test-btn:disabled {
+      opacity: 0.65;
+      cursor: wait;
+    }
+    .lqs-test-status {
+      font-size: 10.5px;
+      line-height: 1.35;
+      margin-top: 5px;
+      color: #21201f;
+    }
+    .lqs-test-status.ok { color: #15803d; }
+    .lqs-test-status.err { color: #b91c1c; }
+    .lqs-moduleapi-link {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #21201f;
+      text-decoration: underline;
+      text-decoration-color: #fce000;
+      text-underline-offset: 2px;
+    }
+    .lqs-moduleapi-link:hover {
+      color: #000000;
+    }
+    .lqs-budget-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      background: #ffffff;
+      border: 1px solid #e5e2dd;
+      border-radius: 10px;
+      padding: 7px 9px;
+      margin-top: 8px;
+    }
+    .lqs-budget-line {
+      font-size: 11px;
+      font-weight: 600;
+      color: #21201f;
+    }
+    .lqs-budget-limit-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+      color: #5c5a57;
+    }
+    .lqs-budget-limit-row input {
+      width: 72px;
+      padding: 4px 6px;
+      border: 1px solid #d6d3cd;
+      border-radius: 7px;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #21201f;
+      text-align: center;
+      background: #f5f4f2;
+    }
+    .lqs-inline-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: #21201f;
+    }
+    .lqs-inline-row input[type="number"] {
+      width: 66px;
+      padding: 4px 6px;
+      border: 1px solid #d6d3cd;
+      border-radius: 7px;
+      font-size: 11.5px;
+      font-weight: 700;
+      text-align: center;
+      background: #f5f4f2;
+      color: #21201f;
+    }
+    .lqs-ai-card input:focus-visible,
+    .lqs-ai-card select:focus-visible,
+    .lqs-ai-card button:focus-visible {
+      outline: 2px solid #21201f;
+      outline-offset: 1px;
+    }
   </style>
 </head>
 <body>
   <div class="top-bar">
     <h2 style="display:flex;align-items:center;gap:6px;"><img src="icons/icon32.png" width="20" height="20" style="border-radius:5px;" alt="">Lavka Quality Shield</h2>
-    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.9.4 Account &amp; Cart</span>
+    <span style="font-size:11px;color:#7a7875;font-weight:700;">v2.9.5 AI &amp; DPAPI</span>
   </div>
 
   <div class="tabs">
@@ -675,7 +835,7 @@
         <span><b>Сам раскрывать карточку</b> с готовым вердиктом ИИ</span>
       </label>
       <label class="zero-click-row">
-        <input type="checkbox" id="chk-auto-warmup" checked>
+        <input type="checkbox" id="chk-auto-warmup">
         <span><b>Сам прогревать вкладку Gemini</b> при старте браузера</span>
       </label>
       <label class="zero-click-row">
@@ -708,73 +868,145 @@
       </div>
     </div>
 
-    <div class="autopilot-card">
-      <div class="autopilot-header">
-        <span>🤖 Статус подключения Gemini</span>
-        <button type="button" id="refresh-radar-btn" style="border:none;background:transparent;color:#0369a1;cursor:pointer;font-size:11px;font-weight:700;">🔄 Статус</button>
+    <div class="lqs-ai-card" id="ai-engine-card">
+      <div class="lqs-ai-card-header">
+        <span class="lqs-ai-card-title">🤖 ИИ-движок и защита кошелька</span>
+        <span class="lqs-ai-badge free" id="ai-provider-mode-badge">Бесплатно</span>
       </div>
-      <div class="radar-grid">
-        <div class="radar-pill" id="pill-gemini-tab"><span>🌐 Вкладка Gemini</span><strong id="val-gemini-tab">...</strong></div>
-        <div class="radar-pill" id="pill-cookies"><span>🍪 Куки Google</span><strong id="val-cookies">...</strong></div>
-        <div class="radar-pill" id="pill-bridge"><span>🚀 Мост :8083</span><strong id="val-bridge">...</strong></div>
-        <div class="radar-pill" id="pill-backend"><span>🐍 База :8765</span><strong id="val-backend">...</strong></div>
+
+      <div class="field" style="margin-bottom:6px;">
+        <label for="sel-ai-provider">Провайдер ИИ:</label>
+        <select id="sel-ai-provider">
+          <option value="gemini_tab">Gemini Web (Hydrogen — бесплатно)</option>
+          <option value="moduleapi">ModuleAPI (moduleapi.pro)</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="gemini_api">Google Gemini API</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="custom_openai">Свой OpenAI URL</option>
+        </select>
       </div>
-      <div style="margin-bottom:6px;">
-        <label style="display:block;font-size:10.5px;font-weight:700;color:#0369a1;margin-bottom:3px;">👤 Целевой аккаунт / вкладка Gemini:</label>
-        <div style="display:flex;gap:4px;">
-          <select id="gemini-account-select" style="flex:1;padding:5px 6px;border-radius:7px;border:1px solid #7dd3fc;background:#ffffff;font-size:11px;font-weight:600;color:#0f172a;outline:none;">
-            <option value="auto">🔄 Авто (любая открытая вкладка Gemini)</option>
-            <option value="0">Аккаунт #0 — Основной (/u/0/app)</option>
-            <option value="1">Аккаунт #1 — Второй (/u/1/app)</option>
-            <option value="2">Аккаунт #2 — Третий (/u/2/app)</option>
-            <option value="3">Аккаунт #3 — Четвёртый (/u/3/app)</option>
-            <option value="4">Аккаунт #4 — Пятый (/u/4/app)</option>
+
+      <!-- БЛОК ДЛЯ GEMINI WEB (HYDROGEN) -->
+      <div class="lqs-ai-subbox" id="ai-gemini-config-box">
+        <div class="field" style="margin-bottom:6px;">
+          <label for="sel-gemini-tab-mode">Режим вкладки Gemini:</label>
+          <select id="sel-gemini-tab-mode">
+            <option value="stealth_window">Невидимка: свёрнутое окно + автозакрытие</option>
+            <option value="on_demand_tab">Вкладка по запросу</option>
+            <option value="keep_open">Держать вкладку открытой</option>
           </select>
-          <button type="button" id="open-selected-gemini-btn" style="padding:5px 8px;border-radius:7px;border:1px solid #7dd3fc;background:#ffffff;color:#0369a1;font-size:11px;font-weight:700;cursor:pointer;">🌐 Открыть</button>
+        </div>
+        <div class="lqs-inline-row" id="gemini-idle-minutes-row">
+          <label for="inp-gemini-idle-minutes" style="margin:0;font-weight:600;color:#5c5a57;">Автозакрытие после простоя (мин):</label>
+          <input type="number" id="inp-gemini-idle-minutes" min="1" max="120" value="5">
+        </div>
+
+        <div class="autopilot-card" style="margin:8px 0 0 0;background:#f5f4f2;border-color:#e5e2dd;">
+          <div class="autopilot-header" style="color:#21201f;">
+            <span>Статус подключения Gemini</span>
+            <button type="button" id="refresh-radar-btn" style="border:none;background:transparent;color:#21201f;cursor:pointer;font-size:11px;font-weight:700;">🔄 Статус</button>
+          </div>
+          <div class="radar-grid">
+            <div class="radar-pill" id="pill-gemini-tab"><span>🌐 Gemini</span><strong id="val-gemini-tab">...</strong></div>
+            <div class="radar-pill" id="pill-cookies"><span>🍪 Куки</span><strong id="val-cookies">...</strong></div>
+            <div class="radar-pill" id="pill-bridge"><span>🚀 ИИ-мост</span><strong id="val-bridge">...</strong></div>
+            <div class="radar-pill" id="pill-backend"><span>🐍 База :8765</span><strong id="val-backend">...</strong></div>
+          </div>
+          <div style="margin-bottom:6px;">
+            <label for="gemini-account-select" style="display:block;font-size:10.5px;font-weight:700;color:#5c5a57;margin-bottom:3px;">👤 Аккаунт Google для Gemini:</label>
+            <div style="display:flex;gap:4px;">
+              <select id="gemini-account-select" style="flex:1;padding:5px 6px;border-radius:7px;border:1px solid #d6d3cd;background:#ffffff;font-size:11px;font-weight:600;color:#21201f;outline:none;">
+                <option value="auto">🔄 Авто (любая открытая вкладка Gemini)</option>
+                <option value="0">Аккаунт #0 — Основной (/u/0/app)</option>
+                <option value="1">Аккаунт #1 — Второй (/u/1/app)</option>
+                <option value="2">Аккаунт #2 — Третий (/u/2/app)</option>
+                <option value="3">Аккаунт #3 — Четвёртый (/u/3/app)</option>
+                <option value="4">Аккаунт #4 — Пятый (/u/4/app)</option>
+              </select>
+              <button type="button" id="open-selected-gemini-btn" style="padding:5px 8px;border-radius:7px;border:1px solid #d6d3cd;background:#ffffff;color:#21201f;font-size:11px;font-weight:700;cursor:pointer;">🌐 Открыть</button>
+            </div>
+          </div>
+          <button type="button" class="autopilot-btn-primary" id="auto-connect-gemini-btn" style="background:#21201f;color:#fce000;">
+            ⚡ Проверить / открыть выбранный Gemini сейчас
+          </button>
+          <button type="button" class="autopilot-btn-secondary" id="copy-gemini-cookies-btn" style="color:#21201f;border-color:#d6d3cd;">
+            🍪 Скопировать куки Gemini (Header String)
+          </button>
+          <div class="autopilot-status" id="autopilot-status-box" role="status" aria-live="polite"></div>
         </div>
       </div>
-      <button type="button" class="autopilot-btn-primary" id="auto-connect-gemini-btn">
-        ⚡ Проверить / прогреть выбранный Gemini сейчас
-      </button>
-      <button type="button" class="autopilot-btn-secondary" id="copy-gemini-cookies-btn">
-        🍪 Скопировать куки Gemini (Header String) без F12
-      </button>
-      <div class="autopilot-status" id="autopilot-status-box"></div>
-    </div>
 
-    <div class="preset-row">
-      <button type="button" class="preset-btn" id="preset-argon">🚀 Gemini Argon (:8083)</button>
-      <button type="button" class="preset-btn" id="preset-deepseek">☁️ DeepSeek API</button>
-      <button type="button" class="preset-btn" id="preset-ollama">🦙 Ollama (:11434)</button>
-    </div>
+      <!-- БЛОК ДЛЯ API-ПРОВАЙДЕРОВ (ModuleAPI / OpenAI / Anthropic / Gemini API / DeepSeek / OpenRouter / Custom) -->
+      <div class="lqs-ai-subbox" id="ai-api-config-box" hidden>
+        <div class="field" id="ai-base-url-field" hidden>
+          <label for="inp-ai-url">Base URL (OpenAI-совместимый адрес):</label>
+          <input type="text" id="inp-ai-url" placeholder="http://localhost:8083/v1" autocomplete="off">
+        </div>
 
-    <div class="field">
-      <label>Локальный сервер базы цен и отзывов (FastAPI):</label>
-      <input type="text" id="inp-backend" placeholder="http://127.0.0.1:8765">
-    </div>
-    <div class="field">
-      <label>Токен локального сервера (X-LQS-Token, авто-привязка из secret.key):</label>
-      <input type="password" id="inp-backend-token" placeholder="Заполняется автоматически при первом подключении">
-    </div>
-    <div class="field">
-      <label>Base URL ИИ (мост :8083 или OpenAI API):</label>
-      <input type="text" id="inp-ai-url" placeholder="http://localhost:8083/v1">
-    </div>
-    <div class="field">
-      <label>API Key (оставь пустым для работы через вкладку Gemini):</label>
-      <input type="password" id="inp-ai-key" placeholder="Ключ для :8083 или DeepSeek...">
-    </div>
-    <div class="field">
-      <label>Название модели (Model ID — подгружается из /models):</label>
-      <div class="mini-row">
-        <input type="text" id="inp-ai-model" list="ai-models-datalist" placeholder="Автовыбор из /models или введи вручную">
-        <button type="button" class="icon-btn" id="refresh-ai-models-btn" title="Подгрузить список моделей с aiBaseUrl/models">🔄</button>
+        <div class="field">
+          <label for="inp-ai-key">API-ключ:</label>
+          <div class="mini-row" style="margin-bottom:0;">
+            <input type="password" id="inp-ai-key" placeholder="Вставьте API-ключ провайдера..." autocomplete="off">
+            <button type="button" class="icon-btn" id="delete-ai-key-btn" title="Удалить сохранённый API-ключ" hidden>🗑️</button>
+          </div>
+          <div class="lqs-key-status" id="ai-key-storage-badge" role="status" aria-live="polite">
+            Ключ будет зашифрован через Windows DPAPI на сервере :8765.
+          </div>
+        </div>
+
+        <div class="field" style="margin-bottom:4px;">
+          <label for="inp-ai-model">Модель (Model ID):</label>
+          <div class="mini-row" style="margin-bottom:0;">
+            <input type="text" id="inp-ai-model" list="ai-models-datalist" placeholder="Нажмите «Проверить ключ и загрузить модели»" autocomplete="off">
+            <button type="button" class="icon-btn" id="refresh-ai-models-btn" title="Обновить список моделей">🔄</button>
+          </div>
+          <datalist id="ai-models-datalist"></datalist>
+          <div id="ai-models-hint" style="font-size:10px;color:#7a7875;margin-top:2px;"></div>
+        </div>
+
+        <button type="button" class="lqs-test-btn" id="test-ai-provider-btn">
+          🔑 Проверить ключ и загрузить модели
+        </button>
+        <div class="lqs-test-status" id="ai-test-status" role="status" aria-live="polite"></div>
+
+        <a class="lqs-moduleapi-link" id="moduleapi-check-link" href="https://www.moduleapi.pro/check" target="_blank" rel="noopener noreferrer" hidden>
+          ↗ Проверить ключ и баланс на moduleapi.pro/check
+        </a>
       </div>
-      <datalist id="ai-models-datalist"></datalist>
-      <div id="ai-models-hint" style="font-size:10px;color:#7a7875;margin-top:2px;"></div>
+
+      <!-- БЮДЖЕТ И ДНЕВНОЙ ЛИМИТ -->
+      <div class="lqs-budget-bar" id="ai-budget-bar">
+        <div class="lqs-budget-line" id="ai-usage-summary">
+          Сегодня запросов: 0 / 25 · Потрачено: $0.00 (месяц: $0.00)
+        </div>
+        <div class="lqs-budget-limit-row">
+          <label for="inp-paid-daily-limit" style="margin:0;font-weight:600;">Дневной лимит платных запросов (0 = без лимита):</label>
+          <input type="number" id="inp-paid-daily-limit" min="0" max="500" value="25">
+        </div>
+      </div>
+
+      <button type="button" class="save-settings-btn" id="save-ai-btn" style="margin-top:8px;">💾 Сохранить настройки ИИ</button>
+      <div id="ai-save-status" role="status" aria-live="polite" style="font-size:11px;color:#15803d;text-align:center;margin-top:5px;"></div>
     </div>
-    <button type="button" class="save-settings-btn" id="save-ai-btn">💾 Сохранить настройки</button>
-    <div id="ai-save-status" style="font-size:11px;color:#15803d;text-align:center;margin-top:5px;"></div>
+
+    <details class="debug-spoiler" id="backend-config-spoiler" style="margin-top:6px;">
+      <summary>
+        <span>🐍 Локальный сервер базы и DPAPI (:8765)</span>
+        <span style="font-size:10px;color:#7a7875;">▾ настроить</span>
+      </summary>
+      <div class="debug-body">
+        <div class="field" style="margin-bottom:4px;">
+          <label for="inp-backend">Адрес локального сервера (FastAPI):</label>
+          <input type="text" id="inp-backend" placeholder="http://127.0.0.1:8765">
+        </div>
+        <div class="field" style="margin-bottom:4px;">
+          <label for="inp-backend-token">Токен сервера (X-LQS-Token, авто-привязка из secret.key):</label>
+          <input type="password" id="inp-backend-token" placeholder="Заполняется автоматически при первом подключении" autocomplete="off">
+        </div>
+      </div>
+    </details>
 
     <details class="debug-spoiler" id="radar-stores-spoiler">
       <summary>
@@ -813,6 +1045,7 @@
 
   <script src="shared/config.js"></script>
   <script src="shared/utils.js"></script>
+  <script src="bg/ai-providers.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

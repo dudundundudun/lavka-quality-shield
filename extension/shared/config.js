@@ -6,7 +6,7 @@
   'use strict';
 
   const LQS_CONFIG = Object.freeze({
-    VERSION: '2.9.4',
+    VERSION: '2.9.5',
     STORAGE_KEYS: Object.freeze({
       REVIEWS: 'lqs_reviews_v1',
       SETTINGS: 'lqs_settings_v2',
@@ -41,6 +41,8 @@
       aiProvider: 'gemini_tab',
       aiBaseUrl: 'http://localhost:8083/v1',
       aiApiKey: '',
+      aiKeyMask: '',
+      aiKeyStoredOnServer: false,
       aiModel: '',
       paidAiDailyLimit: 25,
       preferBrowserGeminiTab: true,

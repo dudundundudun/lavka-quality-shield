@@ -188,6 +188,20 @@
     return num;
   }
 
+  function maskApiKey(rawKey) {
+    const key = String(rawKey || '').trim();
+    if (!key) return '';
+    if (key.length <= 4) return '***';
+    if (key.length <= 8) return `${key.slice(0, 2)}...${key.slice(-2)}`;
+    return `${key.slice(0, 3)}...${key.slice(-4)}`;
+  }
+
+  function isMaskedApiKey(val) {
+    const s = String(val || '').trim();
+    if (!s) return true;
+    return /(\.\.\.|•{2,}|\*{3,})/.test(s);
+  }
+
   function formatCostUsd(costUsd) {
     if (typeof costUsd !== 'number' || !Number.isFinite(costUsd) || costUsd < 0) return '';
     if (costUsd === 0) return '$0.00';
@@ -652,6 +666,8 @@
     inferProviderFromBaseUrl,
     resolveProviderConfig,
     parseModuleApiCostHeader,
+    maskApiKey,
+    isMaskedApiKey,
     formatCostUsd,
     formatProviderHttpError,
     buildChatRequest,
