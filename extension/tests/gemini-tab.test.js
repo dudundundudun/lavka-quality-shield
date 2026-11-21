@@ -201,3 +201,86 @@ test('isGeminiLoginRequired detects missing Google cookies and Google sign-in re
   assert.equal(h.api.isGeminiLoginRequired({ url: 'https://accounts.google.com/ServiceLogin' }, { ok: true }), true);
   assert.equal(h.api.isGeminiLoginRequired({ url: 'https://gemini.google.com/app' }, { ok: true }), false);
 });
+
+test('stealth_window falls back to background on_demand_tab when chrome.windows.create fails', async () => {
+  const h = loadGeminiTabHarness({ geminiTabMode: 'stealth_window', geminiIdleCloseMinutes: 5 });
+  // Trigger fallback by overriding windows.create in a custom harness
+  const code = fs.readFileSync(path.join(extDir, 'bg', 'gemini-tab.js'), 'utf8');
+  const createdTabs = [];
+  const storageData = {};
+  const sandbox = {
+    chrome: {
+      storage: {
+        local: {
+          get: (keys, cb) => cb && cb({}),
+          set: (obj, cb) => { Object.assign(storageData, obj || {}); if (cb) cb(); },
+          remove: (keys, cb) => cb && cb()
+        }
+      },
+      windows: {
+        create: async () => { throw new Error('Minimized window unavailable in fullscreen'); }
+      },
+      tabs: {
+        create: async (opts) => {
+          const t = { id: 950 + createdTabs.length, url: opts.url, active: opts.active, pinned: opts.pinned };
+          createdTabs.push(opts);
+          return t;
+        }
+      },
+      alarms: { create: () => {}, clear: async () => {} },
+      cookies: { getAll: async () => [] },
+      scripting: { executeScript: async () => [] }
+    },
+    console: { log: () => {}, warn: () => {}, error: () => {} },
+    Date, Math, JSON, Map, Set, Promise, RegExp, Error, Array, Object, Number, String, Boolean, setTimeout, clearTimeout,
+    LQS_CONFIG: { STORAGE_KEYS: { GEMINI_STEALTH_SESSION: 'lqs_gemini_stealth_session_v1' } },
+    LQS_UTILS: { fetchWithTimeout: async () => ({ ok: false }), getSettings: async () => ({ geminiTabMode: 'stealth_window' }) },
+    LQS_BG_DEPS: { waitForTabCompleteSafe: async () => true }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  vm.runInContext(code, vm.createContext(sandbox), { filename: 'bg/gemini-tab.js' });
+
+  const tab = JSON.parse(JSON.stringify(await sandbox.LQS_GEMINI_TAB.createGeminiTab('https://gemini.google.com/app', false)));
+  assert.equal(createdTabs.length, 1);
+  assert.equal(createdTabs[0].active, false);
+  assert.equal(createdTabs[0].pinned, false);
+  assert.equal(tab.id, 950);
+  assert.equal(storageData.lqs_gemini_stealth_session_v1.mode, 'on_demand_tab');
+  assert.ok(h.api);
+});
+
+test('inspectGeminiCookies survives partial chrome.cookies.getAll rejection and recognizes google.com session', async () => {
+  const code = fs.readFileSync(path.join(extDir, 'bg', 'gemini-tab.js'), 'utf8');
+  const sandbox = {
+    chrome: {
+      storage: { local: { get: (k, cb) => cb && cb({}), set: (o, cb) => cb && cb(), remove: (k, cb) => cb && cb() } },
+      cookies: {
+        getAll: async (details) => {
+          if (details && details.domain === 'google.com') {
+            return [{ name: '__Secure-1PSID', value: 'tok-123' }];
+          }
+          throw new Error('Transient cookie error');
+        }
+      }
+    },
+    console, Date, Math, JSON, Map, Set, Promise, RegExp, Error, Array, Object, Number, String, Boolean, setTimeout, clearTimeout,
+    LQS_CONFIG: { STORAGE_KEYS: {} },
+    LQS_UTILS: { fetchWithTimeout: async () => ({ ok: false }), getSettings: async () => ({}) },
+    LQS_BG_DEPS: {}
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  vm.runInContext(code, vm.createContext(sandbox), { filename: 'bg/gemini-tab.js' });
+
+  const res = JSON.parse(JSON.stringify(await sandbox.LQS_GEMINI_TAB.inspectGeminiCookies()));
+  assert.equal(res.ok, true);
+  assert.equal(res.hasSecure1PSID, true);
+});
+
+test('gemini-tab.js polling verdict regex recognizes "с оговорками" and manifest grants *.google.com', () => {
+  const gtSrc = fs.readFileSync(path.join(extDir, 'bg', 'gemini-tab.js'), 'utf8');
+  assert.match(gtSrc, /с оговорками/i);
+  const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
+  assert.ok((manifest.host_permissions || []).includes('https://*.google.com/*'));
+});

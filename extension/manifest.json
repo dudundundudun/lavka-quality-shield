@@ -27,6 +27,7 @@
     "https://vkusvill.ru/*",
     "https://*.vkusvill.ru/*",
     "https://gemini.google.com/*",
+    "https://*.google.com/*",
     "https://html.duckduckgo.com/*",
     "https://lite.duckduckgo.com/*",
     "http://127.0.0.1:8765/*",

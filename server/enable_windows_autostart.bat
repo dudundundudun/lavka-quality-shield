@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableExtensions
-title Lavka Quality Shield v2.7.0 - Windows Silent Autostart Installer
+title Lavka Quality Shield v2.10.0 - Windows Silent Autostart Installer
 cd /d "%~dp0"
 
 REM Подсказка: запусти "enable_windows_autostart.bat --update-deps" (или удали
@@ -26,7 +26,7 @@ if /i "%~1"=="/update-deps" set "FORCE_DEPS=1"
 if not exist "%LQS_DATA_DIR%" mkdir "%LQS_DATA_DIR%"
 
 echo ============================================================
-echo   Lavka Quality Shield v2.7.0 - ZERO-CLICK WINDOWS AUTOSTART
+echo   Lavka Quality Shield v2.10.0 - ZERO-CLICK WINDOWS AUTOSTART
 echo ============================================================
 echo [1/3] Подготовка изолированного Python-окружения ^(.venv^)...
 

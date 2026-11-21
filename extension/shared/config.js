@@ -43,7 +43,7 @@
     DEFAULT_SETTINGS: Object.freeze({
       backendUrl: 'http://127.0.0.1:8765',
       aiProvider: 'gemini_tab',
-      aiBaseUrl: 'http://localhost:8083/v1',
+      aiBaseUrl: '',
       aiApiKey: '',
       aiKeyMask: '',
       aiKeyStoredOnServer: false,

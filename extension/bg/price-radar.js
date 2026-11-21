@@ -48,8 +48,8 @@
         magnitSeedCache = raw.map((o) => ({ ...o, isSeedFallback: true, seededAt }));
         return magnitSeedCache;
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[LQS PriceRadar] Failed to load Magnit seed offers:', err?.message || err);
     }
     magnitSeedCache = [];
     return magnitSeedCache;
@@ -416,7 +416,8 @@
             chrome.storage.local.set({ [PRICE_DB_KEY]: db });
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[LQS PriceRadar] Backend /api/price/record failed:', err?.message || err);
         getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
@@ -546,8 +547,8 @@
           parsedCard = parseFullProductCardFromLavkaHtml(htmlAuth);
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[LQS PriceRadar] Lavka card fetch failed:', cleanSlug, err?.message || err);
     }
 
     const canonicalTitle = parsedCard?.cardTitle
@@ -634,7 +635,8 @@
             chrome.storage.local.set({ [PRICE_DB_KEY]: db });
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[LQS PriceRadar] Backend /api/price/product failed:', cleanSlug, err?.message || err);
         getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
@@ -675,8 +677,8 @@
             combinedOffers = mergeUniqueStoreOffers(combinedOffers, directStoreOffers);
             combinedOffers = sanitizeCompetitorOffersForProduct(combinedOffers, authoritativeTitle, authoritativeAmount);
           }
-        } catch {
-          // ignore
+        } catch (err) {
+          console.warn('[LQS PriceRadar] Direct retail stores probe failed:', authoritativeTitle, err?.message || err);
         }
       }
 
@@ -1095,7 +1097,8 @@
             return data;
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[LQS PriceRadar] Backend /api/price/history failed:', cleanSlug, err?.message || err);
         getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
@@ -1186,7 +1189,8 @@
             item = data.item || null;
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[LQS PriceRadar] Backend /api/watchlist/toggle failed:', cleanSlug, err?.message || err);
         getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
@@ -1236,7 +1240,8 @@
             return data.items;
           }
         }
-      } catch {
+      } catch (err) {
+        console.warn('[LQS PriceRadar] Backend /api/watchlist failed:', err?.message || err);
         getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
       }
     }
@@ -1308,8 +1313,8 @@
               });
             }
           }
-        } catch {
-          // continue next item
+        } catch (err) {
+          console.warn('[LQS PriceRadar] Watchlist price check failed:', item.slug, err?.message || err);
         }
         await new Promise((r) => setTimeout(r, 450));
       }

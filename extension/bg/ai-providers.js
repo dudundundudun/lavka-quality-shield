@@ -95,7 +95,7 @@
       id: 'custom_openai',
       label: 'Свой OpenAI-совместимый URL',
       protocol: 'openai',
-      baseUrl: 'http://localhost:8083/v1',
+      baseUrl: '',
       requiresKey: false,
       isPaid: false,
       defaultModel: '',

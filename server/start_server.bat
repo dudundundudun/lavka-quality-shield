@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title Lavka Quality Shield v2.7.0 - Local AI Review Server
+title Lavka Quality Shield v2.10.0 - Local AI Review Server
 cd /d "%~dp0"
 
 REM Tip: run "start_server.bat --update-deps" (or delete
@@ -23,7 +23,7 @@ if /i "%~1"=="/update-deps" set "FORCE_DEPS=1"
 if not exist "%LQS_DATA_DIR%" mkdir "%LQS_DATA_DIR%"
 
 echo ============================================================
-echo   Lavka Quality Shield v2.7.0 - Local FastAPI Backend
+echo   Lavka Quality Shield v2.10.0 - Local FastAPI Backend
 echo   Listening on: http://127.0.0.1:8765
 echo   Healthcheck : http://127.0.0.1:8765/api/health
 echo   Venv path   : %VENV_DIR%

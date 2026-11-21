@@ -71,7 +71,7 @@ class AnalyzeRequest(BaseModel):
     pricePer100gProtein: Optional[int] = None
     pricingSummary: Optional[str] = None
     aiProvider: str = "custom_openai"
-    aiBaseUrl: str = "http://localhost:8083/v1"
+    aiBaseUrl: str = ""
     aiApiKey: str = ""
     aiModel: str = ""
     forceRefresh: bool = False
@@ -579,7 +579,7 @@ def _resolve_provider_target(req: AnalyzeRequest) -> Tuple[str, str]:
     if provider in AI_PROVIDER_BASE_URLS:
         base_url = AI_PROVIDER_BASE_URLS[provider]
     else:
-        base_url = raw_url or "http://localhost:8083/v1"
+        base_url = raw_url
         lower_u = base_url.lower()
         if "api.anthropic.com" in lower_u:
             provider = "anthropic"
@@ -643,6 +643,8 @@ async def call_ai_model(
     prompt = build_ai_prompt(req, web_snippets, price_summary)
 
     provider, target_url = _resolve_provider_target(req)
+    if not target_url:
+        raise ValueError("Не указан URL для OpenAI-совместимого API (custom_openai).")
     base_url = validate_ai_base_url(target_url)
     effective_api_key, _used_vault_key = _resolve_effective_ai_api_key(provider, req.aiApiKey)
     is_local = "localhost" in base_url or "127.0.0.1" in base_url
@@ -809,7 +811,8 @@ def _save_ai_cache_sync(
 async def analyze_product(req: AnalyzeRequest):
     if (req.aiProvider or "").strip().lower() != "gemini_tab":
         _, target_url = _resolve_provider_target(req)
-        validate_ai_base_url(target_url)
+        if target_url:
+            validate_ai_base_url(target_url)
     cache_key = (req.slug or req.title).strip().lower()
     norm_title = normalize_title_for_match(req.title)
     await asyncio.to_thread(

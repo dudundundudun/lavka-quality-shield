@@ -132,8 +132,12 @@
 
   async function inspectGeminiCookies() {
     try {
-      const cookiesGemini = await chrome.cookies.getAll({ url: 'https://gemini.google.com/' });
-      const cookiesGoogle = await chrome.cookies.getAll({ domain: 'google.com' });
+      const cookiesGemini = await Promise.resolve()
+        .then(() => chrome.cookies.getAll({ url: 'https://gemini.google.com/' }))
+        .catch(() => []);
+      const cookiesGoogle = await Promise.resolve()
+        .then(() => chrome.cookies.getAll({ domain: 'google.com' }))
+        .catch(() => []);
 
       const map = new Map();
       [...cookiesGoogle, ...cookiesGemini].forEach((c) => {
@@ -286,25 +290,42 @@
     }
 
     if (mode === 'stealth_window' && chrome.windows && typeof chrome.windows.create === 'function') {
-      const win = await chrome.windows.create({
-        url: targetUrl,
-        state: 'minimized',
-        focused: false
-      });
-      let createdTab = win && Array.isArray(win.tabs) && win.tabs[0] ? win.tabs[0] : null;
-      if (!createdTab && win && win.id && chrome.tabs && typeof chrome.tabs.query === 'function') {
-        const winTabs = await chrome.tabs.query({ windowId: win.id });
-        createdTab = winTabs && winTabs[0] ? winTabs[0] : null;
-      }
-      if (createdTab && createdTab.id) {
+      try {
+        const win = await chrome.windows.create({
+          url: targetUrl,
+          state: 'minimized',
+          focused: false
+        });
+        let createdTab = win && Array.isArray(win.tabs) && win.tabs[0] ? win.tabs[0] : null;
+        if (!createdTab && win && win.id && chrome.tabs && typeof chrome.tabs.query === 'function') {
+          const winTabs = await chrome.tabs.query({ windowId: win.id });
+          createdTab = winTabs && winTabs[0] ? winTabs[0] : null;
+        }
+        if (createdTab && createdTab.id) {
+          await saveManagedGeminiSession({
+            tabId: createdTab.id,
+            windowId: win ? win.id : null,
+            mode: 'stealth_window',
+            createdAt: Date.now()
+          });
+          await getBgDeps().waitForTabCompleteSafe(createdTab.id, 6500);
+          return createdTab;
+        }
+      } catch (winErr) {
+        console.warn('[LQS GeminiTab] stealth_window creation failed, falling back to background tab:', winErr && winErr.message ? winErr.message : winErr);
+        const fallbackTab = await chrome.tabs.create({
+          url: targetUrl,
+          active: false,
+          pinned: false
+        });
         await saveManagedGeminiSession({
-          tabId: createdTab.id,
-          windowId: win ? win.id : null,
-          mode: 'stealth_window',
+          tabId: fallbackTab.id,
+          windowId: null,
+          mode: 'on_demand_tab',
           createdAt: Date.now()
         });
-        await getBgDeps().waitForTabCompleteSafe(createdTab.id, 6500);
-        return createdTab;
+        await getBgDeps().waitForTabCompleteSafe(fallbackTab.id, 6500);
+        return fallbackTab;
       }
     }
 
@@ -695,7 +716,7 @@
         if (poll.didRetrySend) retriedSend = true;
 
         if (poll.isNew && poll.currentText && poll.currentText.length > 35) {
-          const hasVerdictWord = /вердикт|стоит брать|хороший вариант|на любителя|не рекомендую/i.test(poll.currentText);
+          const hasVerdictWord = /вердикт|стоит брать|хороший вариант|с оговорками|на любителя|не рекомендую/i.test(poll.currentText);
           if (poll.currentText === lastText && !poll.generating) {
             stableTicks += 1;
             if (stableTicks >= 2 || (stableTicks >= 1 && hasVerdictWord)) {

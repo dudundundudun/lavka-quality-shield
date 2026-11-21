@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Lavka Quality Shield v2.7.0 - Remove Windows Autostart
+title Lavka Quality Shield v2.10.0 - Remove Windows Autostart
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "VBS_PATH=%STARTUP_DIR%\LavkaQualityShield_Autostart.vbs"
 

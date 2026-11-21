@@ -1181,28 +1181,16 @@ async function checkAllConnections() {
     backendOfflineUntilTs = Date.now() + 10000;
   }
 
-  let bridgeStatus = { ok: false, msg: providerCfg.protocol === 'gemini_tab' ? 'Выкл (работает вкладка)' : `${providerCfg.label}: не проверен` };
+  let bridgeStatus = { ok: false, msg: providerCfg.protocol === 'gemini_tab' ? 'Режим вкладки Gemini' : `${providerCfg.label}: не проверен` };
   if (providerCfg.protocol === 'gemini_tab') {
-    try {
-      const headers = settings.aiApiKey ? { Authorization: `Bearer ${settings.aiApiKey}` } : {};
-      const r2 = await fetchWithTimeout(`${aiBaseUrl}/models`, { method: 'GET', headers }, 1000);
-      if (r2.ok) {
-        bridgeOfflineUntilTs = 0;
-        let activeModelLabel = settings.aiModel || 'авто';
-        try {
-          const mJson = await r2.json();
-          const firstId = Array.isArray(mJson?.data) && mJson.data[0]?.id ? mJson.data[0].id : '';
-          if (!settings.aiModel && firstId) activeModelLabel = firstId;
-        } catch {
-          // ignore
-        }
-        bridgeStatus = { ok: true, msg: `ОК (${activeModelLabel})` };
-      } else {
-        bridgeStatus = { ok: false, msg: `HTTP ${r2.status} (проверь ключ)` };
-      }
-    } catch {
-      bridgeOfflineUntilTs = Date.now() + 12000;
-    }
+    bridgeStatus = {
+      ok: Boolean(selectedTab || cookieInfo.ok),
+      msg: selectedTab
+        ? 'Вкладка Gemini подключена'
+        : cookieInfo.ok
+          ? 'Готов (режим вкладки Gemini)'
+          : 'Нужен вход в аккаунт Google'
+    };
   } else {
     const connTest = await testAiProviderWithVault({
       aiProvider: providerCfg.providerId,
@@ -1539,8 +1527,12 @@ async function orchestrateProductAnalysisInternal(payload) {
 
       const geminiMode = normalizeGeminiTabMode(settings.geminiTabMode);
       const loginUrl = buildGeminiUrlForAccount(settings.geminiAccountIndex);
+      const existingGeminiTab = await findOpenGeminiTab(false, false);
+      const hasReadyOpenTab = Boolean(
+        existingGeminiTab && existingGeminiTab.id && !isGeminiLoginRequired(existingGeminiTab, null)
+      );
       const cookieCheck = await inspectGeminiCookies();
-      if (isGeminiLoginRequired(null, cookieCheck)) {
+      if (!hasReadyOpenTab && isGeminiLoginRequired(null, cookieCheck)) {
         return {
           ok: false,
           needsGeminiLogin: true,
@@ -1555,8 +1547,8 @@ async function orchestrateProductAnalysisInternal(payload) {
       await cancelGeminiIdleCloseTimer();
       let geminiTab = null;
       try {
-        geminiTab = await findOpenGeminiTab(true, false);
-        if (geminiTab && isGeminiLoginRequired(geminiTab, cookieCheck)) {
+        geminiTab = hasReadyOpenTab ? existingGeminiTab : await findOpenGeminiTab(true, false);
+        if (geminiTab && isGeminiLoginRequired(geminiTab, hasReadyOpenTab ? null : cookieCheck)) {
           await closeManagedGeminiSession('login-required');
           return {
             ok: false,
@@ -1618,7 +1610,7 @@ async function orchestrateProductAnalysisInternal(payload) {
       return {
         ok: false,
         mode: 'All AI methods unreachable',
-        error: 'Не удалось найти или открыть вкладку gemini.google.com и локальный мост :8083 выключен.',
+        error: 'Не удалось найти или открыть вкладку gemini.google.com. Откройте Gemini, убедитесь во входе в аккаунт и повторите попытку.',
         sources: webSources,
         priceSummary: priceIntel
       };

@@ -149,7 +149,8 @@ test('maskApiKey and isMaskedApiKey mask real keys as sk-...1234 and detect mask
 
 test('popup.html contains Lavka-styled AI provider block with all 8 presets, Gemini stealth controls, budget bar, and no MV3 CSP violations', () => {
   const html = fs.readFileSync(path.join(extDir, 'popup.html'), 'utf8');
-  const js = fs.readFileSync(path.join(extDir, 'popup.js'), 'utf8');
+  const popupJs = fs.readFileSync(path.join(extDir, 'popup.js'), 'utf8');
+  const aiSettingsJs = fs.readFileSync(path.join(extDir, 'popup', 'ai-settings.js'), 'utf8');
 
   // All 8 provider presets in dropdown
   for (const prov of ['gemini_tab', 'moduleapi', 'openai', 'anthropic', 'gemini_api', 'deepseek', 'openrouter', 'custom_openai']) {
@@ -172,18 +173,22 @@ test('popup.html contains Lavka-styled AI provider block with all 8 presets, Gem
   assert.match(html, /id="ai-key-storage-badge"/);
   assert.match(html, /id="delete-ai-key-btn"/);
   assert.match(html, /<script src="bg\/ai-providers\.js"><\/script>/);
+  assert.match(html, /<script src="popup\/ai-settings\.js"><\/script>\s*<script src="popup\.js"><\/script>/);
 
-  // JS hooks present
-  assert.match(js, /LQS_TEST_AI_PROVIDER/);
-  assert.match(js, /LQS_GET_AI_USAGE_STATS/);
-  assert.match(js, /LQS_SAVE_AI_KEY/);
-  assert.match(js, /LQS_GET_AI_KEY_STATUS/);
-  assert.match(js, /LQS_DELETE_AI_KEY/);
+  // JS hooks present in extracted popup/ai-settings.js module
+  assert.match(aiSettingsJs, /LQS_TEST_AI_PROVIDER/);
+  assert.match(aiSettingsJs, /LQS_GET_AI_USAGE_STATS/);
+  assert.match(aiSettingsJs, /LQS_SAVE_AI_KEY/);
+  assert.match(aiSettingsJs, /LQS_GET_AI_KEY_STATUS/);
+  assert.match(aiSettingsJs, /LQS_DELETE_AI_KEY/);
+  assert.match(popupJs, /LQS_POPUP_AI_SETTINGS/);
 
   // Strict MV3 CSP: no inline onclick, eval, new Function
   assert.doesNotMatch(html, /\bonclick\s*=/i);
-  assert.doesNotMatch(js, /\beval\s*\(/);
-  assert.doesNotMatch(js, /\bnew\s+Function\s*\(/);
+  assert.doesNotMatch(popupJs, /\beval\s*\(/);
+  assert.doesNotMatch(popupJs, /\bnew\s+Function\s*\(/);
+  assert.doesNotMatch(aiSettingsJs, /\beval\s*\(/);
+  assert.doesNotMatch(aiSettingsJs, /\bnew\s+Function\s*\(/);
 });
 
 test('LQS_SAVE_AI_KEY stores only mask and storedOnServer=true when backend is online, and falls back locally when offline', async () => {
@@ -246,4 +251,67 @@ test('LQS_SAVE_AI_KEY stores only mask and storedOnServer=true when backend is o
   assert.equal(normFallback.mask, 'sk-...7788');
   assert.equal(offlineStorage.lqs_settings_v2.aiApiKey, 'sk-local-fallback-7788');
   assert.equal(offlineStorage.lqs_settings_v2.aiKeyStoredOnServer, false);
+});
+
+test('popup/ai-settings.js formats USD, syncs provider UI, and renders DPAPI badge states cleanly', () => {
+  const elements = {};
+  const makeEl = (id, init = {}) => {
+    const el = { id, value: '', hidden: false, className: '', textContent: '', placeholder: '', innerHTML: '', classList: { add(c) { el.className = (el.className + ' ' + c).trim(); } }, ...init };
+    elements[id] = el;
+    return el;
+  };
+  makeEl('sel-ai-provider', { value: 'gemini_tab' });
+  makeEl('ai-gemini-config-box');
+  makeEl('ai-api-config-box');
+  makeEl('ai-base-url-field');
+  makeEl('moduleapi-check-link');
+  makeEl('ai-provider-mode-badge');
+  makeEl('inp-ai-url');
+  makeEl('inp-ai-model');
+  makeEl('inp-ai-key');
+  makeEl('sel-gemini-tab-mode', { value: 'keep_open' });
+  makeEl('gemini-idle-minutes-row');
+  makeEl('ai-key-storage-badge');
+  makeEl('delete-ai-key-btn');
+
+  const sentMessages = [];
+  const sandbox = {
+    console,
+    document: { getElementById: (id) => elements[id] || null },
+    chrome: {
+      runtime: {
+        lastError: null,
+        sendMessage: (msg, cb) => {
+          sentMessages.push(msg);
+          if (cb) cb({ ok: true, hasKey: true, storedOnServer: true, mask: 'sk-...9876' });
+        }
+      }
+    }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'shared', 'config.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'shared', 'utils.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'bg', 'ai-providers.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'popup', 'ai-settings.js'), 'utf8'), sandbox);
+
+  const mod = sandbox.LQS_POPUP_AI_SETTINGS;
+  assert.ok(mod, 'LQS_POPUP_AI_SETTINGS must be exported');
+  assert.equal(mod.formatUsdShort(0), '$0.00');
+  assert.equal(mod.formatUsdShort(0.0042), '$0.0042');
+  assert.equal(mod.formatUsdShort(1.256), '$1.26');
+
+  mod.syncGeminiTabModeUi();
+  assert.equal(elements['gemini-idle-minutes-row'].hidden, true);
+
+  mod.syncAiProviderUi('moduleapi', { autoFillUrl: true, autoFillModel: true });
+  assert.equal(elements['ai-gemini-config-box'].hidden, true);
+  assert.equal(elements['ai-api-config-box'].hidden, false);
+  assert.equal(elements['moduleapi-check-link'].hidden, false);
+  assert.equal(elements['ai-base-url-field'].hidden, true);
+  assert.equal(elements['inp-ai-url'].value, 'https://api.moduleapi.pro/v1');
+  assert.equal(elements['ai-key-storage-badge'].className, 'lqs-key-status secure');
+  assert.equal(elements['delete-ai-key-btn'].hidden, false);
+  assert.ok(sentMessages.some((m) => m.type === 'LQS_GET_AI_KEY_STATUS' && m.aiProvider === 'moduleapi'));
 });
