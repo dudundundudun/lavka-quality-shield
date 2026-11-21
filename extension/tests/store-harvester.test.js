@@ -870,3 +870,78 @@ test('scanStoresInBackgroundTabs respects excludeStore, checks Lavka DB, and rej
   });
   assert.equal(cmpAfter.otherStores.some((o) => o.store === 'Пятёрочка'), false);
 });
+
+test('field recon regression: parses 5ka split-kopeck prices, Kuper spaced decimals, and web.kuper.ru /product/ PDP + aria-label cards', () => {
+  const h = loadHarvesterModule();
+
+  // 5ka.ru split-kopeck prices and "Старая цена ... Цена ..." ordering
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.extractPricePairFromText('4,77 Фарш говяжий Рестория 400г 400 г Цена 279 99 ₽'))),
+    { price: 280, oldPrice: null }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.extractPricePairFromText('-24% 4,73 Ананас спелый Цена за 1 кг Старая цена 349 99 ₽ Цена 264 99 ₽'))),
+    { price: 265, oldPrice: 350 }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.extractPricePairFromText('712 96 ₽'))),
+    { price: 713, oldPrice: null }
+  );
+
+  // web.kuper.ru spaced decimals and aria-label full price
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.extractPricePairFromText('144 ,00 ₽ Газированный напиток Добрый Cola без сахара 1,5 л'))),
+    { price: 144, oldPrice: null }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.extractPricePairFromText('199 ,99 ₽ 249 ,99 ₽'))),
+    { price: 200, oldPrice: 250 }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(h.extractPricePairFromText('Мука Makfa пшеничная 2 кг. Полная цена - 129.99 рублей'))),
+    { price: 130, oldPrice: null }
+  );
+
+  // web.kuper.ru /product/ PDP + breadcrumb retailer + recommendations aria-label card
+  const crumb = {
+    getAttribute: (a) => (a === 'href' ? '/5ka?sid=194031' : null),
+    textContent: 'Пятёрочка'
+  };
+  const h1 = { textContent: 'Сливочное масло несоленое Экомилк 82,5% БЗМЖ 180 г' };
+  const main = { innerText: 'Сливочное масло несоленое Экомилк 82,5% БЗМЖ 180 г 199 ,99 ₽ 249 ,99 ₽' };
+  const recLink = {
+    tagName: 'A',
+    getAttribute: (a) => {
+      if (a === 'href') return '/product/muka-makfa-pshenichnaya-2-kg-4d69609?sid=194031';
+      if (a === 'aria-label') return 'Мука Makfa пшеничная высший сорт 2 кг. Полная цена - 129.99 рублей';
+      return null;
+    },
+    textContent: '129 ,99 ₽',
+    closest: () => null,
+    querySelector: () => null
+  };
+  const kuperDoc = {
+    querySelector: (sel) => {
+      if (sel.includes('product_breadcrumb_link_0')) return crumb;
+      if (sel === 'h1') return h1;
+      if (sel === 'main') return main;
+      return null;
+    },
+    querySelectorAll: () => [recLink],
+    body: main
+  };
+  const kuperLoc = new URL('https://web.kuper.ru/product/slivochnoe-maslo-nesolenoe-ekomilk-82-5-bzmzh-180-g-94f842e?sid=194031');
+  const kuperOffers = h.parseKuperOffers(kuperDoc, kuperLoc);
+
+  assert.equal(kuperOffers.length, 2);
+  assert.equal(kuperOffers[0].store, 'Купер');
+  assert.equal(kuperOffers[0].sourceRetailer, 'Пятёрочка');
+  assert.equal(kuperOffers[0].price, 200);
+  assert.equal(kuperOffers[0].oldPrice, 250);
+  assert.match(kuperOffers[0].title, /Экомилк/i);
+
+  assert.equal(kuperOffers[1].store, 'Купер');
+  assert.equal(kuperOffers[1].sourceRetailer, 'Пятёрочка');
+  assert.equal(kuperOffers[1].price, 130);
+  assert.equal(kuperOffers[1].title, 'Мука Makfa пшеничная высший сорт 2 кг');
+});

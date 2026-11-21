@@ -173,6 +173,35 @@ class TestProductMatcher(unittest.TestCase):
         self.assertEqual(anomaly.mismatchReason, "price_anomaly")
         self.assertEqual(anomaly.warning, "проверьте сорт")
 
+    def test_field_recon_meat_flavors_and_unsalted_butter(self):
+        diff_meat = server.is_search_result_matching_product(
+            "Лапша быстрого приготовления Доширак Квисти со вкусом говядины 70 г",
+            "",
+            "Лапша Доширак Квисти со вкусом курицы 70г",
+            "70 г",
+        )
+        self.assertFalse(diff_meat.isSameProduct)
+        self.assertEqual(diff_meat.matchQuality, "mismatch")
+        self.assertTrue(str(diff_meat.mismatchReason).startswith("flavor_mismatch:"))
+
+        butter_exact = server.is_search_result_matching_product(
+            "Масло сливочное Экомилк 82,5% 180г",
+            "",
+            "Сливочное масло несоленое Экомилк 82,5% БЗМЖ 180 г",
+            "180 г",
+        )
+        self.assertTrue(butter_exact.isSameProduct)
+        self.assertEqual(butter_exact.matchQuality, "exact")
+
+        salted = server.is_search_result_matching_product(
+            "Масло сливочное соленое Экомилк 82,5% 180г",
+            "",
+            "Сливочное масло несоленое Экомилк 82,5% БЗМЖ 180 г",
+            "180 г",
+        )
+        self.assertFalse(salted.isSameProduct)
+        self.assertEqual(salted.matchQuality, "mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()

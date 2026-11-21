@@ -65,25 +65,30 @@
       id: 'kuper',
       store: 'Купер',
       hostPattern: /(^|\.)kuper\.ru$/i,
-      productPathPattern: /\/products\/[^/?#]+/i
+      productPathPattern: /\/products?\/[^/?#]+/i
     }
   ]);
 
   const STORE_ANCHOR_SELECTORS = Object.freeze({
     magnit: [
+      'section.product-details-offer',
+      '[class*="product-details-offer" i]',
       '[data-testid*="add-to-cart" i]',
       '[class*="product-buy" i]',
       '[class*="ProductBuy" i]',
+      'section.product-details-nutrition-facts',
       '[class*="product-card-price" i]',
       '[class*="product-price" i]',
       '[class*="ProductPrice" i]',
-      '[class*="product-details" i]'
+      'button[data-testid="VStepper-button"]'
     ],
     pyaterochka: [
       '[data-testid*="nutrition" i]',
       '[class*="nutrition" i]',
       '[class*="kbju" i]',
       '[class*="EnergyValue" i]',
+      'button[data-qa="product-detail-add-to-cart-button"]',
+      '[data-qa*="add-to-cart" i]',
       '[data-testid*="add-to-cart" i]',
       '[class*="product-price" i]',
       '[class*="ProductPrice" i]'
@@ -117,8 +122,11 @@
       '[class*="ProductPrice" i]'
     ],
     kuper: [
+      'button[data-qa="add_to_cart_button"]',
+      '[data-qa*="add_to_cart" i]',
       '[data-qa*="add-to-cart" i]',
       '[data-testid*="add-to-cart" i]',
+      'aside[class*="stickySidebar" i]',
       '[class*="ProductBuy" i]',
       '[class*="product-buy" i]',
       '[class*="ProductPrice" i]',
@@ -174,17 +182,31 @@
     if (root.LQS_STORE_HARVESTER && typeof root.LQS_STORE_HARVESTER.extractPricePairFromText === 'function') {
       return root.LQS_STORE_HARVESTER.extractPricePairFromText(text);
     }
-    const clean = normalizeSpace(text).replace(
-      /\d+(?:[.,]\d{1,2})?\s*(?:₽|руб\.?)\s*(?:\/\s*(?:кг|л|шт|100\s*г)|за\s*(?:кг|л|шт|100\s*г))/gi,
+    const normalized = normalizeSpace(text)
+      .replace(/(\d)\s+([.,]\d{1,2})\s*(?=(?:₽|рубл(?:ей|я|ь)|руб\.?))/gi, '$1$2 ')
+      .replace(/(^|[^\d.,])(\d{1,5}(?:\s\d{3})?)\s+(\d{2})\s*(?=(?:₽|рубл(?:ей|я|ь)|руб\.?))/gi, '$1$2.$3 ');
+    const clean = normalized.replace(
+      /\d+(?:[.,]\d{1,2})?\s*(?:₽|рубл(?:ей|я|ь)|руб\.?)\s*(?:\/\s*(?:кг|л|шт|100\s*г)|за\s*(?:кг|л|шт|100\s*г))/gi,
       ' '
     );
-    const matches = Array.from(clean.matchAll(/(\d{1,5}(?:\s?\d{3})?(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)/gi))
-      .map((m) => parseFloat(m[1].replace(/\s+/g, '').replace(',', '.')))
-      .filter((v) => Number.isFinite(v) && v >= 10 && v <= 25000);
-    if (matches.length === 0) return null;
-    const price = Math.round(matches[0]);
-    const oldPrice = matches.length > 1 && matches[1] > matches[0] && matches[1] <= matches[0] * 3.5
-      ? Math.round(matches[1])
+    const matchObjs = Array.from(clean.matchAll(/(\d{1,5}(?:\s?\d{3})?(?:[.,]\d{1,2})?)\s*(?:₽|рубл(?:ей|я|ь)|руб\.?)/gi))
+      .map((m) => ({
+        val: parseFloat(m[1].replace(/\s+/g, '').replace(',', '.')),
+        idx: m.index || 0
+      }))
+      .filter((o) => Number.isFinite(o.val) && o.val >= 10 && o.val <= 25000);
+    if (matchObjs.length === 0) return null;
+    const first = matchObjs[0].val;
+    const second = matchObjs.length > 1 ? matchObjs[1].val : null;
+    if (second !== null && first > second && first <= second * 3.5) {
+      const prefixBeforeFirst = clean.slice(Math.max(0, matchObjs[0].idx - 24), matchObjs[0].idx);
+      if (/(?:старая\s+цена|без\s+скидки|было)/i.test(prefixBeforeFirst)) {
+        return { price: Math.round(second), oldPrice: Math.round(first) };
+      }
+    }
+    const price = Math.round(first);
+    const oldPrice = second !== null && second > first && second <= first * 3.5
+      ? Math.round(second)
       : null;
     return { price, oldPrice };
   }
@@ -285,7 +307,8 @@
   function extractProteinFromStoreDoc(doc) {
     const mainScope = (doc && typeof doc.querySelector === 'function' ? doc.querySelector('main') : null) || doc?.body;
     const text = normalizeSpace((mainScope?.innerText || mainScope?.textContent || '').slice(0, 6000));
-    const m = text.match(/белк[иа]\s*[:\-–—]?\s*(\d+(?:[.,]\d+)?)\s*г(?![а-яёa-z])/i);
+    const m = text.match(/белк[иа]\s*[:\-–—]?\s*(\d+(?:[.,]\d+)?)\s*(?:г(?![а-яёa-z])|(?=\s|$|[,;|]))/i)
+      || text.match(/(?:^|[^\d.,])(\d+(?:[.,]\d+)?)\s*г\s+белк[иа](?![а-яёa-z])/i);
     if (!m) return null;
     const val = parseFloat(m[1].replace(',', '.'));
     return Number.isFinite(val) && val >= 0 && val <= 100 ? val : null;
@@ -296,7 +319,8 @@
     const ld = readJsonLdProduct(doc);
     const h1 = typeof doc.querySelector === 'function' ? doc.querySelector('h1') : null;
     const titleFromH1 = normalizeSpace(h1?.textContent || '');
-    const titleFromDoc = normalizeSpace(String(doc.title || '').split(/[—|–]/)[0] || '');
+    const rawDocTitle = normalizeSpace(String(doc.title || '').split(/[—|–]/)[0] || '');
+    const titleFromDoc = /^доставка\s+продуктов\s+на\s+дом/i.test(rawDocTitle) ? '' : rawDocTitle;
     const title = (titleFromH1.length >= 3 ? titleFromH1 : '') || (ld?.title || '') || titleFromDoc;
 
     if (!title || title.length < 3) return null;
@@ -390,7 +414,7 @@
     // 1. Для Пятёрочки приоритет — секция «Пищевая ценность на 100 г» (перед «Описанием»)
     if (storeId === 'pyaterochka' && typeof doc.querySelectorAll === 'function') {
       const headings = doc.querySelectorAll('h2, h3, h4, section, div');
-      const limit = Math.min(headings.length, 250);
+      const limit = Math.min(headings.length, 800);
       for (let i = 0; i < limit; i++) {
         const node = headings[i];
         const txt = normalizeSpace(node?.textContent || '');

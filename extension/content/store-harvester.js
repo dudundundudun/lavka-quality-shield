@@ -67,27 +67,50 @@
 
   function extractPricePairFromText(text) {
     const clean = normalizeSpace(text);
+    // Normalize Kuper ("144 ,00 ₽") and 5ka ("279 99 ₽") split-kopeck formats before matching
+    const normalized = clean
+      .replace(/(\d)\s+([.,]\d{1,2})\s*(?=(?:₽|рубл(?:ей|я|ь)|руб\.?))/gi, '$1$2 ')
+      .replace(/(^|[^\d.,])(\d{1,5}(?:\s\d{3})?)\s+(\d{2})\s*(?=(?:₽|рубл(?:ей|я|ь)|руб\.?))/gi, '$1$2.$3 ');
     // Avoid matching unit prices like "478 ₽/кг" or "120 ₽ за кг" when extracting main shelf price
-    const withoutUnit = clean.replace(/\d+(?:[.,]\d{1,2})?\s*(?:₽|руб\.?)\s*(?:\/\s*(?:кг|л|шт|100\s*г)|за\s*(?:кг|л|шт|100\s*г))/gi, ' ');
-    const matches = Array.from(withoutUnit.matchAll(/(\d{1,5}(?:\s?\d{3})?(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)/gi))
-      .map((m) => parseFloat(m[1].replace(/\s+/g, '').replace(',', '.')))
-      .filter((v) => Number.isFinite(v) && v >= 10 && v <= 25000);
+    const withoutUnit = normalized.replace(/\d+(?:[.,]\d{1,2})?\s*(?:₽|рубл(?:ей|я|ь)|руб\.?)\s*(?:\/\s*(?:кг|л|шт|100\s*г)|за\s*(?:кг|л|шт|100\s*г))/gi, ' ');
+    const matchObjs = Array.from(withoutUnit.matchAll(/(\d{1,5}(?:\s?\d{3})?(?:[.,]\d{1,2})?)\s*(?:₽|рубл(?:ей|я|ь)|руб\.?)/gi))
+      .map((m) => ({
+        val: parseFloat(m[1].replace(/\s+/g, '').replace(',', '.')),
+        idx: m.index || 0
+      }))
+      .filter((o) => Number.isFinite(o.val) && o.val >= 10 && o.val <= 25000);
 
-    if (matches.length === 0) return null;
-    const price = Math.round(matches[0]);
-    const oldPrice = matches.length > 1 && matches[1] > matches[0] && matches[1] <= matches[0] * 3.5
-      ? Math.round(matches[1])
+    if (matchObjs.length === 0) return null;
+    let first = matchObjs[0].val;
+    let second = matchObjs.length > 1 ? matchObjs[1].val : null;
+
+    // On 5ka.ru, "Старая цена 349 99 ₽" often precedes "Цена 264 99 ₽"
+    if (second !== null && first > second && first <= second * 3.5) {
+      const prefixBeforeFirst = withoutUnit.slice(Math.max(0, matchObjs[0].idx - 24), matchObjs[0].idx);
+      if (/(?:старая\s+цена|без\s+скидки|было)/i.test(prefixBeforeFirst)) {
+        return { price: Math.round(second), oldPrice: Math.round(first) };
+      }
+    }
+
+    const price = Math.round(first);
+    const oldPrice = second !== null && second > first && second <= first * 3.5
+      ? Math.round(second)
       : null;
     return { price, oldPrice };
   }
 
   function cleanCardTitle(rawTitle, fallbackText) {
     let t = normalizeSpace(rawTitle);
+    const stripNoise = (str) => normalizeSpace(str)
+      .replace(/\s*(?:Цена\s+за\s+\d+\s*(?:кг|л|шт|г)|Старая\s+цена|Полная\s+цена|Цена\s+\d).*$/i, '')
+      .replace(/\d+(?:\s+\d{2}|[.,]\d{1,2})?\s*(?:₽|рубл(?:ей|я|ь)|руб\.?).*$/i, '')
+      .replace(/^(?:(?:В корзину|Купить|Скидка|Акция|Хит|Новинка|Нет оценок|Финальная цена|Только у нас|\+\d+%\s+с\s+Магнит\s+Пэй|\-\d+%|\d[.,]\d{1,2})\s*)+/gi, '')
+      .replace(/[.\s\-–—]+$/, '')
+      .trim();
+
+    t = stripNoise(t);
     if (!t || t.length < 3) {
-      t = normalizeSpace(fallbackText)
-        .replace(/\d+(?:[.,]\d{1,2})?\s*(?:₽|руб\.?).*$/i, '')
-        .replace(/^(?:В корзину|Купить|Скидка|Акция|Хит|Новинка|\-\d+%)\s*/gi, '')
-        .trim();
+      t = stripNoise(fallbackText);
     }
     if (t.length > 140) t = t.slice(0, 140).trim();
     return t;
@@ -230,49 +253,85 @@
     const offers = [];
     const seen = new Set();
 
-    // Kuper multisearch groups products by retailer sections, or renders product cards with retailer links
+    // Detect page-level retailer from Kuper breadcrumb (e.g. a[data-qa="product_breadcrumb_link_0"] -> "Пятёрочка")
+    const crumbEl = typeof doc.querySelector === 'function'
+      ? doc.querySelector('a[data-qa="product_breadcrumb_link_0"]')
+      : null;
+    const pageRetailerContext = crumbEl
+      ? `${crumbEl.getAttribute?.('href') || ''} ${crumbEl.textContent || ''}`
+      : '';
+    const pageDetectedRetailer = detectKuperRetailer(winLoc.href || '', `${pageRetailerContext} ${winLoc.pathname || ''}`);
+    const pageSourceRetailer = pageDetectedRetailer && pageDetectedRetailer !== 'Купер' ? pageDetectedRetailer : null;
+
+    // 1. Always harvest the currently open Kuper product page (/product/... or /products/...) first
+    if (/\/products?\//i.test(winLoc.pathname || '')) {
+      const h1 = typeof doc.querySelector === 'function' ? doc.querySelector('h1') : null;
+      const pageTitle = h1 ? normalizeSpace(h1.textContent || '') : '';
+      const mainScope = (typeof doc.querySelector === 'function' ? doc.querySelector('main') : null) || doc.body;
+      const mainText = String(mainScope?.innerText || mainScope?.textContent || '').slice(0, 2200);
+      const pr = extractPricePairFromText(mainText);
+      if (pageTitle && pageTitle.length >= 4 && pr) {
+        const dedupKey = `Купер|${pageSourceRetailer || ''}|${pageTitle.toLowerCase()}|${pr.price}`;
+        seen.add(dedupKey);
+        offers.push({
+          store: 'Купер',
+          sourceRetailer: pageSourceRetailer,
+          goodId: null,
+          title: pageTitle,
+          amount: extractWeightFromText(pageTitle) || extractWeightFromText(mainText.slice(0, 600)),
+          price: pr.price,
+          oldPrice: pr.oldPrice,
+          url: winLoc.href
+        });
+      }
+    }
+
+    // 2. Kuper multisearch & recommendations cards (both /products/ and web.kuper.ru /product/)
     const cardNodes = doc.querySelectorAll(
-      '[data-qa*="product"], [class*="ProductCard"], [class*="product-card"], article, a[href*="/products/"]'
+      '[data-qa*="product"], [data-qa*="recommendations_product_card"], [data-qa*="products_grid_item"], [class*="ProductCard"], [class*="product-card"], article, a[href*="/products/"], a[href*="/product/"]'
     );
 
     cardNodes.forEach((node) => {
       const card = node.tagName === 'A'
-        ? (node.closest('article, [data-qa*="product"], [class*="ProductCard"], [class*="product-card"], li') || node.parentElement || node)
+        ? (node.closest?.('article, [data-qa*="product"], [class*="ProductCard"], [class*="product-card"], li') || node.parentElement || node)
         : node;
       const linkEl = node.tagName === 'A'
         ? node
-        : card.querySelector('a[href*="/products/"], a[href*="/product/"], a[href]');
+        : card.querySelector?.('a[href*="/products/"], a[href*="/product/"], a[href]');
       if (!linkEl) return;
 
       const href = linkEl.getAttribute('href') || '';
-      if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+      if (!href || href.startsWith('#') || href.startsWith('javascript:') || href.includes('/product/legal-info')) return;
       let fullUrl;
       try {
         fullUrl = new URL(href, winLoc.origin).href;
-      } catch {
+      } catch (err) {
+        void err;
         return;
       }
 
-      const rawText = normalizeSpace(card.innerText || card.textContent || '');
+      const ariaLabel = normalizeSpace(linkEl.getAttribute?.('aria-label') || card.getAttribute?.('aria-label') || '');
+      const cardText = normalizeSpace(card.innerText || card.textContent || '');
+      const rawText = cardText.length >= 6 && cardText.length <= 600 ? cardText : ariaLabel;
       if (!rawText || rawText.length < 6 || rawText.length > 600) return;
 
-      const pr = extractPricePairFromText(rawText);
+      const pr = extractPricePairFromText(rawText) || (ariaLabel ? extractPricePairFromText(ariaLabel) : null);
       if (!pr) return;
 
       // Kuper is always stored as an independent store ('Купер') because Kuper can add markups;
       // original retailer inside Kuper is preserved in sourceRetailer for tooltip only.
-      const section = card.closest('section, [data-qa*="retailer"], [class*="Retailer"], [class*="StoreGroup"], [class*="SearchGroup"]');
+      const section = card.closest?.('section, [data-qa*="retailer"], [class*="Retailer"], [class*="StoreGroup"], [class*="SearchGroup"]');
       const sectionHeader = section
-        ? normalizeSpace((section.querySelector('h1, h2, h3, [class*="Title"], [class*="Retailer"], img[alt]')?.textContent ||
-            section.querySelector('img[alt]')?.getAttribute('alt') || ''))
+        ? normalizeSpace((section.querySelector?.('h1, h2, h3, [class*="Title"], [class*="Retailer"], img[alt]')?.textContent ||
+            section.querySelector?.('img[alt]')?.getAttribute?.('alt') || ''))
         : '';
-      const detectedRetailer = detectKuperRetailer(fullUrl, `${sectionHeader} ${winLoc.pathname}`);
-      const sourceRetailer = detectedRetailer && detectedRetailer !== 'Купер' ? detectedRetailer : null;
+      const detectedRetailer = detectKuperRetailer(fullUrl, `${sectionHeader} ${pageRetailerContext} ${winLoc.pathname || ''}`);
+      const sourceRetailer = detectedRetailer && detectedRetailer !== 'Купер' ? detectedRetailer : pageSourceRetailer;
 
-      const titleEl = card.querySelector('[data-qa*="title"], [class*="Title"], [class*="Name"], h3, h4, img[alt]');
+      const titleEl = card.querySelector?.('[data-qa*="title"], [class*="Title"], [class*="Name"], h3, h4, img[alt]');
       const rawTitle = titleEl
         ? (titleEl.tagName === 'IMG' ? titleEl.getAttribute('alt') : titleEl.textContent)
-        : (linkEl.getAttribute('title') || linkEl.textContent || '');
+        : (ariaLabel || linkEl.getAttribute?.('title') || linkEl.textContent || '');
       const title = cleanCardTitle(rawTitle, rawText);
       if (!title || title.length < 4) return;
 

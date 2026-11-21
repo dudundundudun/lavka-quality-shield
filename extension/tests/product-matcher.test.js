@@ -148,3 +148,46 @@ test('decodeHtmlEntities strips tags and decodes common HTML entities', () => {
   );
   assert.equal(matcher.decodeHtmlEntities(null), '');
 });
+
+test('field recon regression: separates chicken vs beef flavors and matches unsalted butter across stores', () => {
+  // Doshirak chicken vs beef must be mismatch, not exact
+  const diffMeat = matcher.isSearchResultMatchingProduct(
+    'Лапша быстрого приготовления Доширак Квисти со вкусом говядины 70 г',
+    '',
+    'Лапша Доширак Квисти со вкусом курицы 70г',
+    '70 г'
+  );
+  assert.equal(diffMeat.isSameProduct, false);
+  assert.equal(diffMeat.matchQuality, 'mismatch');
+  assert.match(String(diffMeat.mismatchReason), /^flavor_mismatch:/);
+
+  // Same chicken flavor with different wording -> exact
+  const sameChicken = matcher.isSearchResultMatchingProduct(
+    'Лапша быстрого приготовления Доширак Квисти с курицей 70 г',
+    '',
+    'Лапша Доширак Квисти со вкусом курицы 70г',
+    '70 г'
+  );
+  assert.equal(sameChicken.isSameProduct, true);
+  assert.equal(sameChicken.matchQuality, 'exact');
+
+  // Unsalted butter on Kuper vs default butter on 5ka/Lavka -> exact
+  const butterExact = matcher.isSearchResultMatchingProduct(
+    'Масло сливочное Экомилк 82,5% 180г',
+    '',
+    'Сливочное масло несоленое Экомилк 82,5% БЗМЖ 180 г',
+    '180 г'
+  );
+  assert.equal(butterExact.isSameProduct, true);
+  assert.equal(butterExact.matchQuality, 'exact');
+
+  // Salted butter vs unsalted butter -> still mismatch via 'солен'
+  const saltedButter = matcher.isSearchResultMatchingProduct(
+    'Масло сливочное соленое Экомилк 82,5% 180г',
+    '',
+    'Сливочное масло несоленое Экомилк 82,5% БЗМЖ 180 г',
+    '180 г'
+  );
+  assert.equal(saltedButter.isSameProduct, false);
+  assert.equal(saltedButter.matchQuality, 'mismatch');
+});

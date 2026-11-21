@@ -548,3 +548,56 @@ test('Step 5: renders exact & similar offers, handles reject X, live radar with 
   aiBtn.click();
   assert.ok(sentMessages.some((m) => m.type === 'LQS_ANALYZE_PRODUCT'), 'Clicking AI button must send LQS_ANALYZE_PRODUCT');
 });
+
+test('field recon regression: detects web.kuper.ru /product/, mounts on real store anchors, and parses reversed/unitless protein', () => {
+  const sandbox = loadAssistantStack();
+  const ui = sandbox.LQS_STORE_ASSISTANT_UI;
+
+  // 1. web.kuper.ru /product/ URL detection
+  const kuperDetected = ui.detectAssistantStorePage(
+    new URL('https://web.kuper.ru/product/slivochnoe-maslo-nesolenoe-ekomilk-82-5-bzmzh-180-g-94f842e?sid=194031')
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(kuperDetected)), { id: 'kuper', store: 'Купер' });
+
+  // 2. Real store anchors: Magnit offer section, 5ka data-qa button, Kuper data-qa underscore button
+  const parent = createFakeElement('DIV', '');
+  const magOffer = createFakeElement('SECTION', '24,99 ₽');
+  parent.appendChild(magOffer);
+  const magDoc = createFakeDocument({ h1Text: 'Лапша Доширак 70г', mainText: 'Лапша Доширак 70г 24,99 ₽' });
+  magDoc.querySelector = (sel) => (sel === 'section.product-details-offer' ? magOffer : null);
+  const magAnchor = ui.findInlineMountAnchor(magDoc, 'magnit');
+  assert.equal(magAnchor.mode, 'inline');
+  assert.equal(magAnchor.strategy, 'section.product-details-offer');
+
+  const pyatBtn = createFakeElement('BUTTON', 'В корзину');
+  parent.appendChild(pyatBtn);
+  const pyatDoc = createFakeDocument({ h1Text: 'Фарш 400г', mainText: 'Фарш 400г 279 99 ₽' });
+  pyatDoc.querySelectorAll = () => [];
+  pyatDoc.querySelector = (sel) => (sel === 'button[data-qa="product-detail-add-to-cart-button"]' ? pyatBtn : null);
+  const pyatAnchor = ui.findInlineMountAnchor(pyatDoc, 'pyaterochka');
+  assert.equal(pyatAnchor.mode, 'inline');
+  assert.equal(pyatAnchor.strategy, 'button[data-qa="product-detail-add-to-cart-button"]');
+
+  const kuperBtn = createFakeElement('BUTTON', 'В корзину');
+  parent.appendChild(kuperBtn);
+  const kuperDoc = createFakeDocument({ h1Text: 'Масло 180г', mainText: 'Масло 180г 199 ,99 ₽' });
+  kuperDoc.querySelector = (sel) => (sel === 'button[data-qa="add_to_cart_button"]' ? kuperBtn : null);
+  const kuperAnchor = ui.findInlineMountAnchor(kuperDoc, 'kuper');
+  assert.equal(kuperAnchor.mode, 'inline');
+  assert.equal(kuperAnchor.strategy, 'button[data-qa="add_to_cart_button"]');
+
+  // 3. Reversed and unitless protein formats from 5ka/Magnit
+  assert.equal(ui.extractProteinFromStoreDoc(createFakeDocument({ mainText: 'Пищевая ценность: 12.0 г белки, 18 г жиры' })), 12);
+  assert.equal(ui.extractProteinFromStoreDoc(createFakeDocument({ mainText: 'КБЖУ на 100 г: Белки 8 Жиры 16' })), 8);
+
+  // 4. Generic storefront doc.title is not mistaken for a product title when h1 is absent
+  const emptySpaDoc = createFakeDocument({
+    title: 'Доставка продуктов на дом, еды из ресторанов - заказать в Купере',
+    h1Text: '',
+    mainText: '199 ,99 ₽'
+  });
+  assert.equal(
+    ui.extractStoreProductFromDoc(emptySpaDoc, new URL('https://web.kuper.ru/product/test?sid=1'), { id: 'kuper', store: 'Купер' }),
+    null
+  );
+});
