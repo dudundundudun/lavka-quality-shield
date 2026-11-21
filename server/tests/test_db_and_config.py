@@ -49,6 +49,13 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
             "idx_price_summary_updated_at",
             "idx_price_watchlist_updated",
             "idx_product_store_links_slug",
+            "idx_ext_offers_store_norm",
+            "idx_ext_offers_norm_title",
+            "idx_ext_offers_url",
+            "idx_ext_offers_updated_at",
+            "idx_ext_price_history_key_day",
+            "idx_ext_price_history_url",
+            "idx_rejected_matches_source",
         }
         with server.get_db_connection() as conn:
             existing = {

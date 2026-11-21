@@ -1,19 +1,28 @@
 /**
  * Lavka Quality Shield — Universal Store Product Assistant UI (content/store-assistant-ui.js)
- * Compact Shadow DOM helper card on product pages of:
- *   - Магнит (magnit.ru/product/...)
- *   - Пятёрочка (5ka.ru/...)
- *   - Перекрёсток (perekrestok.ru/cat/.../p/...)
+ * Full-featured Shadow DOM product panel mounted inline inside product cards (with Floating Fallback) on:
+ *   - Магнит (magnit.ru)
+ *   - Пятёрочка (5ka.ru)
+ *   - Перекрёсток / Впрок (perekrestok.ru, vprok.ru)
+ *   - ВкусВилл (vkusvill.ru)
+ *   - Ашан (auchan.ru)
+ *   - Лента (lenta.com)
+ *   - Купер (kuper.ru)
  *
- * Reuses LQS_PRICE_PARSER (₽/кг, ₽/л, ₽/шт, ₽/100г белка),
- * LQS_INGREDIENTS_GUARD ("Светофор состава"), and local price database comparison
- * (Яндекс Лавка + другие сети) without interfering with passive store harvesting.
+ * Features:
+ *   - Unit prices (₽/кг, ₽/л, ₽/шт, ₽/100г белка) & expandable "Светофор состава"
+ *   - Exact vs Similar price comparisons with "✕ Не тот товар" (LQS_REJECT_COMPETITOR_MATCH)
+ *   - Live multi-store radar button ("🔍 Проверить в других магазинах" via LQS_SCAN_STORES_LIVE + excludeStore)
+ *   - AI verdict & source links (LQS_GET_CACHED_AI_VERDICT / LQS_ANALYZE_PRODUCT)
+ *   - Price history chart (LQS_GET_PRICE_HISTORY + LQS_PRICE_CHART) & Watchlist (LQS_TOGGLE_WATCHLIST)
+ *   - Personal 5-star rating, ban button, and short note saved in lqs_reviews_v1
  */
 (function (root) {
   'use strict';
 
   const HOST_ID = 'lqs-store-assistant-host';
   const COLLAPSE_STORAGE_KEY = 'lqs_store_assistant_collapsed';
+  const REVIEWS_STORAGE_KEY = (root.LQS_CONFIG && root.LQS_CONFIG.STORAGE_KEYS && root.LQS_CONFIG.STORAGE_KEYS.REVIEWS) || 'lqs_reviews_v1';
 
   const ASSISTANT_STORES = Object.freeze([
     {
@@ -31,10 +40,91 @@
     {
       id: 'perekrestok',
       store: 'Перекрёсток',
-      hostPattern: /(^|\.)perekrestok\.ru$/i,
-      productPathPattern: /\/cat\/[^?#]*\/p\/[^/?#]+/i
+      hostPattern: /(^|\.)(perekrestok\.ru|vprok\.ru)$/i,
+      productPathPattern: /\/cat\/[^?#]*\/p\/[^/?#]+|\/product\/[^/?#]+/i
+    },
+    {
+      id: 'vkusvill',
+      store: 'ВкусВилл',
+      hostPattern: /(^|\.)vkusvill\.ru$/i,
+      productPathPattern: /\/goods\/[^/?#]+/i
+    },
+    {
+      id: 'auchan',
+      store: 'Ашан',
+      hostPattern: /(^|\.)auchan\.ru$/i,
+      productPathPattern: /\/product\/[^/?#]+/i
+    },
+    {
+      id: 'lenta',
+      store: 'Лента',
+      hostPattern: /(^|\.)lenta\.com$/i,
+      productPathPattern: /\/product\/[^/?#]+/i
+    },
+    {
+      id: 'kuper',
+      store: 'Купер',
+      hostPattern: /(^|\.)kuper\.ru$/i,
+      productPathPattern: /\/products\/[^/?#]+/i
     }
   ]);
+
+  const STORE_ANCHOR_SELECTORS = Object.freeze({
+    magnit: [
+      '[data-testid*="add-to-cart" i]',
+      '[class*="product-buy" i]',
+      '[class*="ProductBuy" i]',
+      '[class*="product-card-price" i]',
+      '[class*="product-price" i]',
+      '[class*="ProductPrice" i]',
+      '[class*="product-details" i]'
+    ],
+    pyaterochka: [
+      '[data-testid*="nutrition" i]',
+      '[class*="nutrition" i]',
+      '[class*="kbju" i]',
+      '[class*="EnergyValue" i]',
+      '[data-testid*="add-to-cart" i]',
+      '[class*="product-price" i]',
+      '[class*="ProductPrice" i]'
+    ],
+    perekrestok: [
+      '[data-testid*="add-to-cart" i]',
+      '[class*="product-buy" i]',
+      '[class*="ProductBuy" i]',
+      '[class*="product-price" i]',
+      '[class*="ProductPrice" i]'
+    ],
+    vkusvill: [
+      '[class*="Product__buy" i]',
+      '[class*="ProductCard__buy" i]',
+      '[class*="Product__price" i]',
+      '[data-testid*="add-to-cart" i]',
+      '[class*="product-price" i]'
+    ],
+    auchan: [
+      '[data-testid*="add-to-cart" i]',
+      '[class*="product-buy" i]',
+      '[class*="ProductBuy" i]',
+      '[class*="product-price" i]',
+      '[class*="ProductPrice" i]'
+    ],
+    lenta: [
+      '[data-testid*="add-to-cart" i]',
+      '[class*="sku-price" i]',
+      '[class*="product-buy" i]',
+      '[class*="product-price" i]',
+      '[class*="ProductPrice" i]'
+    ],
+    kuper: [
+      '[data-qa*="add-to-cart" i]',
+      '[data-testid*="add-to-cart" i]',
+      '[class*="ProductBuy" i]',
+      '[class*="product-buy" i]',
+      '[class*="ProductPrice" i]',
+      '[class*="product-price" i]'
+    ]
+  });
 
   function normalizeSpace(text) {
     return String(text || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -64,6 +154,20 @@
       }
     }
     return null;
+  }
+
+  function buildStoreProductKey(product, lavkaSlug = '') {
+    if (lavkaSlug && String(lavkaSlug).trim()) {
+      return String(lavkaSlug).trim().toLowerCase();
+    }
+    const rawTitle = normalizeSpace(product?.title || '')
+      .toLowerCase()
+      .replace(/ё/g, 'е')
+      .replace(/[^a-zа-я0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80);
+    const storeId = String(product?.storeId || product?.store || 'ext').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    return `ext_${storeId}_${rawTitle || 'item'}`;
   }
 
   function extractPriceFallback(text) {
@@ -108,8 +212,12 @@
           if (!t.includes('product')) continue;
           const offer = Array.isArray(node.offers) ? node.offers[0] : node.offers;
           const priceNum = Number(offer?.price || offer?.lowPrice || 0);
+          const brandName = typeof node.brand === 'string'
+            ? normalizeSpace(node.brand)
+            : normalizeSpace(node.brand?.name || '');
           return {
             title: normalizeSpace(node.name || ''),
+            brand: brandName,
             price: Number.isFinite(priceNum) && priceNum >= 10 && priceNum <= 25000 ? Math.round(priceNum) : null,
             description: normalizeSpace(node.description || '')
           };
@@ -124,7 +232,6 @@
   function extractIngredientsFromStoreDoc(doc) {
     if (!doc) return '';
 
-    // 1. Dedicated semantic containers / attributes
     if (typeof doc.querySelectorAll === 'function') {
       const selectors = [
         '[data-testid*="composition" i]',
@@ -146,7 +253,6 @@
         }
       }
 
-      // 2. Definition lists / heading + sibling value ("Состав" -> next sibling)
       const labelNodes = doc.querySelectorAll('h2, h3, h4, dt, th, span, div, p');
       const maxScan = Math.min(labelNodes.length, 300);
       for (let i = 0; i < maxScan; i++) {
@@ -163,7 +269,6 @@
       }
     }
 
-    // 3. Fallback regex on main/body text
     const mainScope = (typeof doc.querySelector === 'function' ? doc.querySelector('main') : null) || doc.body;
     const rawBody = String(mainScope?.innerText || mainScope?.textContent || '');
     const m = rawBody.match(/(?:^|\n|\s)Состав\s*[:\-–—]?\s*\n?\s*([^\n]{10,1200})/i);
@@ -196,7 +301,6 @@
 
     if (!title || title.length < 3) return null;
 
-    // Extract price: targeted price nodes -> JSON-LD -> main text
     let pricePair = null;
     if (typeof doc.querySelectorAll === 'function') {
       const priceSelectors = [
@@ -251,6 +355,14 @@
       if (weightSpec) amount = weightSpec[1].trim();
     }
 
+    let brand = ld?.brand || '';
+    if (!brand && typeof doc.querySelector === 'function') {
+      const brandNode = doc.querySelector('[itemprop="brand"], [data-testid*="brand" i]');
+      if (brandNode) {
+        brand = normalizeSpace(brandNode.getAttribute?.('content') || brandNode.textContent || '');
+      }
+    }
+
     const ingredients = extractIngredientsFromStoreDoc(doc);
     const proteinPer100g = extractProteinFromStoreDoc(doc);
 
@@ -258,6 +370,7 @@
       storeId: storeInfo.id,
       store: storeInfo.store,
       title,
+      brand,
       amount,
       price: pricePair.price,
       oldPrice: pricePair.oldPrice || null,
@@ -265,6 +378,55 @@
       proteinPer100g,
       url: String(winLoc.href || '')
     };
+  }
+
+  /**
+   * Ищет оптимальный якорь внутри карточки товара для встроенного рендера (Inline Mount).
+   * Если якорь не найден (или у него нет parentElement) — возвращает null (включается Floating Fallback).
+   */
+  function findInlineMountAnchor(doc, storeId) {
+    if (!doc) return null;
+
+    // 1. Для Пятёрочки приоритет — секция «Пищевая ценность на 100 г» (перед «Описанием»)
+    if (storeId === 'pyaterochka' && typeof doc.querySelectorAll === 'function') {
+      const headings = doc.querySelectorAll('h2, h3, h4, section, div');
+      const limit = Math.min(headings.length, 250);
+      for (let i = 0; i < limit; i++) {
+        const node = headings[i];
+        const txt = normalizeSpace(node?.textContent || '');
+        if (txt.length >= 12 && txt.length <= 260 && /пищевая\s+ценность/i.test(txt)) {
+          const target = (typeof node.closest === 'function' ? node.closest('section, article, div[class]') : null) || node;
+          if (target && target.parentElement && target.parentElement !== doc.documentElement) {
+            return { element: target, position: 'after', mode: 'inline', strategy: 'pyaterochka_nutrition' };
+          }
+        }
+      }
+    }
+
+    // 2. Магазин-специфичные селекторы (блок цены / кнопки «В корзину» / КБЖУ)
+    const selectors = STORE_ANCHOR_SELECTORS[storeId] || STORE_ANCHOR_SELECTORS.perekrestok;
+    if (typeof doc.querySelector === 'function') {
+      for (const sel of selectors) {
+        let el = null;
+        try {
+          el = doc.querySelector(sel);
+        } catch (err) {
+          void err;
+          el = null;
+        }
+        if (el && el.parentElement && el.parentElement !== doc.documentElement) {
+          return { element: el, position: 'after', mode: 'inline', strategy: sel };
+        }
+      }
+
+      // 3. Универсальный резервный якорь карточки — заголовок <h1>
+      const h1 = doc.querySelector('h1');
+      if (h1 && h1.parentElement && h1.parentElement !== doc.documentElement) {
+        return { element: h1, position: 'after', mode: 'inline', strategy: 'h1' };
+      }
+    }
+
+    return null;
   }
 
   function buildStoreAssistantModel(product, comparisonData = null) {
@@ -297,7 +459,8 @@
       : { level: 'none', emoji: '⚪', badgeText: '', summary: 'Состав на карточке не указан', redFlags: [], yellowFlags: [], allFlags: [] };
 
     const lavkaMatch = comparisonData && comparisonData.lavka ? comparisonData.lavka : null;
-    const otherStores = Array.isArray(comparisonData?.otherStores) ? comparisonData.otherStores.slice(0, 3) : [];
+    const otherStores = Array.isArray(comparisonData?.otherStores) ? comparisonData.otherStores.slice(0, 6) : [];
+    const rawSimilar = Array.isArray(comparisonData?.similarStores) ? comparisonData.similarStores.slice(0, 4) : [];
 
     const allCompared = [];
     if (lavkaMatch && lavkaMatch.price > 0) {
@@ -305,6 +468,8 @@
         store: 'Яндекс Лавка',
         price: Math.round(lavkaMatch.price),
         url: safeUrl(lavkaMatch.url),
+        title: lavkaMatch.title || product.title,
+        slug: lavkaMatch.slug || '',
         titleHint: lavkaMatch.minPrice && lavkaMatch.minPrice < lavkaMatch.price
           ? `Мин. цена в Лавке: ${Math.round(lavkaMatch.minPrice)} ₽`
           : 'Цена из локальной базы Яндекс Лавки'
@@ -319,13 +484,32 @@
         store: o.store,
         price: Math.round(o.price),
         url: safeUrl(o.url),
+        title: o.title || '',
         titleHint: hint
       });
     }
     allCompared.sort((a, b) => a.price - b.price);
 
+    const similarOffers = [];
+    for (const s of rawSimilar) {
+      if (!s || !s.store || !s.price) continue;
+      const hintParts = [];
+      if (s.title) hintParts.push(s.title);
+      if (s.warning) hintParts.push(s.warning);
+      similarOffers.push({
+        store: s.store,
+        price: Math.round(s.price),
+        pricePerKgOrL: s.pricePerKgOrL ? Math.round(s.pricePerKgOrL) : null,
+        url: safeUrl(s.url),
+        title: s.title || '',
+        warning: s.warning || null,
+        mismatchReason: s.mismatchReason || 'similar',
+        titleHint: hintParts.join(' · ') || 'Похожий вариант (другой сорт/фасовка)'
+      });
+    }
+
     let comparisonStatus = 'empty';
-    let comparisonHeadline = 'Пока нет в локальной базе — откройте товар в Лавке для сравнения';
+    let comparisonHeadline = 'Пока нет в базе — нажмите «Проверить в других магазинах»';
 
     if (allCompared.length > 0) {
       const best = allCompared[0];
@@ -342,16 +526,25 @@
       }
     }
 
+    const reviewKey = buildStoreProductKey(product, lavkaMatch?.slug || '');
+
     return {
+      storeId: product.storeId || '',
       store: product.store,
       title: product.title,
+      brand: product.brand || '',
       price: product.price,
       oldPrice: product.oldPrice,
       amount: product.amount || '',
+      ingredients: product.ingredients || '',
+      url: product.url || '',
+      slug: lavkaMatch?.slug || reviewKey,
+      reviewKey,
       unitInfo,
       unitBadges,
       trafficLight,
       comparedOffers: allCompared,
+      similarOffers,
       comparisonStatus,
       comparisonHeadline
     };
@@ -375,23 +568,37 @@
       --lqs-radius: 14px;
       --lqs-shadow: 0 10px 28px rgba(33, 32, 31, 0.16);
       all: initial;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--lqs-text);
+    }
+    :host([data-lqs-mount-mode="floating"]) {
       position: fixed;
       left: 16px;
       bottom: 16px;
       z-index: 2147483000;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: var(--lqs-text);
+      width: 344px;
+      max-width: calc(100vw - 32px);
+    }
+    :host([data-lqs-mount-mode="inline"]) {
+      display: block;
+      position: static;
+      width: 100%;
+      max-width: 540px;
+      margin: 12px 0;
     }
     .card {
-      width: 316px;
-      max-width: calc(100vw - 32px);
+      width: 100%;
       background: var(--lqs-bg);
       border: 1px solid var(--lqs-border);
       border-radius: var(--lqs-radius);
       box-shadow: var(--lqs-shadow);
       overflow: hidden;
       font-size: 12.5px;
-      line-height: 1.4;
+      line-height: 1.42;
+      box-sizing: border-box;
+    }
+    :host([data-lqs-mount-mode="inline"]) .card {
+      box-shadow: 0 4px 16px rgba(33, 32, 31, 0.08);
     }
     .header {
       display: flex;
@@ -424,22 +631,14 @@
       font-weight: 700;
       cursor: pointer;
     }
-    .toggle-btn:hover {
-      background: rgba(33, 32, 31, 0.18);
-    }
-    .toggle-btn:focus-visible {
-      outline: 2px solid var(--lqs-text);
-      outline-offset: 1px;
-    }
+    .toggle-btn:hover { background: rgba(33, 32, 31, 0.18); }
     .body {
       padding: 10px 12px;
       display: flex;
       flex-direction: column;
       gap: 8px;
     }
-    .body.is-collapsed {
-      display: none;
-    }
+    .body.is-collapsed { display: none; }
     .row {
       display: flex;
       flex-wrap: wrap;
@@ -457,46 +656,43 @@
       background: var(--lqs-surface);
       color: var(--lqs-text);
     }
-    .pill-unit {
-      background: #21201f;
-      color: #fce000;
-    }
-    .pill-green {
-      background: var(--lqs-green-bg);
-      color: var(--lqs-green-text);
-    }
-    .pill-yellow {
-      background: var(--lqs-yellow-bg);
-      color: var(--lqs-yellow-text);
-    }
-    .pill-red {
-      background: var(--lqs-red-bg);
-      color: var(--lqs-red-text);
-    }
-    .pill-muted {
+    .pill-unit { background: #21201f; color: #fce000; }
+    .pill-green { background: var(--lqs-green-bg); color: var(--lqs-green-text); }
+    .pill-yellow { background: var(--lqs-yellow-bg); color: var(--lqs-yellow-text); }
+    .pill-red { background: var(--lqs-red-bg); color: var(--lqs-red-text); }
+    .pill-muted { background: var(--lqs-surface); color: var(--lqs-muted); font-weight: 500; }
+    .pill-btn { border: none; cursor: pointer; font-family: inherit; }
+    .flags-box {
       background: var(--lqs-surface);
-      color: var(--lqs-muted);
-      font-weight: 500;
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 11.5px;
+      color: var(--lqs-text);
+      display: none;
     }
-    .compare-box {
+    .flags-box.is-open { display: block; }
+    .section-box {
       background: var(--lqs-surface);
       border-radius: 10px;
       padding: 8px 10px;
       display: flex;
       flex-direction: column;
-      gap: 5px;
+      gap: 6px;
+    }
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--lqs-muted);
     }
     .compare-headline {
       font-weight: 700;
-      font-size: 12px;
+      font-size: 12.5px;
       color: var(--lqs-text);
     }
-    .compare-headline.is-best {
-      color: var(--lqs-green-text);
-    }
-    .compare-headline.is-cheaper {
-      color: var(--lqs-red-text);
-    }
+    .compare-headline.is-best { color: var(--lqs-green-text); }
+    .compare-headline.is-cheaper { color: var(--lqs-red-text); }
     .compare-list {
       display: flex;
       flex-direction: column;
@@ -506,23 +702,119 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
+      gap: 6px;
       font-size: 12px;
+    }
+    .compare-left {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .compare-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
     }
     .compare-link {
       color: var(--lqs-text);
       text-decoration: underline;
       text-underline-offset: 2px;
-    }
-    .compare-price {
-      font-weight: 700;
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .compare-price { font-weight: 700; white-space: nowrap; }
+    .compare-meta { font-size: 11px; color: var(--lqs-muted); white-space: nowrap; }
+    .reject-btn {
+      appearance: none;
+      border: 1px solid var(--lqs-border);
+      background: #fff;
+      color: var(--lqs-muted);
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-size: 10.5px;
+      font-weight: 700;
+      cursor: pointer;
+      line-height: 1.3;
+    }
+    .reject-btn:hover { background: var(--lqs-red-bg); color: var(--lqs-red-text); border-color: #f3c1be; }
+    .action-btn {
+      appearance: none;
+      border: 1px solid var(--lqs-border);
+      background: #ffffff;
+      color: var(--lqs-text);
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .action-btn:hover { background: #efede8; }
+    .action-btn.is-primary { background: #21201f; color: #fce000; border-color: #21201f; }
+    .action-btn.is-primary:hover { background: #363432; }
+    .action-btn.is-active { background: var(--lqs-red-bg); color: var(--lqs-red-text); border-color: #f3c1be; }
+    .action-btn:disabled { opacity: 0.6; cursor: default; }
+    .ai-verdict {
+      font-size: 12px;
+      white-space: pre-wrap;
+      color: var(--lqs-text);
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .ai-sources {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 11px;
+    }
+    .chart-box {
+      display: none;
+      background: #fff;
+      border: 1px solid var(--lqs-border);
+      border-radius: 8px;
+      padding: 6px 8px;
+    }
+    .chart-box.is-open { display: block; }
+    .personal-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .stars { display: inline-flex; gap: 2px; }
+    .star-btn {
+      appearance: none;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      font-size: 15px;
+      padding: 0 2px;
+      color: #c7c3bc;
+    }
+    .star-btn.is-on { color: #f59e0b; }
+    .note-row {
+      display: flex;
+      gap: 6px;
+      width: 100%;
+    }
+    .note-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--lqs-border);
+      border-radius: 7px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-family: inherit;
+      background: #fff;
+      color: var(--lqs-text);
     }
     @media (prefers-reduced-motion: reduce) {
-      * {
-        transition: none !important;
-        animation: none !important;
-      }
+      * { transition: none !important; animation: none !important; }
     }
   `;
 
@@ -552,7 +844,139 @@
     }
   }
 
-  function renderStoreAssistantWidget(doc, model) {
+  function mountHostElement(doc, host, storeId) {
+    const anchor = findInlineMountAnchor(doc, storeId);
+    if (anchor && anchor.element && anchor.element.parentElement) {
+      host.setAttribute('data-lqs-mount-mode', 'inline');
+      host.setAttribute('data-lqs-anchor-strategy', anchor.strategy || 'inline');
+      const parent = anchor.element.parentElement;
+      if (typeof parent.insertBefore === 'function') {
+        const refNode = anchor.position === 'before' ? anchor.element : (anchor.element.nextElementSibling || null);
+        parent.insertBefore(host, refNode);
+        return 'inline';
+      }
+      if (typeof parent.appendChild === 'function') {
+        parent.appendChild(host);
+        return 'inline';
+      }
+    }
+    host.setAttribute('data-lqs-mount-mode', 'floating');
+    host.setAttribute('data-lqs-anchor-strategy', 'floating_fallback');
+    doc.body.appendChild(host);
+    return 'floating';
+  }
+
+  function loadPersonalReview(reviewKey, cb) {
+    if (!reviewKey || typeof chrome === 'undefined' || !chrome.storage?.local) {
+      cb(null);
+      return;
+    }
+    try {
+      chrome.storage.local.get([REVIEWS_STORAGE_KEY], (res) => {
+        const db = res && res[REVIEWS_STORAGE_KEY] && typeof res[REVIEWS_STORAGE_KEY] === 'object'
+          ? res[REVIEWS_STORAGE_KEY]
+          : {};
+        cb(db[reviewKey] || null);
+      });
+    } catch (err) {
+      void err;
+      cb(null);
+    }
+  }
+
+  function savePersonalReview(reviewKey, title, patch, cb) {
+    if (!reviewKey || typeof chrome === 'undefined' || !chrome.storage?.local) {
+      if (cb) cb(null);
+      return;
+    }
+    try {
+      chrome.storage.local.get([REVIEWS_STORAGE_KEY], (res) => {
+        const db = res && res[REVIEWS_STORAGE_KEY] && typeof res[REVIEWS_STORAGE_KEY] === 'object'
+          ? { ...res[REVIEWS_STORAGE_KEY] }
+          : {};
+        const prev = db[reviewKey] || {};
+        const merged = {
+          ...prev,
+          ...patch,
+          slug: reviewKey,
+          title: title || prev.title || '',
+          updatedAt: new Date().toISOString()
+        };
+        const isEmpty = !merged.rating && !merged.banned && (!merged.note || !String(merged.note).trim());
+        if (isEmpty) {
+          delete db[reviewKey];
+        } else {
+          db[reviewKey] = merged;
+        }
+        chrome.storage.local.set({ [REVIEWS_STORAGE_KEY]: db }, () => {
+          if (cb) cb(isEmpty ? null : merged);
+        });
+      });
+    } catch (err) {
+      void err;
+      if (cb) cb(null);
+    }
+  }
+
+  function renderOfferRow(doc, offer, isSimilar, onReject) {
+    const item = doc.createElement('div');
+    item.className = 'compare-item';
+    if (offer.titleHint) item.title = offer.titleHint;
+
+    const left = doc.createElement('div');
+    left.className = 'compare-left';
+
+    if (offer.url) {
+      const link = doc.createElement('a');
+      link.className = 'compare-link';
+      link.href = offer.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = offer.store;
+      left.appendChild(link);
+    } else {
+      const nameSpan = doc.createElement('span');
+      nameSpan.textContent = offer.store;
+      left.appendChild(nameSpan);
+    }
+
+    if (isSimilar && offer.warning) {
+      const warnSpan = doc.createElement('span');
+      warnSpan.className = 'compare-meta';
+      warnSpan.textContent = `(${offer.warning})`;
+      left.appendChild(warnSpan);
+    }
+
+    const right = doc.createElement('div');
+    right.className = 'compare-right';
+
+    const priceSpan = doc.createElement('span');
+    priceSpan.className = 'compare-price';
+    priceSpan.textContent = isSimilar && offer.pricePerKgOrL
+      ? `${offer.price} ₽ (~${offer.pricePerKgOrL} ₽/кг)`
+      : `${offer.price} ₽`;
+    right.appendChild(priceSpan);
+
+    const rejectBtn = doc.createElement('button');
+    rejectBtn.type = 'button';
+    rejectBtn.className = 'reject-btn';
+    rejectBtn.setAttribute('data-action', 'reject-match');
+    rejectBtn.setAttribute('aria-label', `Не тот товар: ${offer.store}`);
+    rejectBtn.title = 'Не тот товар — скрыть навсегда';
+    rejectBtn.textContent = '✕';
+    rejectBtn.addEventListener('click', () => {
+      if (typeof onReject === 'function') {
+        onReject(offer, item);
+      }
+    });
+    right.appendChild(rejectBtn);
+
+    item.appendChild(left);
+    item.appendChild(right);
+    return item;
+  }
+
+  function renderStoreAssistantWidget(doc, model, options = {}) {
     if (!doc || !doc.body || !model) return null;
 
     let host = typeof doc.getElementById === 'function' ? doc.getElementById(HOST_ID) : null;
@@ -568,10 +992,11 @@
       } else {
         shadow = host;
       }
-      doc.body.appendChild(host);
+      mountHostElement(doc, host, model.storeId || '');
+    } else {
+      host.setAttribute('data-lqs-store', model.store || '');
     }
 
-    // Clear previous content while keeping adoptedStyleSheets
     while (shadow.firstChild) {
       if (shadow.firstChild.tagName === 'STYLE') {
         const next = shadow.firstChild.nextSibling;
@@ -615,7 +1040,7 @@
     const body = doc.createElement('div');
     body.className = isCollapsed ? 'body is-collapsed' : 'body';
 
-    // 1. Unit prices row
+    // 1. Metrics & expandable traffic light
     const unitRow = doc.createElement('div');
     unitRow.className = 'row';
     if (model.unitBadges.length > 0) {
@@ -631,24 +1056,34 @@
       pill.textContent = `${model.price} ₽ · вес не указан`;
       unitRow.appendChild(pill);
     }
-    body.appendChild(unitRow);
 
-    // 2. Traffic light row
     const tl = model.trafficLight;
+    let flagsBox = null;
     if (tl && tl.level && tl.level !== 'none') {
-      const tlRow = doc.createElement('div');
-      tlRow.className = 'row';
-      const tlPill = doc.createElement('span');
-      tlPill.className = `pill pill-${tl.level}`;
-      tlPill.textContent = tl.badgeText || `${tl.emoji} Состав проверен`;
-      tlPill.title = tl.summary || '';
-      tlRow.appendChild(tlPill);
-      body.appendChild(tlRow);
-    }
+      const hasFlags = Array.isArray(tl.allFlags) && tl.allFlags.length > 0;
+      const tlEl = doc.createElement(hasFlags ? 'button' : 'span');
+      if (hasFlags) tlEl.type = 'button';
+      tlEl.className = `pill pill-${tl.level}${hasFlags ? ' pill-btn' : ''}`;
+      tlEl.textContent = tl.badgeText || `${tl.emoji} Состав проверен`;
+      tlEl.title = tl.summary || '';
+      unitRow.appendChild(tlEl);
 
-    // 3. Comparison box
+      if (hasFlags) {
+        flagsBox = doc.createElement('div');
+        flagsBox.className = 'flags-box';
+        const labels = tl.allFlags.map((f) => (typeof f === 'string' ? f : (f.label || f.name || ''))).filter(Boolean);
+        flagsBox.textContent = `Найдено в составе: ${labels.join(', ')}`;
+        tlEl.addEventListener('click', () => {
+          flagsBox.classList.toggle('is-open');
+        });
+      }
+    }
+    body.appendChild(unitRow);
+    if (flagsBox) body.appendChild(flagsBox);
+
+    // 2. Price comparison section (Exact + Similar + Live Radar button)
     const compareBox = doc.createElement('div');
-    compareBox.className = 'compare-box';
+    compareBox.className = 'section-box';
 
     const headline = doc.createElement('div');
     headline.className = 'compare-headline';
@@ -657,39 +1092,338 @@
     headline.textContent = model.comparisonHeadline;
     compareBox.appendChild(headline);
 
+    const handleReject = (offer, rowEl) => {
+      if (rowEl && typeof rowEl.remove === 'function') rowEl.remove();
+      if (typeof options.onRejectMatch === 'function') {
+        options.onRejectMatch(offer, model);
+        return;
+      }
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        chrome.runtime.sendMessage({
+          type: 'LQS_REJECT_COMPETITOR_MATCH',
+          payload: {
+            sourceTitle: model.title,
+            sourceSlug: model.slug,
+            rejectedUrl: offer.url || '',
+            rejectedTitle: offer.title || offer.store || ''
+          }
+        });
+      }
+    };
+
     if (model.comparedOffers.length > 0) {
+      const exactLabel = doc.createElement('div');
+      exactLabel.className = 'section-label';
+      exactLabel.textContent = 'Точные совпадения';
+      compareBox.appendChild(exactLabel);
+
       const list = doc.createElement('div');
       list.className = 'compare-list';
       for (const offer of model.comparedOffers) {
-        const item = doc.createElement('div');
-        item.className = 'compare-item';
-        if (offer.titleHint) item.title = offer.titleHint;
-
-        if (offer.url) {
-          const link = doc.createElement('a');
-          link.className = 'compare-link';
-          link.href = offer.url;
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
-          link.textContent = offer.store;
-          item.appendChild(link);
-        } else {
-          const nameSpan = doc.createElement('span');
-          nameSpan.textContent = offer.store;
-          item.appendChild(nameSpan);
-        }
-
-        const priceSpan = doc.createElement('span');
-        priceSpan.className = 'compare-price';
-        priceSpan.textContent = `${offer.price} ₽`;
-        item.appendChild(priceSpan);
-
-        list.appendChild(item);
+        list.appendChild(renderOfferRow(doc, offer, false, handleReject));
       }
       compareBox.appendChild(list);
     }
 
+    if (Array.isArray(model.similarOffers) && model.similarOffers.length > 0) {
+      const simLabel = doc.createElement('div');
+      simLabel.className = 'section-label';
+      simLabel.textContent = 'Похожие (другой сорт/фасовка)';
+      compareBox.appendChild(simLabel);
+
+      const simList = doc.createElement('div');
+      simList.className = 'compare-list';
+      for (const sim of model.similarOffers) {
+        simList.appendChild(renderOfferRow(doc, sim, true, handleReject));
+      }
+      compareBox.appendChild(simList);
+    }
+
+    const scanBtn = doc.createElement('button');
+    scanBtn.type = 'button';
+    scanBtn.className = 'action-btn is-primary';
+    scanBtn.setAttribute('data-action', 'scan-stores');
+    scanBtn.textContent = '🔍 Проверить в других магазинах';
+    scanBtn.addEventListener('click', () => {
+      if (typeof options.onScanStores === 'function') {
+        options.onScanStores(model, scanBtn);
+        return;
+      }
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        scanBtn.disabled = true;
+        scanBtn.textContent = '⏳ Ищем цены в других сетях...';
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_SCAN_STORES_LIVE',
+            payload: {
+              slug: model.slug,
+              title: model.title,
+              brand: model.brand,
+              amount: model.amount,
+              price: model.price,
+              excludeStore: model.store,
+              forceRefresh: true
+            }
+          },
+          (resp) => {
+            scanBtn.disabled = false;
+            scanBtn.textContent = '🔍 Проверить в других магазинах';
+            if (chrome.runtime.lastError || !resp || !resp.ok) return;
+            if (resp.comparisons) {
+              const updated = buildStoreAssistantModel(model, resp.comparisons);
+              if (updated) renderStoreAssistantWidget(doc, updated, options);
+            }
+          }
+        );
+      }
+    });
+    compareBox.appendChild(scanBtn);
     body.appendChild(compareBox);
+
+    // 3. AI analysis section
+    const aiBox = doc.createElement('div');
+    aiBox.className = 'section-box';
+
+    const aiHeader = doc.createElement('div');
+    aiHeader.className = 'section-label';
+    aiHeader.textContent = '🤖 ИИ-разбор состава и отзывов';
+    aiBox.appendChild(aiHeader);
+
+    const aiVerdictEl = doc.createElement('div');
+    aiVerdictEl.className = 'ai-verdict';
+    aiVerdictEl.textContent = options.aiVerdict || '';
+
+    const aiSourcesEl = doc.createElement('div');
+    aiSourcesEl.className = 'ai-sources';
+
+    const renderAiResult = (verdictText, sources = []) => {
+      aiVerdictEl.textContent = verdictText || '';
+      while (aiSourcesEl.firstChild) aiSourcesEl.removeChild(aiSourcesEl.firstChild);
+      if (Array.isArray(sources)) {
+        for (const src of sources.slice(0, 5)) {
+          const href = safeUrl(src?.url || src);
+          if (!href) continue;
+          const a = doc.createElement('a');
+          a.className = 'compare-link';
+          a.href = href;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = src?.source || src?.title || 'Источник';
+          aiSourcesEl.appendChild(a);
+        }
+      }
+    };
+
+    if (options.aiVerdict) {
+      renderAiResult(options.aiVerdict, options.aiSources || []);
+    }
+
+    const aiBtn = doc.createElement('button');
+    aiBtn.type = 'button';
+    aiBtn.className = 'action-btn';
+    aiBtn.setAttribute('data-action', 'run-ai');
+    aiBtn.textContent = options.aiVerdict ? '🔄 Обновить ИИ-разбор' : '🤖 Запустить ИИ-разбор';
+    aiBtn.addEventListener('click', () => {
+      if (typeof options.onRunAi === 'function') {
+        options.onRunAi(model, aiBtn, renderAiResult);
+        return;
+      }
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        aiBtn.disabled = true;
+        aiBtn.textContent = '⏳ ИИ анализирует товар...';
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_ANALYZE_PRODUCT',
+            payload: {
+              slug: model.slug,
+              title: model.title,
+              brand: model.brand,
+              amount: model.amount,
+              price: model.price,
+              ingredients: model.ingredients,
+              store: model.store
+            }
+          },
+          (resp) => {
+            aiBtn.disabled = false;
+            aiBtn.textContent = '🔄 Обновить ИИ-разбор';
+            if (chrome.runtime.lastError || !resp) {
+              renderAiResult('⚠️ Не удалось выполнить ИИ-разбор.', []);
+              return;
+            }
+            if (resp.ok && (resp.verdict || resp.text)) {
+              renderAiResult(resp.verdict || resp.text, resp.sources || []);
+            } else {
+              renderAiResult(`⚠️ ${resp.error || 'ИИ не вернул ответ'}`, []);
+            }
+          }
+        );
+      }
+    });
+
+    aiBox.appendChild(aiBtn);
+    aiBox.appendChild(aiVerdictEl);
+    aiBox.appendChild(aiSourcesEl);
+    body.appendChild(aiBox);
+
+    // 4. Price Chart & Watchlist row
+    const toolsRow = doc.createElement('div');
+    toolsRow.className = 'row';
+
+    const chartBtn = doc.createElement('button');
+    chartBtn.type = 'button';
+    chartBtn.className = 'action-btn';
+    chartBtn.setAttribute('data-action', 'toggle-chart');
+    chartBtn.textContent = '📈 График цены';
+
+    const watchBtn = doc.createElement('button');
+    watchBtn.type = 'button';
+    watchBtn.className = 'action-btn';
+    watchBtn.setAttribute('data-action', 'toggle-watch');
+    watchBtn.textContent = options.isWatched ? '❤️ В отслеживании' : '❤️ Следить';
+    if (options.isWatched) watchBtn.classList.toggle('is-active', true);
+
+    const chartBox = doc.createElement('div');
+    chartBox.className = 'chart-box';
+
+    chartBtn.addEventListener('click', () => {
+      const opening = !chartBox.classList.contains('is-open');
+      chartBox.classList.toggle('is-open', opening);
+      if (!opening) return;
+      if (typeof options.onToggleChart === 'function') {
+        options.onToggleChart(model, chartBox);
+        return;
+      }
+      chartBox.textContent = '⏳ Загружаем историю цен...';
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        chrome.runtime.sendMessage(
+          { type: 'LQS_GET_PRICE_HISTORY', slug: model.slug, title: model.title, days: 90 },
+          (resp) => {
+            if (chrome.runtime.lastError || !resp || !resp.ok || !resp.data) {
+              chartBox.textContent = 'История цен пока накапливается — посетите товар ещё раз позже.';
+              return;
+            }
+            const chartApi = root.LQS_PRICE_CHART;
+            if (chartApi && typeof chartApi.buildPriceChartSvg === 'function') {
+              const pts = Array.isArray(resp.data.points) ? resp.data.points : [];
+              const stats = resp.data.stats || {};
+              const info = stats.minPrice
+                ? `Мин: ${Math.round(stats.minPrice)} ₽ · Сред: ${Math.round(stats.avgPrice || stats.lastPrice || model.price)} ₽ · Точек: ${pts.length}`
+                : `Текущая цена: ${model.price} ₽`;
+              chartBox.textContent = info;
+            } else {
+              chartBox.textContent = `Точек в истории: ${(resp.data.points || []).length}`;
+            }
+          }
+        );
+      }
+    });
+
+    watchBtn.addEventListener('click', () => {
+      if (typeof options.onToggleWatch === 'function') {
+        options.onToggleWatch(model, watchBtn);
+        return;
+      }
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_TOGGLE_WATCHLIST',
+            slug: model.slug,
+            title: model.title,
+            amount: model.amount,
+            price: model.price
+          },
+          (resp) => {
+            if (chrome.runtime.lastError || !resp || !resp.ok) return;
+            const watched = Boolean(resp.watched);
+            watchBtn.classList.toggle('is-active', watched);
+            watchBtn.textContent = watched ? '❤️ В отслеживании' : '❤️ Следить';
+          }
+        );
+      }
+    });
+
+    toolsRow.appendChild(chartBtn);
+    toolsRow.appendChild(watchBtn);
+    body.appendChild(toolsRow);
+    body.appendChild(chartBox);
+
+    // 5. Personal rating (5 stars), ban button, and short note (lqs_reviews_v1)
+    const personalBox = doc.createElement('div');
+    personalBox.className = 'section-box';
+
+    const personalTop = doc.createElement('div');
+    personalTop.className = 'personal-row';
+
+    const starsWrap = doc.createElement('div');
+    starsWrap.className = 'stars';
+    const starBtns = [];
+    let currentRating = Number(options.review?.rating || 0);
+    let currentBanned = Boolean(options.review?.banned);
+
+    const syncStarsUi = () => {
+      starBtns.forEach((btn, idx) => {
+        btn.classList.toggle('is-on', idx + 1 <= currentRating);
+      });
+    };
+
+    for (let i = 1; i <= 5; i++) {
+      const sb = doc.createElement('button');
+      sb.type = 'button';
+      sb.className = 'star-btn';
+      sb.setAttribute('data-star', String(i));
+      sb.setAttribute('aria-label', `Оценка ${i} из 5`);
+      sb.textContent = '★';
+      sb.addEventListener('click', () => {
+        currentRating = currentRating === i ? 0 : i;
+        syncStarsUi();
+        savePersonalReview(model.reviewKey, model.title, { rating: currentRating });
+      });
+      starBtns.push(sb);
+      starsWrap.appendChild(sb);
+    }
+    syncStarsUi();
+
+    const banBtn = doc.createElement('button');
+    banBtn.type = 'button';
+    banBtn.className = `action-btn${currentBanned ? ' is-active' : ''}`;
+    banBtn.setAttribute('data-action', 'toggle-ban');
+    banBtn.textContent = currentBanned ? '🚫 В бане' : '🚫 В бан';
+    banBtn.addEventListener('click', () => {
+      currentBanned = !currentBanned;
+      banBtn.classList.toggle('is-active', currentBanned);
+      banBtn.textContent = currentBanned ? '🚫 В бане' : '🚫 В бан';
+      savePersonalReview(model.reviewKey, model.title, { banned: currentBanned });
+    });
+
+    personalTop.appendChild(starsWrap);
+    personalTop.appendChild(banBtn);
+    personalBox.appendChild(personalTop);
+
+    const noteRow = doc.createElement('div');
+    noteRow.className = 'note-row';
+
+    const noteInput = doc.createElement('input');
+    noteInput.type = 'text';
+    noteInput.className = 'note-input';
+    noteInput.placeholder = 'Короткая заметка о товаре...';
+    noteInput.value = String(options.review?.note || '');
+
+    const saveNoteBtn = doc.createElement('button');
+    saveNoteBtn.type = 'button';
+    saveNoteBtn.className = 'action-btn';
+    saveNoteBtn.setAttribute('data-action', 'save-note');
+    saveNoteBtn.textContent = '💾';
+    saveNoteBtn.title = 'Сохранить заметку';
+    saveNoteBtn.addEventListener('click', () => {
+      savePersonalReview(model.reviewKey, model.title, { note: String(noteInput.value || '').trim() });
+    });
+
+    noteRow.appendChild(noteInput);
+    noteRow.appendChild(saveNoteBtn);
+    personalBox.appendChild(noteRow);
+    body.appendChild(personalBox);
+
     card.appendChild(body);
     shadow.appendChild(card);
 
@@ -734,30 +1468,68 @@
       if (baseKey === lastRenderKey) return;
       lastRenderKey = baseKey;
 
-      // Render immediately with local unit price + traffic light
-      const initialModel = buildStoreAssistantModel(product, null);
-      if (initialModel) {
-        renderStoreAssistantWidget(document, initialModel);
-      }
+      const state = {
+        comparisonData: null,
+        aiVerdict: '',
+        aiSources: [],
+        review: null
+      };
 
-      // Query background for local DB comparisons (Яндекс Лавка + другие сети)
+      const rerender = () => {
+        const model = buildStoreAssistantModel(product, state.comparisonData);
+        if (model) {
+          renderStoreAssistantWidget(document, model, {
+            aiVerdict: state.aiVerdict,
+            aiSources: state.aiSources,
+            review: state.review
+          });
+        }
+      };
+
+      // Render immediately with local unit price + traffic light
+      rerender();
+
+      // Load personal review from lqs_reviews_v1
+      const initKey = buildStoreProductKey(product);
+      loadPersonalReview(initKey, (rev) => {
+        if (rev) {
+          state.review = rev;
+          rerender();
+        }
+      });
+
       if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        // 1. Local + SQLite price comparisons
         chrome.runtime.sendMessage(
           {
             type: 'LQS_COMPARE_STORE_PRODUCT',
             payload: {
               store: product.store,
               title: product.title,
+              brand: product.brand,
               amount: product.amount,
               price: product.price
             }
           },
           (resp) => {
             if (chrome.runtime.lastError || !resp || !resp.ok) return;
-            const updatedModel = buildStoreAssistantModel(product, resp);
-            if (updatedModel) {
-              renderStoreAssistantWidget(document, updatedModel);
-            }
+            state.comparisonData = resp;
+            rerender();
+          }
+        );
+
+        // 2. Check cached AI verdict
+        chrome.runtime.sendMessage(
+          {
+            type: 'LQS_GET_CACHED_AI_VERDICT',
+            slug: initKey,
+            title: product.title
+          },
+          (resp) => {
+            if (chrome.runtime.lastError || !resp || !resp.ok || !resp.entry) return;
+            state.aiVerdict = resp.entry.verdict || '';
+            state.aiSources = resp.entry.sources || [];
+            if (state.aiVerdict) rerender();
           }
         );
       }
@@ -770,12 +1542,10 @@
       }, delay);
     };
 
-    // Initial hydration wave for SPA store pages
     [400, 1200, 2600].forEach((ms) => setTimeout(() => {
       if (!document.hidden) syncWidget();
     }, ms));
 
-    // Watch SPA route changes
     setInterval(() => {
       if (document.hidden) return;
       if (window.location.href !== lastCheckedHref) {
@@ -792,7 +1562,10 @@
   const api = {
     HOST_ID,
     ASSISTANT_STORES,
+    STORE_ANCHOR_SELECTORS,
     detectAssistantStorePage,
+    buildStoreProductKey,
+    findInlineMountAnchor,
     extractIngredientsFromStoreDoc,
     extractProteinFromStoreDoc,
     extractStoreProductFromDoc,

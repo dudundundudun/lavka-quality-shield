@@ -233,3 +233,85 @@ test('onMessage rejects sensitive vault commands from untrusted external sender 
     );
   }
 });
+
+test('Step 4 security: external stores get analysis/radar/history/reject access while vault & DPAPI remain strictly locked', async () => {
+  const bg = fs.readFileSync(path.join(extDir, 'background.js'), 'utf8');
+  const listenerStart = bg.indexOf('chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {');
+  const listenerBlock = bg.slice(listenerStart);
+
+  // All 7 external-store commands must use isTrustedExternalStoreSender
+  const allowedOnExternalStores = [
+    'LQS_ANALYZE_PRODUCT',
+    'LQS_GET_CACHED_AI_VERDICT',
+    'LQS_SCAN_STORES_LIVE',
+    'LQS_GET_PRICE_HISTORY',
+    'LQS_TOGGLE_WATCHLIST',
+    'LQS_GET_PRICE_INTEL',
+    'LQS_REJECT_COMPETITOR_MATCH',
+  ];
+  for (const cmd of allowedOnExternalStores) {
+    const re = new RegExp(`msg\\.type === '${cmd}'\\)[\\s\\S]{0,160}isTrustedExternalStoreSender\\(sender\\)`);
+    assert.match(listenerBlock, re, `${cmd} must be guarded by isTrustedExternalStoreSender(sender)`);
+  }
+
+  // Runtime check in Service Worker sandbox
+  const { onMessageListeners } = loadBackgroundInSandbox();
+  const listener = onMessageListeners[0];
+  const magnitSender = {
+    id: 'test-extension-id-1234567890abcdef',
+    url: 'https://magnit.ru/product/12345-goroshek',
+    tab: { url: 'https://magnit.ru/product/12345-goroshek' },
+  };
+  const evilSender = {
+    id: 'test-extension-id-1234567890abcdef',
+    url: 'https://evil.example/attack',
+    tab: { url: 'https://evil.example/attack' },
+  };
+
+  // Sensitive vault / cookie / DPAPI commands MUST be rejected from magnit.ru
+  const sensitiveCommands = [
+    'LQS_GET_ACCOUNTS_VAULT',
+    'LQS_SAVE_ACCOUNT_TO_VAULT',
+    'LQS_SWITCH_LAVKA_ACCOUNT',
+    'LQS_DELETE_ACCOUNT_FROM_VAULT',
+    'LQS_AUTOFILL_YANDEX_LOGIN',
+    'LQS_GET_ACCOUNT_SECRET_FOR_POPUP',
+    'LQS_GET_GEMINI_COOKIE_HEADER',
+    'LQS_SAVE_AI_KEY',
+  ];
+  for (const type of sensitiveCommands) {
+    const res = await new Promise((resolve) => {
+      listener({ type, accountId: 'acc_1' }, magnitSender, resolve);
+    });
+    assert.equal(res.ok, false, `Expected ${type} from magnit.ru to be rejected`);
+  }
+
+  // External-store commands MUST be rejected from evil.example
+  for (const type of allowedOnExternalStores) {
+    const res = await new Promise((resolve) => {
+      listener({ type, payload: {} }, evilSender, resolve);
+    });
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(res)),
+      { ok: false, error: 'Forbidden' },
+      `Expected ${type} from evil.example to return Forbidden`
+    );
+  }
+
+  // LQS_REJECT_COMPETITOR_MATCH from magnit.ru succeeds
+  const rejRes = await new Promise((resolve) => {
+    listener(
+      {
+        type: 'LQS_REJECT_COMPETITOR_MATCH',
+        payload: {
+          sourceTitle: 'Горошек зелёный молодой Bonduelle 400 г',
+          rejectedUrl: 'https://5ka.ru/product/wrong-peas',
+          rejectedTitle: 'Горошек Красная цена 400 г',
+        },
+      },
+      magnitSender,
+      resolve
+    );
+  });
+  assert.equal(rejRes.ok, true);
+});

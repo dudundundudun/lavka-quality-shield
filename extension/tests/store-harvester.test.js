@@ -572,3 +572,301 @@ test('direct product URL memory: first scan searches and remembers URL, next sca
   const savedAfter = await radar.getRememberedProductLinks('lamber_230g');
   assert.equal(savedAfter.magnit.url, 'https://magnit.ru/product/999888-syr-lamber-230g');
 });
+
+test('parseGenericRetailerOffers always extracts open product from h1 FIRST even when similar product cards exist', () => {
+  const h = loadHarvesterModule();
+
+  const similarLink = {
+    tagName: 'A',
+    getAttribute: (attr) => (attr === 'href' ? '/product/similar-999' : attr === 'title' ? 'Напиток Добрый Кола 1,5 л' : null),
+    textContent: 'Напиток Добрый Кола 1,5 л'
+  };
+  const similarCard = {
+    tagName: 'ARTICLE',
+    innerText: 'Напиток Добрый Кола 1,5 л 139 ₽',
+    textContent: 'Напиток Добрый Кола 1,5 л 139 ₽',
+    querySelector: (sel) => (sel.includes('a[href') ? similarLink : null),
+    closest: () => null
+  };
+
+  const mockDoc = {
+    title: 'Черноголовка Кола 1,5 л — Пятёрочка',
+    body: { innerText: 'Напиток Черноголовка Кола 1,5 л 129 ₽ 159 ₽ Похожие товары' },
+    querySelector: (sel) => {
+      if (sel === 'h1') return { textContent: 'Напиток Черноголовка Кола 1,5 л' };
+      if (sel === 'main') return { innerText: 'Напиток Черноголовка Кола 1,5 л 129 ₽ 159 ₽' };
+      if (sel.includes('brand')) return { textContent: 'Черноголовка', getAttribute: () => null };
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel.includes('ld+json')) return [];
+      return [similarCard];
+    }
+  };
+
+  const res = h.parseOffersFromDocument(mockDoc, {
+    hostname: '5ka.ru',
+    origin: 'https://5ka.ru',
+    pathname: '/product/chernogolovka-cola-15l/',
+    href: 'https://5ka.ru/product/chernogolovka-cola-15l/'
+  });
+
+  assert.equal(res.store, 'Пятёрочка');
+  assert.equal(res.offers.length, 2);
+  assert.equal(res.offers[0].title, 'Напиток Черноголовка Кола 1,5 л');
+  assert.equal(res.offers[0].brand, 'Черноголовка');
+  assert.equal(res.offers[0].price, 129);
+  assert.equal(res.offers[0].url, 'https://5ka.ru/product/chernogolovka-cola-15l/');
+  assert.equal(res.offers[1].title, 'Напиток Добрый Кола 1,5 л');
+});
+
+test('recordExternalStoreOffers raises local cache above 800, syncs batch to SQLite, and returns totalInSqlite', async () => {
+  const storageData = {};
+  const backendRequests = [];
+
+  const chromeMock = {
+    runtime: { lastError: null, getURL: (p) => `chrome-extension://test/${p}` },
+    storage: {
+      local: {
+        get: (keys, cb) => {
+          const out = {};
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const k of list) if (k in storageData) out[k] = storageData[k];
+          cb(out);
+        },
+        set: (obj, cb) => {
+          Object.assign(storageData, obj || {});
+          if (cb) cb();
+        }
+      }
+    }
+  };
+
+  const sandbox = {
+    chrome: chromeMock,
+    console,
+    URL,
+    URLSearchParams,
+    AbortController,
+    Date,
+    Math,
+    JSON,
+    Map,
+    Set,
+    Promise,
+    RegExp,
+    Array,
+    Object,
+    Number,
+    String,
+    Boolean,
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+    fetch: async (url, opts = {}) => {
+      backendRequests.push({ url: String(url), method: opts.method || 'GET', body: opts.body || null });
+      if (String(url).includes('/api/external-offers/batch')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', savedCount: 5, totalInSqlite: 1520 })
+        };
+      }
+      if (String(url).includes('/api/external-offers/match')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'ok',
+            count: 1,
+            offers: [
+              {
+                store: 'Ашан',
+                title: 'Напиток Черноголовка Кола 1,5 л',
+                amount: '1,5 л',
+                price: 115,
+                url: 'https://auchan.ru/product/cola-15l'
+              }
+            ]
+          })
+        };
+      }
+      return { ok: false, status: 404, text: async () => '', json: async () => ({}) };
+    }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  const ctx = vm.createContext(sandbox);
+
+  for (const rel of ['shared/config.js', 'shared/utils.js', 'shared/product-matcher.js', 'bg/price-radar.js']) {
+    vm.runInContext(fs.readFileSync(path.join(extDir, rel), 'utf8'), ctx);
+  }
+  sandbox.LQS_BG_DEPS = {
+    getBackendOfflineUntilTs: () => 0,
+    getBackendAuthHeaders: async (_u, extra = {}) => ({ 'X-LQS-Token': 'test-tok', ...extra }),
+    setBackendOfflineUntilTs: () => {}
+  };
+
+  // Pre-seed 950 offers in local cache to verify > 800 cap is removed (limit is now 3000)
+  storageData.lqs_ext_store_prices_v1 = Array.from({ length: 950 }, (_, idx) => ({
+    store: 'Магнит',
+    title: `Товар Магнит ${idx} 500 г`,
+    price: 100 + idx,
+    url: `https://magnit.ru/product/${idx}`
+  }));
+
+  const res = await sandbox.LQS_PRICE_RADAR.recordExternalStoreOffers('Пятёрочка', [
+    {
+      store: 'Пятёрочка',
+      title: 'Напиток Черноголовка Кола 1,5 л',
+      brand: 'Черноголовка',
+      amount: '1,5 л',
+      price: 129,
+      url: 'https://5ka.ru/product/chernogolovka-cola-15l'
+    }
+  ]);
+
+  assert.equal(res.ok, true);
+  assert.equal(res.storedInSqlite, true);
+  assert.equal(res.totalExternalOffers, 1520);
+  assert.equal(storageData.lqs_ext_store_prices_v1.length, 951);
+  assert.ok(backendRequests.some((r) => r.method === 'POST' && r.url.includes('/api/external-offers/batch')));
+
+  // Verify findLocalComparisonsForStoreProduct merges matches from SQLite /api/external-offers/match
+  const cmp = await sandbox.LQS_PRICE_RADAR.findLocalComparisonsForStoreProduct({
+    store: 'Пятёрочка',
+    title: 'Напиток Черноголовка Кола 1,5 л',
+    brand: 'Черноголовка',
+    amount: '1,5 л',
+    price: 129
+  });
+  assert.equal(cmp.ok, true);
+  assert.ok(cmp.otherStores.some((o) => o.store === 'Ашан' && o.price === 115));
+});
+
+test('scanStoresInBackgroundTabs respects excludeStore, checks Lavka DB, and rejectCompetitorMatch hides rejected offers', async () => {
+  const openedUrls = [];
+  const storageData = {
+    lqs_price_db_v1: {
+      bonduelle_young_400: {
+        slug: 'bonduelle_young_400',
+        title: 'Горошек зелёный молодой Bonduelle 400 г',
+        amount: '400 г',
+        lastPrice: 149,
+        minPrice: 139
+      }
+    }
+  };
+
+  const chromeMock = {
+    runtime: { lastError: null, getURL: (p) => `chrome-extension://test/${p}` },
+    storage: {
+      local: {
+        get: (keys, cb) => {
+          const out = {};
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const k of list) if (k in storageData) out[k] = storageData[k];
+          cb(out);
+        },
+        set: (obj, cb) => {
+          Object.assign(storageData, obj || {});
+          if (cb) cb();
+        }
+      }
+    },
+    tabs: {
+      onUpdated: { addListener: () => {}, removeListener: () => {} },
+      get: (id, cb) => cb({ id, status: 'complete' }),
+      create: (opts, cb) => {
+        const id = 1500 + openedUrls.length;
+        openedUrls.push({ id, url: opts.url });
+        cb({ id, status: 'complete' });
+      },
+      sendMessage: (_tabId, _msg, cb) => {
+        cb({
+          ok: true,
+          store: 'Пятёрочка',
+          offers: [
+            {
+              store: 'Пятёрочка',
+              title: 'Горошек зелёный молодой Bonduelle 400 г',
+              amount: '400 г',
+              price: 135,
+              url: 'https://5ka.ru/product/bonduelle-young-400'
+            }
+          ],
+          diagnostic: { status: 'ok', reason: 'ok', message: '' }
+        });
+      },
+      remove: (_id, cb) => { if (cb) cb(); }
+    }
+  };
+
+  const sandbox = {
+    chrome: chromeMock,
+    console,
+    URL,
+    URLSearchParams,
+    AbortController,
+    Date,
+    Math,
+    JSON,
+    Map,
+    Set,
+    Promise,
+    RegExp,
+    Array,
+    Object,
+    Number,
+    String,
+    Boolean,
+    setTimeout: (fn) => { fn(); return 1; },
+    clearTimeout: () => {},
+    fetch: async () => ({ ok: false, status: 503, text: async () => '', json: async () => ({}) })
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  const ctx = vm.createContext(sandbox);
+
+  for (const rel of ['shared/config.js', 'shared/utils.js', 'shared/product-matcher.js', 'bg/price-radar.js']) {
+    vm.runInContext(fs.readFileSync(path.join(extDir, rel), 'utf8'), ctx);
+  }
+  sandbox.LQS_BG_DEPS = {
+    startSwKeepAlive: () => () => {},
+    getBackendOfflineUntilTs: () => Date.now() + 60000,
+    probeDirectRetailStoresForProduct: async () => []
+  };
+  const radar = sandbox.LQS_PRICE_RADAR;
+  radar.resetRadarRuntimeState();
+
+  // Launch scan from Магнит -> must NOT open magnit.ru, should open pyaterochka & return Lavka + Пятёрочка
+  const res = await radar.scanStoresInBackgroundTabs({
+    title: 'Горошек зелёный молодой Bonduelle 400 г',
+    amount: '400 г',
+    price: 159,
+    excludeStore: 'Магнит',
+    stores: ['magnit', 'pyaterochka'],
+    forceRefresh: true
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.excludeStore, 'magnit');
+  assert.equal(openedUrls.some((u) => u.url.includes('magnit.ru')), false);
+  assert.equal(openedUrls.some((u) => u.url.includes('5ka.ru')), true);
+  assert.equal(res.comparisons.lavka?.price, 149);
+  assert.ok(res.comparisons.otherStores.some((o) => o.store === 'Пятёрочка' && o.price === 135));
+
+  // Reject Пятёрочка offer -> should disappear from findLocalComparisonsForStoreProduct
+  const rej = await radar.rejectCompetitorMatch({
+    sourceTitle: 'Горошек зелёный молодой Bonduelle 400 г',
+    rejectedUrl: 'https://5ka.ru/product/bonduelle-young-400',
+    rejectedTitle: 'Горошек зелёный молодой Bonduelle 400 г'
+  });
+  assert.equal(rej.ok, true);
+
+  const cmpAfter = await radar.findLocalComparisonsForStoreProduct({
+    store: 'Магнит',
+    title: 'Горошек зелёный молодой Bonduelle 400 г',
+    amount: '400 г',
+    price: 159
+  });
+  assert.equal(cmpAfter.otherStores.some((o) => o.store === 'Пятёрочка'), false);
+});

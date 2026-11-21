@@ -11,6 +11,8 @@
 
   const {
     normalizeTitleKey,
+    parseVolumeOrWeightGrams,
+    computePricePerKgOrLiter,
     isSearchResultMatchingProduct,
     decodeHtmlEntities
   } = root.LQS_MATCHER;
@@ -29,7 +31,9 @@
   const CIRCUIT_BREAKER_KEY = STORAGE_KEYS.CIRCUIT_BREAKER || 'lqs_circuit_breaker_v1';
   const RADAR_SCAN_LOG_KEY = STORAGE_KEYS.RADAR_SCAN_LOG || 'lqs_radar_scan_log_v1';
   const PRODUCT_LINKS_KEY = STORAGE_KEYS.PRODUCT_LINKS || 'lqs_product_links_v1';
+  const REJECTED_MATCHES_KEY = STORAGE_KEYS.REJECTED_MATCHES || 'lqs_rejected_matches_v1';
   const MAX_LOCAL_PRICE_DB_ITEMS = LIMITS.MAX_LOCAL_PRICE_DB_ITEMS;
+  const MAX_LOCAL_EXT_STORE_OFFERS = LIMITS.MAX_LOCAL_EXT_STORE_OFFERS || 3000;
   const AUTO_RADAR_TTL_MS = LIMITS.AUTO_RADAR_TTL_MS || (24 * 60 * 60 * 1000);
   const AUTO_RADAR_COOLDOWN_MS = LIMITS.AUTO_RADAR_COOLDOWN_MS || (15 * 1000);
 
@@ -659,8 +663,17 @@
       const authoritativeTitle = summary.title || fullCardTitle || '';
       const authoritativeAmount = summary.amount || amount || '';
       const authoritativeBrand = summary.brand || brand || '';
-      const extList = await getExternalStoreOffersList();
-      const matchedExt = findMatchingExternalStoreOffersFromList(extList, authoritativeTitle, authoritativeAmount);
+      const [extList, backendMatchedExt] = await Promise.all([
+        getExternalStoreOffersList(),
+        fetchExternalOffersMatchFromBackend({
+          title: authoritativeTitle,
+          brand: authoritativeBrand,
+          amount: authoritativeAmount,
+          excludeStore: 'Яндекс Лавка'
+        })
+      ]);
+      const localMatchedExt = findMatchingExternalStoreOffersFromList(extList, authoritativeTitle, authoritativeAmount);
+      const matchedExt = mergeUniqueStoreOffers(localMatchedExt, backendMatchedExt);
 
       let combinedOffers = mergeUniqueStoreOffers(summary.competitorOffers || [], matchedExt);
       combinedOffers = sanitizeCompetitorOffersForProduct(
@@ -681,6 +694,9 @@
           console.warn('[LQS PriceRadar] Direct retail stores probe failed:', authoritativeTitle, err?.message || err);
         }
       }
+
+      const rejectedSet = await getRejectedMatchesForProduct(authoritativeTitle);
+      combinedOffers = filterRejectedOffers(combinedOffers, rejectedSet);
 
       summary.competitorOffers = combinedOffers;
       const priced = combinedOffers.filter((o) => o.price && o.price > 0);
@@ -721,6 +737,217 @@
     });
   }
 
+  function normalizeStoreIdForRadar(rawStore) {
+    const s = String(rawStore || '').trim().toLowerCase().replace(/ё/g, 'е');
+    if (!s) return '';
+    if (s.includes('магнит') || s.includes('magnit')) return 'magnit';
+    if (s.includes('пятероч') || s.includes('5ka') || s.includes('pyaterochka')) return 'pyaterochka';
+    if (s.includes('перекрест') || s.includes('perekrestok') || s.includes('впрок') || s.includes('vprok')) return 'perekrestok';
+    if (s.includes('вкусвилл') || s.includes('vkusvill')) return 'vkusvill';
+    if (s.includes('ашан') || s.includes('auchan')) return 'auchan';
+    if (s.includes('лента') || s.includes('lenta')) return 'lenta';
+    if (s.includes('купер') || s.includes('kuper') || s.includes('сбермаркет')) return 'kuper';
+    if (s.includes('лавка') || s.includes('lavka')) return 'lavka';
+    return s;
+  }
+
+  function cleanOfferUrlForKey(url) {
+    const raw = String(url || '').trim();
+    if (!raw) return '';
+    return raw.split('#')[0];
+  }
+
+  async function getLocalRejectedMatchesMap() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([REJECTED_MATCHES_KEY], (res) => {
+        const raw = res && res[REJECTED_MATCHES_KEY];
+        resolve(raw && typeof raw === 'object' ? { ...raw } : {});
+      });
+    });
+  }
+
+  async function getRejectedMatchesForProduct(sourceTitle) {
+    const sourceKey = normalizeTitleKey(sourceTitle);
+    const out = new Set();
+    if (!sourceKey) return out;
+
+    const localMap = await getLocalRejectedMatchesMap();
+    const localList = Array.isArray(localMap[sourceKey]) ? localMap[sourceKey] : [];
+    for (const item of localList) {
+      if (item) out.add(String(item));
+    }
+
+    if (Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0) && typeof getBgDeps().getBackendAuthHeaders === 'function') {
+      try {
+        const settings = await getSettings();
+        const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+        if (backendUrl) {
+          const resp = await fetchWithTimeout(
+            `${backendUrl}/api/external-offers/rejected?title=${encodeURIComponent(sourceTitle)}`,
+            { method: 'GET', headers: await getBgDeps().getBackendAuthHeaders(backendUrl) },
+            1000
+          );
+          if (resp && resp.ok) {
+            const data = await resp.json();
+            if (data && Array.isArray(data.items)) {
+              for (const item of data.items) {
+                if (item) out.add(String(item));
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore offline backend
+      }
+    }
+    return out;
+  }
+
+  function filterRejectedOffers(offers, rejectedSet) {
+    if (!Array.isArray(offers) || offers.length === 0) return [];
+    if (!rejectedSet || rejectedSet.size === 0) return offers;
+    return offers.filter((o) => {
+      if (!o) return false;
+      const u = cleanOfferUrlForKey(o.url);
+      const nt = normalizeTitleKey(o.title || '');
+      if (u && rejectedSet.has(u)) return false;
+      if (nt && rejectedSet.has(nt)) return false;
+      return true;
+    });
+  }
+
+  async function rejectCompetitorMatch({ sourceTitle = '', sourceSlug = '', rejectedUrl = '', rejectedTitle = '' } = {}) {
+    const cleanSourceTitle = String(sourceTitle || '').trim();
+    const sourceKey = normalizeTitleKey(cleanSourceTitle);
+    const cleanUrl = cleanOfferUrlForKey(rejectedUrl);
+    const normRejTitle = normalizeTitleKey(rejectedTitle);
+    if (!sourceKey || (!cleanUrl && !normRejTitle)) {
+      return { ok: false, error: 'Недостаточно данных для отклонения совпадения' };
+    }
+
+    const localMap = await getLocalRejectedMatchesMap();
+    const existing = Array.isArray(localMap[sourceKey]) ? [...localMap[sourceKey]] : [];
+    if (cleanUrl && !existing.includes(cleanUrl)) existing.push(cleanUrl);
+    if (normRejTitle && !existing.includes(normRejTitle)) existing.push(normRejTitle);
+    localMap[sourceKey] = existing.slice(-100);
+    await new Promise((resolve) => {
+      chrome.storage.local.set({ [REJECTED_MATCHES_KEY]: localMap }, resolve);
+    });
+
+    // Сразу удаляем отклонённый оффер из кэшированной сводки товара Лавки, если он там есть
+    if (sourceSlug) {
+      const cleanSlug = String(sourceSlug).trim().toLowerCase();
+      const priceDb = await getLocalPriceDb();
+      if (priceDb[cleanSlug] && Array.isArray(priceDb[cleanSlug].competitorOffers)) {
+        const rejSet = new Set(existing);
+        priceDb[cleanSlug].competitorOffers = filterRejectedOffers(priceDb[cleanSlug].competitorOffers, rejSet);
+        const priced = priceDb[cleanSlug].competitorOffers.filter((o) => o && o.price > 0);
+        priceDb[cleanSlug].competitorMinPrice = priced.length > 0 ? Math.min(...priced.map((o) => o.price)) : null;
+        priceDb[cleanSlug].competitorSummary = priced.length > 0
+          ? priced.slice(0, 4).map((o) => `${o.store}: ${o.price} ₽`).join(', ')
+          : null;
+        await new Promise((resolve) => chrome.storage.local.set({ [PRICE_DB_KEY]: priceDb }, resolve));
+      }
+    }
+
+    let syncedToSqlite = false;
+    if (Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0) && typeof getBgDeps().getBackendAuthHeaders === 'function') {
+      try {
+        const settings = await getSettings();
+        const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+        if (backendUrl) {
+          const resp = await fetchWithTimeout(
+            `${backendUrl}/api/external-offers/reject-match`,
+            {
+              method: 'POST',
+              headers: await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+              body: JSON.stringify({
+                sourceTitle: cleanSourceTitle,
+                rejectedUrl: cleanUrl,
+                rejectedTitle: String(rejectedTitle || '').trim()
+              })
+            },
+            1800
+          );
+          syncedToSqlite = Boolean(resp && resp.ok);
+        }
+      } catch (err) {
+        console.warn('[LQS PriceRadar] Backend /api/external-offers/reject-match failed:', err?.message || err);
+      }
+    }
+
+    return { ok: true, sourceKey, rejectedCount: existing.length, syncedToSqlite };
+  }
+
+  async function syncExternalOffersToBackend(storeName, cleanOffers = []) {
+    if (!Array.isArray(cleanOffers) || cleanOffers.length === 0) return null;
+    if (Date.now() <= (getBgDeps().getBackendOfflineUntilTs?.() || 0)) return null;
+    if (typeof getBgDeps().getBackendAuthHeaders !== 'function') return null;
+    try {
+      const settings = await getSettings();
+      const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+      if (!backendUrl) return null;
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/external-offers/batch`,
+        {
+          method: 'POST',
+          headers: await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ store: storeName || '', offers: cleanOffers.slice(0, 500) })
+        },
+        2200
+      );
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        if (data && data.status === 'ok') {
+          return {
+            savedCount: Number(data.savedCount || 0),
+            totalInSqlite: Number(data.totalInSqlite || 0)
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[LQS PriceRadar] Backend /api/external-offers/batch failed:', err?.message || err);
+      getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+    }
+    return null;
+  }
+
+  async function fetchExternalOffersMatchFromBackend({ title = '', brand = '', amount = '', excludeStore = '' } = {}) {
+    const cleanTitle = String(title || '').trim();
+    if (!cleanTitle || cleanTitle.length < 3) return [];
+    if (Date.now() <= (getBgDeps().getBackendOfflineUntilTs?.() || 0)) return [];
+    if (typeof getBgDeps().getBackendAuthHeaders !== 'function') return [];
+    try {
+      const settings = await getSettings();
+      const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+      if (!backendUrl) return [];
+      const resp = await fetchWithTimeout(
+        `${backendUrl}/api/external-offers/match`,
+        {
+          method: 'POST',
+          headers: await getBgDeps().getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            title: cleanTitle,
+            brand: String(brand || '').trim(),
+            amount: String(amount || '').trim(),
+            excludeStore: String(excludeStore || '').trim()
+          })
+        },
+        1500
+      );
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        if (data && data.status === 'ok' && Array.isArray(data.offers)) {
+          return data.offers;
+        }
+      }
+    } catch (err) {
+      console.warn('[LQS PriceRadar] Backend /api/external-offers/match failed:', err?.message || err);
+      getBgDeps().setBackendOfflineUntilTs?.(Date.now() + 10000);
+    }
+    return [];
+  }
+
   async function recordExternalStoreOffers(storeName, offers = []) {
     if (!Array.isArray(offers) || offers.length === 0) return { savedCount: 0 };
     const current = await getExternalStoreOffersList();
@@ -732,6 +959,7 @@
     }
     const nowIso = new Date().toISOString();
     let addedOrUpdated = 0;
+    const cleanBatch = [];
     for (const raw of offers) {
       if (!raw || !raw.title || !raw.price || Number(raw.price) <= 0) continue;
       const cleanOffer = {
@@ -739,6 +967,7 @@
         sourceRetailer: raw.sourceRetailer || null,
         goodId: raw.goodId || null,
         title: String(raw.title).trim(),
+        brand: raw.brand ? String(raw.brand).trim() : '',
         amount: raw.amount || '',
         price: Math.round(Number(raw.price)),
         oldPrice: raw.oldPrice ? Math.round(Number(raw.oldPrice)) : null,
@@ -747,12 +976,16 @@
       };
       const k = `${cleanOffer.store}|${cleanOffer.url || normalizeTitleKey(cleanOffer.title)}`;
       byKey.set(k, cleanOffer);
+      cleanBatch.push(cleanOffer);
       addedOrUpdated += 1;
     }
-    const finalArr = Array.from(byKey.values()).slice(-800);
+    const finalArr = Array.from(byKey.values()).slice(-MAX_LOCAL_EXT_STORE_OFFERS);
     await new Promise((resolve) => {
       chrome.storage.local.set({ [EXT_STORE_DB_KEY]: finalArr }, resolve);
     });
+
+    // Долгосрочная запись всех собранных офферов в SQLite на локальный сервер (без лимита 800)
+    const backendSync = await syncExternalOffersToBackend(storeName, cleanBatch);
 
     // Сразу обогащаем совпадающие товары в базе цен Лавки (lqs_price_db_v1)
     const priceDb = await getLocalPriceDb();
@@ -774,7 +1007,15 @@
     if (dbChanged) {
       await new Promise((resolve) => chrome.storage.local.set({ [PRICE_DB_KEY]: priceDb }, resolve));
     }
-    return { ok: true, savedCount: addedOrUpdated, totalExternalOffers: finalArr.length };
+    const totalExternalOffers = backendSync && Number.isFinite(backendSync.totalInSqlite) && backendSync.totalInSqlite > 0
+      ? backendSync.totalInSqlite
+      : finalArr.length;
+    return {
+      ok: true,
+      savedCount: addedOrUpdated,
+      totalExternalOffers,
+      storedInSqlite: Boolean(backendSync)
+    };
   }
 
   function findMatchingExternalStoreOffersFromList(extList, productTitle, productAmount = '') {
@@ -1768,15 +2009,21 @@
         return { ok: false, error: 'Не удалось определить название товара для поиска', storeDiagnostics: [] };
       }
 
+      const excludeStoreId = normalizeStoreIdForRadar(payload.excludeStore || '');
       const rawStores = Array.isArray(payload.stores) && payload.stores.length > 0
         ? payload.stores
         : (Array.isArray(settings.liveRadarStores) && settings.liveRadarStores.length > 0
             ? settings.liveRadarStores
             : ['magnit', 'pyaterochka', 'kuper']);
       const selectedStores = rawStores
-        .filter((s) => Boolean(LIVE_RADAR_STORE_URLS[s]))
+        .map((s) => normalizeStoreIdForRadar(s) || s)
+        .filter((s) => Boolean(LIVE_RADAR_STORE_URLS[s]) && (!excludeStoreId || s !== excludeStoreId))
+        .filter((s, idx, arr) => arr.indexOf(s) === idx)
         .slice(0, 3);
-      if (selectedStores.length === 0) selectedStores.push('kuper');
+      if (selectedStores.length === 0) {
+        const fallbackStore = Object.keys(LIVE_RADAR_STORE_URLS).find((id) => id !== excludeStoreId) || 'kuper';
+        selectedStores.push(fallbackStore);
+      }
 
       const rememberedLinks = slug ? await getRememberedProductLinks(slug) : {};
       const results = [];
@@ -1862,20 +2109,35 @@
       }
       lastRadarAutoFinishTs = nowMs;
 
-      const summary = slug
+      const summary = slug && !excludeStoreId
         ? await getProductPriceIntelligence(slug, title, price, oldPrice, amount, accountId, true, imageKey, brand)
         : null;
       if (summary && slug && hadNonFatalCheck) {
         summary.lastRadarScanAt = new Date(nowMs).toISOString();
       }
-      const matchedCount = summary && Array.isArray(summary.competitorOffers)
-        ? summary.competitorOffers.filter((o) => o && o.price > 0).length
-        : 0;
+
+      // При запуске радара с внешней сети ищем также лучшую цену в Яндекс Лавке и других сетях
+      const comparisons = excludeStoreId
+        ? await findLocalComparisonsForStoreProduct({
+            store: payload.excludeStore || excludeStoreId,
+            title,
+            brand,
+            amount,
+            price
+          })
+        : null;
+
+      const matchedCount = comparisons
+        ? ((comparisons.lavka ? 1 : 0) + (comparisons.otherStores ? comparisons.otherStores.length : 0))
+        : (summary && Array.isArray(summary.competitorOffers)
+            ? summary.competitorOffers.filter((o) => o && o.price > 0).length
+            : 0);
 
       return {
         ok: true,
         skipped: false,
         isAuto,
+        excludeStore: excludeStoreId || null,
         query: fullQuery,
         storesChecked,
         storeDiagnostics,
@@ -1883,7 +2145,8 @@
         harvestedCount,
         matchedCount,
         lastRadarScanAt: slug && hadNonFatalCheck ? new Date(nowMs).toISOString() : null,
-        summary
+        summary,
+        comparisons
       };
     } finally {
       radarActiveScanCount = Math.max(0, radarActiveScanCount - 1);
@@ -1901,16 +2164,22 @@
   }
 
 
-  async function findLocalComparisonsForStoreProduct({ store = '', title = '', amount = '', price = null } = {}) {
+  async function findLocalComparisonsForStoreProduct({ store = '', title = '', brand = '', amount = '', price = null } = {}) {
     const cleanTitle = String(title || '').trim();
     const cleanStore = String(store || '').trim().toLowerCase();
     if (!cleanTitle || cleanTitle.length < 3) {
       return { ok: true, lavka: null, otherStores: [] };
     }
 
-    const [priceDb, extList] = await Promise.all([
+    const [priceDb, extList, backendMatchedExt] = await Promise.all([
       getLocalPriceDb(),
-      getExternalStoreOffersList()
+      getExternalStoreOffersList(),
+      fetchExternalOffersMatchFromBackend({
+        title: cleanTitle,
+        brand: brand || '',
+        amount: amount || '',
+        excludeStore: store || ''
+      })
     ]);
 
     // 1. Find best matching Yandex Lavka entry in local price DB
@@ -1935,8 +2204,49 @@
       }
     }
 
-    // 2. Find matching external store offers (excluding current store)
-    const matchedExt = findMatchingExternalStoreOffersFromList(extList, cleanTitle, amount || '');
+    // 1b. If Lavka not found in local storage, check SQLite /api/price/list when backend is online
+    if (!bestLavka && Date.now() > (getBgDeps().getBackendOfflineUntilTs?.() || 0) && typeof getBgDeps().getBackendAuthHeaders === 'function') {
+      try {
+        const settings = await getSettings();
+        const backendUrl = (settings.backendUrl || '').replace(/\/$/, '');
+        if (backendUrl) {
+          const rList = await fetchWithTimeout(
+            `${backendUrl}/api/price/list?limit=500`,
+            { method: 'GET', headers: await getBgDeps().getBackendAuthHeaders(backendUrl) },
+            1200
+          );
+          if (rList && rList.ok) {
+            const jList = await rList.json();
+            for (const entry of (jList && Array.isArray(jList.items) ? jList.items : [])) {
+              if (!entry || !entry.title) continue;
+              const candidatePrice = Number(entry.lastPrice || entry.minPrice || 0);
+              if (!Number.isFinite(candidatePrice) || candidatePrice <= 0) continue;
+              const check = isSearchResultMatchingProduct(entry.title, entry.amount || '', cleanTitle, amount || '');
+              if (check.isSameProduct && check.isSameVolume) {
+                if (!bestLavka || candidatePrice < bestLavka.price) {
+                  const s = String(entry.slug || '').trim();
+                  bestLavka = {
+                    store: 'Яндекс Лавка',
+                    slug: s,
+                    title: entry.title,
+                    price: Math.round(candidatePrice),
+                    minPrice: entry.minPrice ? Math.round(Number(entry.minPrice)) : null,
+                    url: s ? `https://lavka.yandex.ru/good/${encodeURIComponent(s)}` : 'https://lavka.yandex.ru/'
+                  };
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore offline backend
+      }
+    }
+
+    // 2. Find matching external store offers (excluding current store), combining local cache + SQLite + filtering rejected
+    const rejectedSet = await getRejectedMatchesForProduct(cleanTitle);
+    const localMatchedExt = findMatchingExternalStoreOffersFromList(extList, cleanTitle, amount || '');
+    const matchedExt = filterRejectedOffers(mergeUniqueStoreOffers(localMatchedExt, backendMatchedExt), rejectedSet);
     const bestByStore = new Map();
     for (const offer of matchedExt) {
       if (!offer || !offer.store || !offer.price) continue;
@@ -1956,10 +2266,54 @@
     }
 
     const otherStores = Array.from(bestByStore.values()).sort((a, b) => a.price - b.price);
+
+    // 3. Collect similar offers (different grade/line or different weight/volume) with price per kg/L
+    const similarByStore = new Map();
+    const numPrice = Number.isFinite(Number(price)) && Number(price) > 0 ? Number(price) : null;
+    for (const ext of filterRejectedOffers(extList, rejectedSet)) {
+      if (!ext || !ext.title || !ext.price || !ext.store) continue;
+      const storeKey = String(ext.store).trim().toLowerCase();
+      if (cleanStore && storeKey === cleanStore) continue;
+      if (bestByStore.has(storeKey)) continue;
+      const chk = isSearchResultMatchingProduct(
+        ext.title,
+        ext.amount || '',
+        cleanTitle,
+        amount || '',
+        numPrice ? { targetPrice: numPrice, candidatePrice: ext.price } : null
+      );
+      if (chk && chk.matchQuality === 'similar') {
+        const grams = parseVolumeOrWeightGrams(ext.amount || '') || parseVolumeOrWeightGrams(ext.title || '');
+        const perUnit = chk.pricePerKgOrL || (computePricePerKgOrLiter ? computePricePerKgOrLiter(ext.price, grams) : null);
+        const existingSim = similarByStore.get(storeKey);
+        const scoreNew = perUnit || Math.round(Number(ext.price));
+        const scoreOld = existingSim ? (existingSim.pricePerKgOrL || existingSim.price) : Infinity;
+        if (!existingSim || scoreNew < scoreOld) {
+          similarByStore.set(storeKey, {
+            store: ext.store,
+            sourceRetailer: ext.sourceRetailer || null,
+            price: Math.round(Number(ext.price)),
+            oldPrice: ext.oldPrice ? Math.round(Number(ext.oldPrice)) : null,
+            url: ext.url || null,
+            title: ext.title || '',
+            amount: ext.amount || '',
+            matchQuality: 'similar',
+            mismatchReason: chk.mismatchReason || 'similar',
+            warning: chk.warning || null,
+            pricePerKgOrL: perUnit || null
+          });
+        }
+      }
+    }
+    const similarStores = Array.from(similarByStore.values())
+      .sort((a, b) => (a.pricePerKgOrL || a.price) - (b.pricePerKgOrL || b.price))
+      .slice(0, 4);
+
     return {
       ok: true,
       lavka: bestLavka,
       otherStores,
+      similarStores,
       currentPrice: Number.isFinite(Number(price)) ? Math.round(Number(price)) : null
     };
   }
@@ -2002,6 +2356,9 @@
     getRadarScanLog,
     isRadarCacheFresh,
     resetRadarRuntimeState,
+    normalizeStoreIdForRadar,
+    getRejectedMatchesForProduct,
+    rejectCompetitorMatch,
     findLocalComparisonsForStoreProduct,
     scanStoresInBackgroundTabs
   };

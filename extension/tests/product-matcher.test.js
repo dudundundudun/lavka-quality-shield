@@ -28,7 +28,10 @@ test('isSearchResultMatchingProduct enforces sugar-free, flavor modifiers, and v
     'Добрый Cola без сахара',
     '1,5 л'
   );
-  assert.deepEqual(exact, { isSameProduct: true, isSameVolume: true });
+  assert.equal(exact.isSameProduct, true);
+  assert.equal(exact.isSameVolume, true);
+  assert.equal(exact.matchQuality, 'exact');
+  assert.equal(exact.mismatchReason, null);
 
   const sugarMismatch = matcher.isSearchResultMatchingProduct(
     'Добрый Кола 1,5 л — 139 ₽',
@@ -37,6 +40,7 @@ test('isSearchResultMatchingProduct enforces sugar-free, flavor modifiers, and v
     '1,5 л'
   );
   assert.equal(sugarMismatch.isSameProduct, false);
+  assert.equal(sugarMismatch.matchQuality, 'mismatch');
 
   const flavorMismatch = matcher.isSearchResultMatchingProduct(
     'Добрый Кола Ваниль 1,5 л — 149 ₽',
@@ -45,6 +49,7 @@ test('isSearchResultMatchingProduct enforces sugar-free, flavor modifiers, and v
     '1,5 л'
   );
   assert.equal(flavorMismatch.isSameProduct, false);
+  assert.equal(flavorMismatch.matchQuality, 'mismatch');
 
   const diffVolume = matcher.isSearchResultMatchingProduct(
     'Добрый Кола 0,5 л — 89 ₽',
@@ -52,7 +57,88 @@ test('isSearchResultMatchingProduct enforces sugar-free, flavor modifiers, and v
     'Добрый Cola',
     '1,5 л'
   );
-  assert.deepEqual(diffVolume, { isSameProduct: true, isSameVolume: false });
+  assert.equal(diffVolume.isSameProduct, true);
+  assert.equal(diffVolume.isSameVolume, false);
+  assert.equal(diffVolume.matchQuality, 'similar');
+  assert.equal(diffVolume.mismatchReason, 'volume_mismatch');
+});
+
+test('smart matcher distinguishes grades/lines, processing, brands, volume 0.88-1.14, and price anomalies', () => {
+  // 1. Stop words cleaned of meaningful product distinctions
+  for (const w of ['замороженный', 'охлажденный', 'нарезка', 'банка', 'бутылка', 'стерилизованный', 'пастеризованный', 'ультрапастеризованный']) {
+    assert.equal(matcher.GENERIC_STOP_WORDS.has(w), false, `Stop word should be removed: ${w}`);
+  }
+
+  // 2. Молодой vs Нежный горошек Bonduelle -> NOT exact (similar)
+  const gradeDiff = matcher.isSearchResultMatchingProduct(
+    'Горошек зелёный нежный Bonduelle 400г',
+    '',
+    'Горошек зелёный молодой Bonduelle',
+    '400г'
+  );
+  assert.equal(gradeDiff.isSameProduct, false);
+  assert.equal(gradeDiff.matchQuality, 'similar');
+  assert.match(String(gradeDiff.mismatchReason), /^grade_mismatch:/);
+
+  // 3. Молодой vs Замороженный горошек -> mismatch
+  const procDiff = matcher.isSearchResultMatchingProduct(
+    'Горошек зелёный замороженный 400г',
+    '',
+    'Горошек зелёный молодой',
+    '400г'
+  );
+  assert.equal(procDiff.isSameProduct, false);
+  assert.equal(procDiff.matchQuality, 'mismatch');
+  assert.match(String(procDiff.mismatchReason), /^processing_mismatch:/);
+
+  // 4. Bonduelle vs Красная цена -> mismatch
+  const brandDiff = matcher.isSearchResultMatchingProduct(
+    'Горошек Красная цена 400г',
+    '',
+    'Горошек Bonduelle',
+    '400г'
+  );
+  assert.equal(brandDiff.isSameProduct, false);
+  assert.equal(brandDiff.matchQuality, 'mismatch');
+  assert.equal(brandDiff.mismatchReason, 'brand_mismatch');
+
+  // 5. Latin vs Cyrillic brand + same grade -> exact
+  const exactPeas = matcher.isSearchResultMatchingProduct(
+    'Бондюэль горошек зелёный молодой 400г',
+    '',
+    'Горошек зелёный молодой Bonduelle',
+    '400 г'
+  );
+  assert.equal(exactPeas.isSameProduct, true);
+  assert.equal(exactPeas.isSameVolume, true);
+  assert.equal(exactPeas.matchQuality, 'exact');
+  assert.equal(exactPeas.mismatchReason, null);
+
+  // 6. Narrowed volume tolerance: 400г vs 310г (ratio 0.775 < 0.88) -> not same volume, computes pricePerKgOrL
+  const narrowVol = matcher.isSearchResultMatchingProduct(
+    'Горошек зелёный молодой Bonduelle 310г',
+    '',
+    'Горошек зелёный молодой Bonduelle',
+    '400 г',
+    { candidatePrice: 124 }
+  );
+  assert.equal(narrowVol.isSameVolume, false);
+  assert.equal(narrowVol.matchQuality, 'similar');
+  assert.equal(narrowVol.pricePerKgOrL, 400);
+
+  // 7. Price anomaly (> 2.2x at same weight) -> downgraded to similar with warning
+  const anomaly = matcher.isSearchResultMatchingProduct(
+    'Горошек зелёный молодой Bonduelle 400г',
+    '',
+    'Горошек зелёный молодой Bonduelle',
+    '400 г',
+    { targetPrice: 220, candidatePrice: 89 }
+  );
+  assert.equal(anomaly.isSameProduct, false);
+  assert.equal(anomaly.isSameVolume, true);
+  assert.equal(anomaly.matchQuality, 'similar');
+  assert.equal(anomaly.mismatchReason, 'price_anomaly');
+  assert.equal(anomaly.warning, 'проверьте сорт');
 });
 
 test('decodeHtmlEntities strips tags and decodes common HTML entities', () => {

@@ -354,3 +354,104 @@ def delete_product_link_endpoint(slug: str, store_id: str):
         deleted = db.delete_product_store_link(conn, clean_slug, clean_store)
         conn.commit()
     return {"status": "ok", "slug": clean_slug, "storeId": clean_store, "deleted": deleted}
+class ExternalOfferInput(BaseModel):
+    store: Optional[str] = ""
+    sourceRetailer: Optional[str] = None
+    goodId: Optional[str] = None
+    title: str
+    brand: Optional[str] = ""
+    amount: Optional[str] = ""
+    price: float
+    oldPrice: Optional[float] = None
+    url: Optional[str] = ""
+
+
+class ExternalOffersBatchRequest(BaseModel):
+    store: Optional[str] = ""
+    offers: List[ExternalOfferInput] = Field(default_factory=list, **_ITEMS_MAX_KW)
+
+
+class ExternalOffersMatchRequest(BaseModel):
+    title: str
+    brand: Optional[str] = ""
+    amount: Optional[str] = ""
+    excludeStore: Optional[str] = ""
+    limit: int = Field(50, ge=1, le=200)
+
+
+@router.post("/api/external-offers/batch", dependencies=[Depends(verify_trusted_extension_request)])
+def save_external_offers_batch_endpoint(req: ExternalOffersBatchRequest):
+    raw_offers = [
+        it.model_dump() if hasattr(it, "model_dump") else it.dict()
+        for it in (req.offers or [])
+    ]
+    with db.get_db_connection() as conn:
+        result = db.upsert_external_store_offers_batch(
+            conn=conn,
+            offers=raw_offers,
+            default_store=req.store or "",
+        )
+        conn.commit()
+    db.log_event(
+        "EXT_OFFERS",
+        f"Saved {result['savedCount']} external offer(s) (total in SQLite: {result['totalInSqlite']})",
+    )
+    return {"status": "ok", **result}
+
+
+@router.post("/api/external-offers/match", dependencies=[Depends(verify_trusted_extension_request)])
+def match_external_offers_endpoint(req: ExternalOffersMatchRequest):
+    with db.get_db_connection() as conn:
+        offers = db.find_matching_external_store_offers(
+            conn=conn,
+            title=req.title,
+            brand=req.brand or "",
+            amount=req.amount or "",
+            exclude_store=req.excludeStore or "",
+            limit=req.limit,
+        )
+        total = db.count_external_store_offers(conn)
+    return {"status": "ok", "count": len(offers), "offers": offers, "totalInSqlite": total}
+
+
+@router.get("/api/external-offers/history", dependencies=[Depends(verify_trusted_extension_request)])
+def get_external_offer_history_endpoint(
+    url: Optional[str] = None,
+    store: Optional[str] = None,
+    title: Optional[str] = None,
+    days: int = Query(90, ge=0, le=3650),
+):
+    with db.get_db_connection() as conn:
+        series = db.get_external_offer_history(
+            conn=conn,
+            url=url or "",
+            store=store or "",
+            title=title or "",
+            days=days,
+        )
+    return {"status": "ok", **series}
+class RejectCompetitorMatchRequest(BaseModel):
+    sourceTitle: str
+    rejectedUrl: Optional[str] = ""
+    rejectedTitle: Optional[str] = ""
+
+
+@router.post("/api/external-offers/reject-match", dependencies=[Depends(verify_trusted_extension_request)])
+def reject_competitor_match_endpoint(req: RejectCompetitorMatchRequest):
+    with db.get_db_connection() as conn:
+        result = db.add_rejected_product_match(
+            conn=conn,
+            source_title=req.sourceTitle,
+            rejected_url=req.rejectedUrl or "",
+            rejected_title=req.rejectedTitle or "",
+        )
+        conn.commit()
+    db.log_event("EXT_OFFERS", f"Rejected match for '{result.get('sourceKey', '')}': {len(result.get('rejected', []))} key(s)")
+    return {"status": "ok", **result}
+
+
+@router.get("/api/external-offers/rejected", dependencies=[Depends(verify_trusted_extension_request)])
+def list_rejected_matches_endpoint(title: str = Query(..., min_length=1)):
+    with db.get_db_connection() as conn:
+        items = db.list_rejected_product_matches(conn, title)
+    return {"status": "ok", "count": len(items), "items": items}

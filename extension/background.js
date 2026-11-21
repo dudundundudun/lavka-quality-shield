@@ -94,6 +94,7 @@ const {
   findMatchingExternalStoreOffersFromList,
   mergeUniqueStoreOffers,
   auditCartCompetitorsAndAccounts,
+  rejectCompetitorMatch,
   findLocalComparisonsForStoreProduct,
   scanStoresInBackgroundTabs
 } = globalThis.LQS_PRICE_RADAR;
@@ -1912,7 +1913,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return false;
 
   if (msg.type === 'LQS_ANALYZE_PRODUCT') {
-    if (!isTrustedLavkaOrPopupSender(sender)) {
+    if (!isTrustedExternalStoreSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }
@@ -1934,7 +1935,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_SCAN_STORES_LIVE') {
-    if (!isTrustedLavkaOrPopupSender(sender)) {
+    if (!isTrustedExternalStoreSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }
@@ -1966,8 +1967,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'LQS_REJECT_COMPETITOR_MATCH') {
+    if (!isTrustedExternalStoreSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    rejectCompetitorMatch(msg.payload || msg)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
   if (msg.type === 'LQS_GET_PRICE_INTEL') {
-    if (!isTrustedLavkaOrPopupSender(sender)) {
+    if (!isTrustedExternalStoreSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }
@@ -2242,7 +2254,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_CACHED_AI_VERDICT') {
-    if (!isTrustedLavkaOrPopupSender(sender)) {
+    if (!isTrustedExternalStoreSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }
@@ -2369,7 +2381,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_GET_PRICE_HISTORY') {
-    if (!isTrustedLavkaOrPopupSender(sender)) {
+    if (!isTrustedExternalStoreSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }
@@ -2380,7 +2392,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'LQS_TOGGLE_WATCHLIST') {
-    if (!isTrustedLavkaOrPopupSender(sender)) {
+    if (!isTrustedExternalStoreSender(sender)) {
       sendResponse({ ok: false, error: 'Forbidden' });
       return true;
     }

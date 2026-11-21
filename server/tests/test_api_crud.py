@@ -464,5 +464,157 @@ class TestApiCrudEndpoints(unittest.TestCase):
         self.assertIn("kuper", r_get2.json().get("links", {}))
 
 
+    def test_external_offers_batch_match_history_and_unlimited_storage(self):
+        # Unauthenticated requests must be rejected
+        self.assertIn(
+            self.client.post("/api/external-offers/batch", json={"store": "Магнит", "offers": []}).status_code,
+            (401, 403),
+        )
+        self.assertIn(
+            self.client.post("/api/external-offers/match", json={"title": "Молоко 930 мл"}).status_code,
+            (401, 403),
+        )
+        self.assertIn(
+            self.client.get("/api/external-offers/history", params={"title": "Молоко"}).status_code,
+            (401, 403),
+        )
+
+        # Save > 800 offers across multiple batches to prove there is no 800-item SQLite cap
+        batch1 = [
+            {
+                "store": "Магнит",
+                "title": f"Тестовый продукт Магнит #{i} 500 г",
+                "brand": "ТестБренд",
+                "amount": "500 г",
+                "price": 100 + (i % 50),
+                "url": f"https://magnit.ru/product/{10000 + i}",
+            }
+            for i in range(450)
+        ]
+        batch2 = [
+            {
+                "store": "Пятёрочка",
+                "title": f"Тестовый продукт Пятёрочка #{i} 500 г",
+                "brand": "ТестБренд",
+                "amount": "500 г",
+                "price": 110 + (i % 50),
+                "url": f"https://5ka.ru/product/{20000 + i}",
+            }
+            for i in range(450)
+        ]
+        r1 = self.client.post("/api/external-offers/batch", json={"store": "Магнит", "offers": batch1}, headers=self.headers)
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual(r1.json()["savedCount"], 450)
+        self.assertEqual(r1.json()["totalInSqlite"], 450)
+
+        r2 = self.client.post("/api/external-offers/batch", json={"store": "Пятёрочка", "offers": batch2}, headers=self.headers)
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.json()["savedCount"], 450)
+        self.assertEqual(r2.json()["totalInSqlite"], 900)
+
+        # Save matching offers across stores for Черноголовка Кола 1,5 л
+        r_cola = self.client.post(
+            "/api/external-offers/batch",
+            json={
+                "store": "Пятёрочка",
+                "offers": [
+                    {
+                        "store": "Пятёрочка",
+                        "title": "Напиток Черноголовка Кола 1,5 л",
+                        "brand": "Черноголовка",
+                        "amount": "1,5 л",
+                        "price": 129,
+                        "oldPrice": 159,
+                        "url": "https://5ka.ru/product/chernogolovka-cola-15l",
+                    },
+                    {
+                        "store": "Магнит",
+                        "title": "Напиток Черноголовка Кола 1,5 л",
+                        "brand": "Черноголовка",
+                        "amount": "1,5 л",
+                        "price": 119,
+                        "url": "https://magnit.ru/product/chernogolovka-cola-15l",
+                    },
+                ],
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_cola.status_code, 200)
+        self.assertEqual(r_cola.json()["totalInSqlite"], 902)
+
+        # Match excluding Пятёрочка -> should return Магнит only
+        r_match = self.client.post(
+            "/api/external-offers/match",
+            json={
+                "title": "Напиток Черноголовка Кола 1,5 л",
+                "brand": "Черноголовка",
+                "amount": "1,5 л",
+                "excludeStore": "Пятёрочка",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_match.status_code, 200)
+        m_data = r_match.json()
+        self.assertEqual(m_data["count"], 1)
+        self.assertEqual(m_data["offers"][0]["store"], "Магнит")
+        self.assertEqual(m_data["offers"][0]["price"], 119)
+
+        # History endpoint by URL returns daily point and stats
+        r_hist = self.client.get(
+            "/api/external-offers/history",
+            params={"url": "https://5ka.ru/product/chernogolovka-cola-15l", "days": 90},
+            headers=self.headers,
+        )
+        self.assertEqual(r_hist.status_code, 200)
+        h_data = r_hist.json()
+        self.assertEqual(h_data["store"], "Пятёрочка")
+        self.assertEqual(len(h_data["points"]), 1)
+        self.assertEqual(h_data["stats"]["lastPrice"], 129.0)
+
+
+    def test_reject_competitor_match_persists_and_filters_match_results(self):
+        self.client.post(
+            "/api/external-offers/batch",
+            json={
+                "store": "Магнит",
+                "offers": [
+                    {
+                        "store": "Магнит",
+                        "title": "Горошек зелёный молодой Bonduelle 400 г",
+                        "amount": "400 г",
+                        "price": 129,
+                        "url": "https://magnit.ru/product/bonduelle-400",
+                    }
+                ],
+            },
+            headers=self.headers,
+        )
+        r_before = self.client.post(
+            "/api/external-offers/match",
+            json={"title": "Горошек зелёный молодой Bonduelle 400 г", "amount": "400 г"},
+            headers=self.headers,
+        )
+        self.assertEqual(r_before.json()["count"], 1)
+
+        r_rej = self.client.post(
+            "/api/external-offers/reject-match",
+            json={
+                "sourceTitle": "Горошек зелёный молодой Bonduelle 400 г",
+                "rejectedUrl": "https://magnit.ru/product/bonduelle-400",
+                "rejectedTitle": "Горошек зелёный молодой Bonduelle 400 г",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_rej.status_code, 200)
+        self.assertGreaterEqual(r_rej.json()["saved"], 1)
+
+        r_after = self.client.post(
+            "/api/external-offers/match",
+            json={"title": "Горошек зелёный молодой Bonduelle 400 г", "amount": "400 г"},
+            headers=self.headers,
+        )
+        self.assertEqual(r_after.json()["count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

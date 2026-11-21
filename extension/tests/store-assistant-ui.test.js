@@ -174,8 +174,30 @@ test('detectAssistantStorePage matches Magnit, Pyaterochka, and Perekrestok prod
   assert.equal(ui.detectAssistantStorePage({ hostname: 'magnit.ru', pathname: '/search' }), null);
   assert.equal(ui.detectAssistantStorePage({ hostname: '5ka.ru', pathname: '/catalog/' }), null);
   assert.equal(ui.detectAssistantStorePage({ hostname: 'perekrestok.ru', pathname: '/cat/114' }), null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ui.detectAssistantStorePage({ hostname: 'www.vprok.ru', pathname: '/product/bonduelle-400g' }))),
+    { id: 'perekrestok', store: 'Перекрёсток' }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ui.detectAssistantStorePage({ hostname: 'vkusvill.ru', pathname: '/goods/moloko-3-2-930ml-12345.html' }))),
+    { id: 'vkusvill', store: 'ВкусВилл' }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ui.detectAssistantStorePage({ hostname: 'www.auchan.ru', pathname: '/product/goroshek-bonduelle-400g/' }))),
+    { id: 'auchan', store: 'Ашан' }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ui.detectAssistantStorePage({ hostname: 'lenta.com', pathname: '/product/doshirak-govyadina-90g-12345/' }))),
+    { id: 'lenta', store: 'Лента' }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ui.detectAssistantStorePage({ hostname: 'kuper.ru', pathname: '/pyaterochka/products/123-moloko' }))),
+    { id: 'kuper', store: 'Купер' }
+  );
+
   assert.equal(ui.detectAssistantStorePage({ hostname: 'lavka.yandex.ru', pathname: '/good/moloko' }), null);
-  assert.equal(ui.detectAssistantStorePage({ hostname: 'kuper.ru', pathname: '/products/123' }), null);
+  assert.equal(ui.detectAssistantStorePage({ hostname: 'kuper.ru', pathname: '/multisearch' }), null);
+  assert.equal(ui.detectAssistantStorePage({ hostname: 'vkusvill.ru', pathname: '/catalog/' }), null);
 });
 
 test('extractStoreProductFromDoc & buildStoreAssistantModel compute unit prices, traffic light, and comparisons', () => {
@@ -390,4 +412,139 @@ test('store-assistant-ui.js is MV3 CSP clean, registered in manifest, and guarde
     /msg\.type === 'LQS_COMPARE_STORE_PRODUCT'\)[\s\S]{0,160}isTrustedExternalStoreSender\(sender\)/,
     'LQS_COMPARE_STORE_PRODUCT must be guarded by isTrustedExternalStoreSender(sender)'
   );
+});
+
+function findInTree(node, predicate) {
+  if (!node) return null;
+  if (predicate(node)) return node;
+  for (const ch of (node.children || [])) {
+    const found = findInTree(ch, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
+test('Step 5: inline mount inserts widget after store anchor (Magnit & Pyaterochka) and falls back to floating when missing', () => {
+  const { LQS_STORE_ASSISTANT_UI: ui } = loadAssistantStack();
+
+  // 1. Magnit inline mount after buy block
+  const rightCol = createFakeElement('DIV', '');
+  rightCol.insertBefore = function (newNode, refNode) {
+    newNode.parentElement = this;
+    const idx = refNode ? this.children.indexOf(refNode) : -1;
+    if (idx >= 0) this.children.splice(idx, 0, newNode);
+    else this.children.push(newNode);
+    return newNode;
+  };
+  const buyBlock = createFakeElement('DIV', 'В корзину 79 ₽');
+  const specsBlock = createFakeElement('DIV', 'Характеристики');
+  rightCol.appendChild(buyBlock);
+  rightCol.appendChild(specsBlock);
+
+  const magnitDoc = createFakeDocument({ h1Text: 'Доширак Говядина 90 г', mainText: 'Доширак Говядина 90 г 79 ₽' });
+  magnitDoc.querySelector = (sel) => {
+    if (sel.includes('add-to-cart')) return buyBlock;
+    if (sel === 'h1') return null;
+    return null;
+  };
+  magnitDoc.getElementById = (id) => findInTree(rightCol, (n) => n.id === id) || findInTree(magnitDoc.body, (n) => n.id === id);
+
+  const modelMagnit = ui.buildStoreAssistantModel({
+    storeId: 'magnit',
+    store: 'Магнит',
+    title: 'Доширак Говядина 90 г',
+    amount: '90 г',
+    price: 79,
+    ingredients: ''
+  });
+  const hostInline = ui.renderStoreAssistantWidget(magnitDoc, modelMagnit);
+  assert.equal(hostInline.getAttribute('data-lqs-mount-mode'), 'inline');
+  assert.equal(rightCol.children[1], hostInline);
+
+  // 2. Pyaterochka inline mount after "Пищевая ценность на 100 г" section
+  const pyatContainer = createFakeElement('DIV', '');
+  pyatContainer.insertBefore = rightCol.insertBefore;
+  const nutritionSection = createFakeElement('SECTION', 'Пищевая ценность на 100 г: Белки 10 г');
+  const descSection = createFakeElement('SECTION', 'Описание товара');
+  pyatContainer.appendChild(nutritionSection);
+  pyatContainer.appendChild(descSection);
+
+  const pyatDoc = createFakeDocument({ h1Text: 'Черноголовка Кола 1,5 л', mainText: 'Черноголовка Кола 1,5 л 129 ₽' });
+  pyatDoc.querySelectorAll = (sel) => (sel.includes('section') ? [nutritionSection, descSection] : []);
+  const anchorPyat = ui.findInlineMountAnchor(pyatDoc, 'pyaterochka');
+  assert.equal(anchorPyat.mode, 'inline');
+  assert.equal(anchorPyat.strategy, 'pyaterochka_nutrition');
+  assert.equal(anchorPyat.element, nutritionSection);
+
+  // 3. Floating fallback when no anchor has parentElement
+  const fallbackDoc = createFakeDocument({ h1Text: 'Молоко 930 мл', mainText: 'Молоко 930 мл 99 ₽' });
+  const hostFloating = ui.renderStoreAssistantWidget(fallbackDoc, modelMagnit);
+  assert.equal(hostFloating.getAttribute('data-lqs-mount-mode'), 'floating');
+  assert.equal(hostFloating.parentElement, fallbackDoc.body);
+});
+
+test('Step 5: renders exact & similar offers, handles reject X, live radar with excludeStore, and AI analysis', () => {
+  const sentMessages = [];
+  const sandbox = loadAssistantStack();
+  sandbox.chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage: (msg, cb) => {
+        sentMessages.push(msg);
+        if (msg.type === 'LQS_ANALYZE_PRODUCT' && cb) {
+          cb({ ok: true, verdict: '✅ Отличный выбор', sources: [{ source: 'Отзовик', url: 'https://otzovik.com/test' }] });
+        } else if (msg.type === 'LQS_SCAN_STORES_LIVE' && cb) {
+          cb({ ok: true, comparisons: { lavka: { store: 'Яндекс Лавка', price: 139, url: 'https://lavka.yandex.ru/good/peas' }, otherStores: [], similarStores: [] } });
+        } else if (cb) {
+          cb({ ok: true });
+        }
+      }
+    },
+    storage: { local: { get: (_k, cb) => cb({}), set: (_o, cb) => cb && cb() } }
+  };
+
+  const ui = sandbox.LQS_STORE_ASSISTANT_UI;
+  const doc = createFakeDocument({ h1Text: 'Горошек зелёный молодой Bonduelle 400 г', mainText: 'Горошек зелёный молодой Bonduelle 400 г 159 ₽' });
+  const model = ui.buildStoreAssistantModel(
+    {
+      storeId: 'magnit',
+      store: 'Магнит',
+      title: 'Горошек зелёный молодой Bonduelle 400 г',
+      brand: 'Bonduelle',
+      amount: '400 г',
+      price: 159,
+      ingredients: 'зелёный горошек, вода, сахар, соль'
+    },
+    {
+      lavka: { store: 'Яндекс Лавка', slug: 'bonduelle_400', price: 149, url: 'https://lavka.yandex.ru/good/bonduelle_400' },
+      otherStores: [
+        { store: 'Пятёрочка', title: 'Горошек зелёный молодой Bonduelle 400 г', price: 135, url: 'https://5ka.ru/product/1' }
+      ],
+      similarStores: [
+        { store: 'Ашан', title: 'Горошек зелёный нежный Bonduelle 400 г', price: 129, pricePerKgOrL: 323, warning: 'проверьте сорт', url: 'https://auchan.ru/product/2' }
+      ]
+    }
+  );
+
+  assert.equal(model.comparedOffers.length, 2);
+  assert.equal(model.similarOffers.length, 1);
+  assert.equal(model.similarOffers[0].pricePerKgOrL, 323);
+
+  const host = ui.renderStoreAssistantWidget(doc, model);
+  const rejectBtn = findInTree(host.shadowRoot, (n) => n.getAttribute?.('data-action') === 'reject-match');
+  assert.ok(rejectBtn, 'Reject X button must be rendered');
+  rejectBtn.click();
+  assert.ok(sentMessages.some((m) => m.type === 'LQS_REJECT_COMPETITOR_MATCH'), 'Clicking X must send LQS_REJECT_COMPETITOR_MATCH');
+
+  const scanBtn = findInTree(host.shadowRoot, (n) => n.getAttribute?.('data-action') === 'scan-stores');
+  assert.ok(scanBtn, 'Live scan button must be rendered');
+  scanBtn.click();
+  const scanMsg = sentMessages.find((m) => m.type === 'LQS_SCAN_STORES_LIVE');
+  assert.ok(scanMsg, 'Clicking scan button must send LQS_SCAN_STORES_LIVE');
+  assert.equal(scanMsg.payload.excludeStore, 'Магнит');
+
+  const aiBtn = findInTree(host.shadowRoot, (n) => n.getAttribute?.('data-action') === 'run-ai');
+  assert.ok(aiBtn, 'AI analyze button must be rendered');
+  aiBtn.click();
+  assert.ok(sentMessages.some((m) => m.type === 'LQS_ANALYZE_PRODUCT'), 'Clicking AI button must send LQS_ANALYZE_PRODUCT');
 });

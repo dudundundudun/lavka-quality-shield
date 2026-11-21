@@ -8,11 +8,11 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-from matcher import normalize_title_for_match
+from matcher import is_search_result_matching_product, normalize_synonym_tokens, normalize_title_for_match
 from security import DEFAULT_DB_PATH, migrate_legacy_db_if_needed
 
 APP_VERSION = "2.10.0"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DB_PATH = migrate_legacy_db_if_needed(__file__, DEFAULT_DB_PATH)
 SERVER_LOGS: Deque[Dict[str, str]] = deque(maxlen=100)
 
@@ -171,6 +171,56 @@ def init_db(db_path: Optional[str] = None) -> None:
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_store_offers (
+                offer_key TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                store TEXT NOT NULL,
+                source_retailer TEXT,
+                good_id TEXT,
+                title TEXT NOT NULL,
+                norm_title TEXT NOT NULL,
+                brand TEXT,
+                amount TEXT,
+                price REAL NOT NULL,
+                old_price REAL,
+                url TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                offer_key TEXT NOT NULL,
+                store_id TEXT NOT NULL,
+                store TEXT NOT NULL,
+                title TEXT NOT NULL,
+                norm_title TEXT NOT NULL,
+                url TEXT,
+                price REAL NOT NULL,
+                old_price REAL,
+                observed_day TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                UNIQUE (offer_key, observed_day)
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_product_matches (
+                source_key TEXT NOT NULL,
+                rejected_url_or_title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (source_key, rejected_url_or_title)
+            )
+            """
+        )
+
         # Schema migrations via PRAGMA user_version
         current_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
         if current_version < 1:
@@ -214,6 +264,11 @@ def init_db(db_path: Optional[str] = None) -> None:
 
         if current_version < 4:
             conn.execute("PRAGMA user_version = 4")
+            current_version = 4
+
+        if current_version < 5:
+            conn.execute("PRAGMA user_version = 5")
+            current_version = 5
 
         # Indexes for fast cache, price & watchlist lookups
         conn.execute("CREATE INDEX IF NOT EXISTS idx_price_obs_slug ON price_observations(slug)")
@@ -235,6 +290,27 @@ def init_db(db_path: Optional[str] = None) -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_product_store_links_slug ON product_store_links(slug, updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ext_offers_store_norm ON external_store_offers(store_id, norm_title)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ext_offers_norm_title ON external_store_offers(norm_title, updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ext_offers_url ON external_store_offers(url)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ext_offers_updated_at ON external_store_offers(updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ext_price_history_key_day ON external_price_history(offer_key, observed_day ASC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ext_price_history_url ON external_price_history(url, observed_at ASC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rejected_matches_source ON rejected_product_matches(source_key)"
         )
 
         conn.execute("DELETE FROM product_ai_cache WHERE verdict LIKE '⚠️ Ошибка вызова ИИ%'")
@@ -862,3 +938,444 @@ def delete_product_store_link(conn: sqlite3.Connection, slug: str, store_id: str
         (clean_slug, clean_store),
     )
     return cur.rowcount > 0
+_STORE_ID_PATTERNS = (
+    ("magnit", ("магнит", "magnit")),
+    ("pyaterochka", ("пятёрочк", "пятерочк", "5ka", "pyaterochka")),
+    ("perekrestok", ("перекрёсток", "перекресток", "perekrestok", "впрок", "vprok")),
+    ("vkusvill", ("вкусвилл", "vkusvill")),
+    ("auchan", ("ашан", "auchan")),
+    ("lenta", ("лента", "lenta")),
+    ("kuper", ("купер", "kuper", "сбермаркет", "sbermarket")),
+    ("lavka", ("лавка", "lavka")),
+)
+
+
+def normalize_store_id(store_name: str = "", url: str = "") -> str:
+    combined = f"{store_name or ''} {url or ''}".strip().lower().replace("ё", "е")
+    for canonical, tokens in _STORE_ID_PATTERNS:
+        if any(tok in combined for tok in tokens):
+            return canonical
+    clean = normalize_title_for_match(store_name)
+    return clean[:40] if clean else "unknown"
+
+
+def _clean_offer_url(url: Optional[str]) -> str:
+    raw = str(url or "").strip()
+    if not (raw.startswith("http://") or raw.startswith("https://")):
+        return ""
+    return raw.split("#", 1)[0][:1000]
+
+
+def make_external_offer_key(store_id: str, url: str, norm_title: str) -> str:
+    clean_url = _clean_offer_url(url)
+    lower_url = clean_url.lower()
+    is_search_fallback = bool(
+        clean_url and any(seg in lower_url for seg in ("/search?", "/multisearch?", "?term=", "?q="))
+    )
+    if clean_url and not is_search_fallback:
+        return f"{store_id}|{clean_url}"
+    return f"{store_id}|title:{norm_title[:240]}"
+
+
+def count_external_store_offers(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM external_store_offers").fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def upsert_external_store_offers_batch(
+    conn: sqlite3.Connection,
+    offers: List[Dict[str, Any]],
+    default_store: str = "",
+) -> Dict[str, int]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    today_day = now_iso[:10]
+    saved = 0
+
+    for raw in offers or []:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip()[:260]
+        raw_price = raw.get("price")
+        try:
+            price = round(float(raw_price), 2)
+        except (TypeError, ValueError):
+            continue
+        if not title or len(title) < 2 or price <= 0:
+            continue
+
+        store = str(raw.get("store") or default_store or "Магнит").strip()[:80]
+        url = _clean_offer_url(raw.get("url"))
+        store_id = normalize_store_id(store, url)
+        norm_title = normalize_title_for_match(title)
+        if not norm_title:
+            continue
+
+        offer_key = make_external_offer_key(store_id, url, norm_title)
+        source_retailer = str(raw.get("sourceRetailer") or raw.get("source_retailer") or "").strip()[:80] or None
+        good_id = str(raw.get("goodId") or raw.get("good_id") or "").strip()[:120] or None
+        brand = str(raw.get("brand") or "").strip()[:120]
+        amount = str(raw.get("amount") or "").strip()[:80]
+        raw_old = raw.get("oldPrice") if "oldPrice" in raw else raw.get("old_price")
+        try:
+            old_price = round(float(raw_old), 2) if raw_old is not None and float(raw_old) > 0 else None
+        except (TypeError, ValueError):
+            old_price = None
+
+        conn.execute(
+            """
+            INSERT INTO external_store_offers (
+                offer_key, store_id, store, source_retailer, good_id,
+                title, norm_title, brand, amount, price, old_price, url, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(offer_key) DO UPDATE SET
+                store = excluded.store,
+                source_retailer = COALESCE(excluded.source_retailer, external_store_offers.source_retailer),
+                good_id = COALESCE(excluded.good_id, external_store_offers.good_id),
+                title = excluded.title,
+                norm_title = excluded.norm_title,
+                brand = CASE WHEN excluded.brand != '' THEN excluded.brand ELSE external_store_offers.brand END,
+                amount = CASE WHEN excluded.amount != '' THEN excluded.amount ELSE external_store_offers.amount END,
+                price = excluded.price,
+                old_price = excluded.old_price,
+                url = CASE WHEN excluded.url != '' THEN excluded.url ELSE external_store_offers.url END,
+                updated_at = excluded.updated_at
+            """,
+            (
+                offer_key,
+                store_id,
+                store,
+                source_retailer,
+                good_id,
+                title,
+                norm_title,
+                brand,
+                amount,
+                price,
+                old_price,
+                url,
+                now_iso,
+            ),
+        )
+
+        conn.execute(
+            """
+            INSERT INTO external_price_history (
+                offer_key, store_id, store, title, norm_title, url,
+                price, old_price, observed_day, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(offer_key, observed_day) DO UPDATE SET
+                price = excluded.price,
+                old_price = excluded.old_price,
+                title = excluded.title,
+                url = CASE WHEN excluded.url != '' THEN excluded.url ELSE external_price_history.url END,
+                observed_at = excluded.observed_at
+            """,
+            (
+                offer_key,
+                store_id,
+                store,
+                title,
+                norm_title,
+                url,
+                price,
+                old_price,
+                today_day,
+                now_iso,
+            ),
+        )
+        saved += 1
+
+    total = count_external_store_offers(conn)
+    return {"savedCount": saved, "totalInSqlite": total}
+
+
+def find_matching_external_store_offers(
+    conn: sqlite3.Connection,
+    title: str,
+    brand: str = "",
+    amount: str = "",
+    exclude_store: str = "",
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    clean_title = str(title or "").strip()
+    if len(clean_title) < 2:
+        return []
+
+    full_target_title = clean_title
+    if brand and brand.strip().lower() not in clean_title.lower():
+        full_target_title = f"{clean_title} {brand.strip()}"
+
+    exclude_id = normalize_store_id(exclude_store) if exclude_store and exclude_store.strip() else ""
+    exclude_lower = (exclude_store or "").strip().lower()
+
+    total_rows = count_external_store_offers(conn)
+    if total_rows == 0:
+        return []
+
+    # Fast SQL prefilter when DB grows beyond 5000 rows; full scan below 5000 rows (<10ms)
+    if total_rows <= 5000:
+        rows = conn.execute(
+            """
+            SELECT offer_key, store_id, store, source_retailer, good_id,
+                   title, norm_title, brand, amount, price, old_price, url, updated_at
+            FROM external_store_offers
+            WHERE price > 0
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+    else:
+        import re as _re
+
+        norm_q = normalize_synonym_tokens(full_target_title)
+        words = [w for w in _re.findall(r"[а-яa-z0-9]{3,}", norm_q) if not w.isdigit()]
+        stems: List[str] = []
+        for w in sorted(set(words), key=len, reverse=True)[:4]:
+            stems.append(w[:5] if len(w) >= 6 else (w[:4] if len(w) >= 5 else w))
+        if stems:
+            like_clause = " OR ".join("norm_title LIKE ?" for _ in stems)
+            params = [f"%{s}%" for s in stems]
+            rows = conn.execute(
+                f"""
+                SELECT offer_key, store_id, store, source_retailer, good_id,
+                       title, norm_title, brand, amount, price, old_price, url, updated_at
+                FROM external_store_offers
+                WHERE price > 0 AND ({like_clause})
+                ORDER BY updated_at DESC
+                LIMIT 2500
+                """,
+                tuple(params),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT offer_key, store_id, store, source_retailer, good_id,
+                       title, norm_title, brand, amount, price, old_price, url, updated_at
+                FROM external_store_offers
+                WHERE price > 0
+                ORDER BY updated_at DESC
+                LIMIT 2500
+                """
+            ).fetchall()
+
+    # Load rejected matches for this product (if any)
+    source_key = normalize_title_for_match(full_target_title)
+    rejected_set = {
+        r[0]
+        for r in conn.execute(
+            "SELECT rejected_url_or_title FROM rejected_product_matches WHERE source_key = ?",
+            (source_key,),
+        ).fetchall()
+    }
+
+    best_by_store: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        _, store_id, store, source_retailer, good_id, row_title, row_norm, row_brand, row_amount, row_price, row_old, row_url, row_upd = r
+        if exclude_id and store_id == exclude_id:
+            continue
+        if exclude_lower and (store or "").strip().lower() == exclude_lower:
+            continue
+        if rejected_set and ((row_url and row_url in rejected_set) or (row_norm and row_norm in rejected_set)):
+            continue
+
+        candidate_title = row_title
+        if row_brand and row_brand.lower() not in row_title.lower():
+            candidate_title = f"{row_title} {row_brand}"
+
+        same_prod, same_vol = is_search_result_matching_product(
+            candidate_title,
+            row_amount or "",
+            full_target_title,
+            amount or "",
+        )
+        if not same_prod or not same_vol:
+            continue
+
+        dedup_store_key = f"{store_id}|{source_retailer or ''}"
+        price_rounded = int(round(float(row_price)))
+        existing = best_by_store.get(dedup_store_key)
+        if not existing or price_rounded < existing["price"]:
+            best_by_store[dedup_store_key] = {
+                "store": store,
+                "storeId": store_id,
+                "sourceRetailer": source_retailer,
+                "goodId": good_id,
+                "title": row_title,
+                "brand": row_brand or "",
+                "amount": row_amount or "",
+                "price": price_rounded,
+                "oldPrice": int(round(float(row_old))) if row_old else None,
+                "url": row_url or "",
+                "updatedAt": row_upd,
+                "isVerifiedStoreOffer": True,
+            }
+
+    matched = sorted(best_by_store.values(), key=lambda x: x["price"])
+    return matched[: max(1, int(limit))]
+
+
+def get_external_offer_history(
+    conn: sqlite3.Connection,
+    url: str = "",
+    store: str = "",
+    title: str = "",
+    days: int = 90,
+) -> Dict[str, Any]:
+    clean_url = _clean_offer_url(url)
+    store_id = normalize_store_id(store, clean_url) if (store or clean_url) else ""
+    norm_title = normalize_title_for_match(title)
+
+    offer_row = None
+    if clean_url:
+        offer_row = conn.execute(
+            """
+            SELECT offer_key, store_id, store, title, amount, url, price, updated_at
+            FROM external_store_offers
+            WHERE url = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (clean_url,),
+        ).fetchone()
+    if not offer_row and store_id and norm_title:
+        offer_row = conn.execute(
+            """
+            SELECT offer_key, store_id, store, title, amount, url, price, updated_at
+            FROM external_store_offers
+            WHERE store_id = ? AND norm_title = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (store_id, norm_title),
+        ).fetchone()
+    if not offer_row and norm_title:
+        offer_row = conn.execute(
+            """
+            SELECT offer_key, store_id, store, title, amount, url, price, updated_at
+            FROM external_store_offers
+            WHERE norm_title = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (norm_title,),
+        ).fetchone()
+
+    cutoff_day: Optional[str] = None
+    if days and days > 0:
+        cutoff_day = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()[:10]
+
+    points: List[Dict[str, Any]] = []
+    if offer_row:
+        offer_key, r_store_id, r_store, r_title, r_amount, r_url, r_price, _ = offer_row
+        params: List[Any] = [offer_key]
+        where_sql = "offer_key = ? AND price > 0"
+        if cutoff_day:
+            where_sql += " AND observed_day >= ?"
+            params.append(cutoff_day)
+        hist_rows = conn.execute(
+            f"""
+            SELECT price, old_price, observed_day, observed_at
+            FROM external_price_history
+            WHERE {where_sql}
+            ORDER BY observed_day ASC
+            LIMIT 1000
+            """,
+            tuple(params),
+        ).fetchall()
+        for pr, old_pr, obs_day, obs_at in hist_rows:
+            points.append(
+                {
+                    "price": round(float(pr), 2),
+                    "oldPrice": round(float(old_pr), 2) if old_pr else None,
+                    "accountId": r_store,
+                    "date": obs_day,
+                    "ts": obs_at,
+                }
+            )
+    else:
+        offer_key = ""
+        r_store_id = store_id
+        r_store = store or ""
+        r_title = title or ""
+        r_amount = ""
+        r_url = clean_url
+
+    daily_avg = [
+        {
+            "date": pt["date"],
+            "ts": pt["ts"],
+            "price": pt["price"],
+            "minPrice": pt["price"],
+            "maxPrice": pt["price"],
+            "count": 1,
+        }
+        for pt in points
+    ]
+    all_prices = [pt["price"] for pt in points if pt.get("price") and pt["price"] > 0]
+    if all_prices:
+        stats = {
+            "minPrice": round(min(all_prices), 2),
+            "maxPrice": round(max(all_prices), 2),
+            "avgPrice": round(sum(all_prices) / len(all_prices), 2),
+            "lastPrice": round(all_prices[-1], 2),
+            "count": len(all_prices),
+        }
+    else:
+        stats = {
+            "minPrice": None,
+            "maxPrice": None,
+            "avgPrice": None,
+            "lastPrice": None,
+            "count": 0,
+        }
+
+    return {
+        "offerKey": offer_key,
+        "storeId": r_store_id,
+        "store": r_store,
+        "title": r_title,
+        "amount": r_amount,
+        "url": r_url,
+        "days": days,
+        "points": points,
+        "dailyAvg": daily_avg,
+        "stats": stats,
+    }
+def add_rejected_product_match(
+    conn: sqlite3.Connection,
+    source_title: str,
+    rejected_url: str = "",
+    rejected_title: str = "",
+) -> Dict[str, Any]:
+    source_key = normalize_title_for_match(source_title)
+    if not source_key:
+        return {"saved": 0, "sourceKey": ""}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    targets: List[str] = []
+    clean_url = _clean_offer_url(rejected_url)
+    if clean_url:
+        targets.append(clean_url)
+    norm_rej = normalize_title_for_match(rejected_title)
+    if norm_rej:
+        targets.append(norm_rej)
+    saved = 0
+    for t in targets:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO rejected_product_matches (source_key, rejected_url_or_title, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (source_key, t, now_iso),
+        )
+        saved += 1
+    return {"saved": saved, "sourceKey": source_key, "rejected": targets}
+
+
+def list_rejected_product_matches(conn: sqlite3.Connection, source_title: str) -> List[str]:
+    source_key = normalize_title_for_match(source_title)
+    if not source_key:
+        return []
+    rows = conn.execute(
+        "SELECT rejected_url_or_title FROM rejected_product_matches WHERE source_key = ?",
+        (source_key,),
+    ).fetchall()
+    return [r[0] for r in rows if r and r[0]]

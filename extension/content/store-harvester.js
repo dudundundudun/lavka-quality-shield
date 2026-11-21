@@ -113,11 +113,18 @@
           const priceVal = Number(offerObj?.price || offerObj?.lowPrice || 0);
           if (!title || title.length < 3 || !Number.isFinite(priceVal) || priceVal < 10 || priceVal > 25000) continue;
           const url = typeof node.url === 'string' && node.url.startsWith('http') ? node.url : originHref;
+          const brandName = typeof node.brand === 'string'
+            ? normalizeSpace(node.brand)
+            : normalizeSpace(node.brand?.name || '');
+          const weightText = node.weight && typeof node.weight === 'object'
+            ? `${node.weight.value || ''} ${node.weight.unitText || node.weight.unitCode || ''}`
+            : String(node.weight || '');
           offers.push({
             store: storeName,
             goodId: node.sku ? String(node.sku) : null,
             title,
-            amount: extractWeightFromText(title),
+            brand: brandName,
+            amount: extractWeightFromText(title) || extractWeightFromText(weightText),
             price: Math.round(priceVal),
             oldPrice: null,
             url
@@ -291,8 +298,49 @@
   function parseGenericRetailerOffers(doc, winLoc, storeInfo) {
     const offers = [];
     const seen = new Set();
+    const seenPrimaryUrls = new Set();
     const storeName = storeInfo.store;
 
+    // 1. Всегда сначала извлекаем сам открытый товар карточки (JSON-LD и <h1>),
+    // чтобы блок «Похожие товары» никогда не вытеснял и не пропускал открытую карточку.
+    const ldOffers = parseJsonLdOffers(doc, storeName, winLoc.href);
+    for (const o of ldOffers) {
+      const k = `${o.store}|${o.title.toLowerCase()}|${o.price}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        if (o.url) seenPrimaryUrls.add(o.url);
+        offers.push(o);
+      }
+    }
+
+    if (/\/(product|goods|cat)\//i.test(winLoc.pathname || '')) {
+      const h1 = doc.querySelector('h1');
+      const pageTitle = h1 ? normalizeSpace(h1.textContent || '') : '';
+      const mainScope = doc.querySelector('main') || doc.body;
+      const mainText = String(mainScope?.innerText || mainScope?.textContent || '').slice(0, 2200);
+      const pr = extractPricePairFromText(mainText);
+      const brandEl = doc.querySelector('[itemprop="brand"], [data-testid*="brand"], [class*="Brand"]');
+      const pageBrand = brandEl ? normalizeSpace(brandEl.getAttribute?.('content') || brandEl.textContent || '') : '';
+      if (pageTitle && pageTitle.length >= 4 && pr) {
+        const k = `${storeName}|${pageTitle.toLowerCase()}|${pr.price}`;
+        if (!seen.has(k) && !seenPrimaryUrls.has(winLoc.href)) {
+          seen.add(k);
+          seenPrimaryUrls.add(winLoc.href);
+          offers.push({
+            store: storeName,
+            goodId: null,
+            title: pageTitle,
+            brand: pageBrand,
+            amount: extractWeightFromText(pageTitle) || extractWeightFromText(mainText.slice(0, 600)),
+            price: pr.price,
+            oldPrice: pr.oldPrice,
+            url: winLoc.href
+          });
+        }
+      }
+    }
+
+    // 2. Затем собираем карточки товаров на странице (каталог, поиск, блок «Похожие»)
     const cardSelectors = [
       'article',
       'lu-product-card',
@@ -356,36 +404,6 @@
         url: fullUrl
       });
     });
-
-    // Product detail page fallback (h1 + JSON-LD)
-    if (offers.length === 0) {
-      const ldOffers = parseJsonLdOffers(doc, storeName, winLoc.href);
-      for (const o of ldOffers) {
-        const k = `${o.store}|${o.title.toLowerCase()}|${o.price}`;
-        if (!seen.has(k)) {
-          seen.add(k);
-          offers.push(o);
-        }
-      }
-    }
-
-    if (offers.length === 0 && /\/(product|goods|cat)\//i.test(winLoc.pathname)) {
-      const h1 = doc.querySelector('h1');
-      const pageTitle = h1 ? normalizeSpace(h1.textContent || '') : '';
-      const mainScope = doc.querySelector('main') || doc.body;
-      const pr = extractPricePairFromText((mainScope?.innerText || '').slice(0, 2200));
-      if (pageTitle && pageTitle.length >= 4 && pr) {
-        offers.push({
-          store: storeName,
-          goodId: null,
-          title: pageTitle,
-          amount: extractWeightFromText(pageTitle),
-          price: pr.price,
-          oldPrice: pr.oldPrice,
-          url: winLoc.href
-        });
-      }
-    }
 
     return offers;
   }
