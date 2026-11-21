@@ -1,9 +1,13 @@
 /**
  * Lavka Quality Shield — Popup AI Providers & Budget Settings Module
- * Модуль настроек ИИ-провайдеров, DPAPI-ключей, режима вкладки Gemini и бюджета.
+ * Модуль настроек ИИ-провайдеров, DPAPI-ключей, режима вкладки Gemini, выбора моделей и бюджета.
  */
 (function (root) {
   'use strict';
+
+  const MODELS_CACHE_STORAGE_KEY = 'lqs_ai_models_cache_v1';
+  let loadedModelsList = [];
+  let loadedModelsProvider = '';
 
   function getDefaultSettings() {
     return (root.LQS_CONFIG && root.LQS_CONFIG.DEFAULT_SETTINGS) ? root.LQS_CONFIG.DEFAULT_SETTINGS : {};
@@ -37,17 +41,127 @@
     idleRow.hidden = modeSel.value === 'keep_open';
   }
 
+  function getLoadedModelsList() {
+    return [...loadedModelsList];
+  }
+
+  function saveModelsCacheForProvider(providerId, models) {
+    if (!providerId || !Array.isArray(models) || models.length === 0) return;
+    if (!chrome || !chrome.storage || !chrome.storage.local) return;
+    chrome.storage.local.get([MODELS_CACHE_STORAGE_KEY], (res) => {
+      const cache = (res && typeof res[MODELS_CACHE_STORAGE_KEY] === 'object' && res[MODELS_CACHE_STORAGE_KEY])
+        ? { ...res[MODELS_CACHE_STORAGE_KEY] }
+        : {};
+      cache[providerId] = models;
+      chrome.storage.local.set({ [MODELS_CACHE_STORAGE_KEY]: cache });
+    });
+  }
+
+  function restoreCachedModelsForProvider(providerId) {
+    if (!providerId || providerId === 'gemini_tab') {
+      loadedModelsList = [];
+      loadedModelsProvider = providerId;
+      closeModelsDropdown();
+      return;
+    }
+    if (!chrome || !chrome.storage || !chrome.storage.local) return;
+    chrome.storage.local.get([MODELS_CACHE_STORAGE_KEY], (res) => {
+      if (getSelectedAiProviderId() !== providerId) return;
+      const cache = res && res[MODELS_CACHE_STORAGE_KEY];
+      const cached = cache && Array.isArray(cache[providerId]) ? cache[providerId] : [];
+      loadedModelsProvider = providerId;
+      loadedModelsList = [...cached];
+      syncLegacyDatalist(loadedModelsList);
+      const hintEl = document.getElementById('ai-models-hint');
+      if (hintEl && cached.length > 0) {
+        hintEl.textContent = `✅ Доступно моделей: ${cached.length} (нажмите на поле или ▾ для выбора)`;
+      }
+    });
+  }
+
+  function syncLegacyDatalist(list) {
+    const dl = document.getElementById('ai-models-datalist');
+    if (!dl) return;
+    const escapeHtml = getEscapeHtml();
+    dl.innerHTML = list.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
+  }
+
+  function closeModelsDropdown() {
+    const dd = document.getElementById('ai-models-dropdown');
+    const toggleBtn = document.getElementById('toggle-ai-models-btn');
+    if (dd) dd.hidden = true;
+    if (toggleBtn && typeof toggleBtn.setAttribute === 'function') {
+      toggleBtn.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  function renderModelsDropdown(filterText = '') {
+    const dd = document.getElementById('ai-models-dropdown');
+    const modelInp = document.getElementById('inp-ai-model');
+    if (!dd) return 0;
+
+    const escapeHtml = getEscapeHtml();
+    const currentVal = String(modelInp?.value || '').trim();
+    const query = String(filterText || '').trim().toLowerCase();
+
+    const filtered = query
+      ? loadedModelsList.filter((m) => m.toLowerCase().includes(query))
+      : loadedModelsList;
+
+    if (loadedModelsList.length === 0) {
+      dd.innerHTML = '<div class="lqs-model-empty">Список моделей пуст — нажмите «🔑 Проверить ключ и загрузить модели» или 🔄</div>';
+      return 0;
+    }
+
+    if (filtered.length === 0) {
+      dd.innerHTML = `<div class="lqs-model-empty">Совпадений для «${escapeHtml(filterText)}» нет (всего моделей: ${loadedModelsList.length})</div>`;
+      return 0;
+    }
+
+    dd.innerHTML = filtered
+      .map((m) => {
+        const isSelected = m === currentVal;
+        const cls = isSelected ? 'lqs-model-option selected' : 'lqs-model-option';
+        const mark = isSelected ? '<span class="lqs-model-check">✓</span>' : '';
+        return `<button type="button" class="${cls}" role="option" aria-selected="${isSelected ? 'true' : 'false'}" data-model-id="${escapeHtml(m)}"><span>${escapeHtml(m)}</span>${mark}</button>`;
+      })
+      .join('');
+    return filtered.length;
+  }
+
+  function openModelsDropdown(filterText = '') {
+    const dd = document.getElementById('ai-models-dropdown');
+    const toggleBtn = document.getElementById('toggle-ai-models-btn');
+    if (!dd) return 0;
+    const count = renderModelsDropdown(filterText);
+    dd.hidden = false;
+    if (toggleBtn && typeof toggleBtn.setAttribute === 'function') {
+      toggleBtn.setAttribute('aria-expanded', 'true');
+    }
+    return count;
+  }
+
   function renderAiKeyStorageBadge(status) {
     const badge = document.getElementById('ai-key-storage-badge');
     const delBtn = document.getElementById('delete-ai-key-btn');
     const keyInp = document.getElementById('inp-ai-key');
+    const offlineActions = document.getElementById('ai-server-offline-actions');
+    const spoilerStatus = document.getElementById('spoiler-server-status');
     if (!badge) return;
 
     badge.className = 'lqs-key-status';
     if (!status || !status.ok) {
       badge.textContent = 'Ключ будет зашифрован через Windows DPAPI при запущенном сервере :8765.';
       if (delBtn) delBtn.hidden = true;
+      if (offlineActions) offlineActions.hidden = false;
       return;
+    }
+
+    const serverOnline = Boolean(status.serverOnline || status.storedOnServer);
+    if (offlineActions) offlineActions.hidden = serverOnline;
+    if (spoilerStatus) {
+      spoilerStatus.textContent = serverOnline ? '🟢 Сервер :8765 работает' : '⚪ Сервер :8765 выключен';
+      spoilerStatus.style.color = serverOnline ? '#15803d' : '#92400e';
     }
 
     if (status.storedOnServer && status.hasKey) {
@@ -57,11 +171,11 @@
       if (keyInp) keyInp.placeholder = `🔒 В DPAPI-сейфе (${status.mask || 'сохранён'}) — введите новый для замены`;
     } else if (status.hasKey) {
       badge.classList.add('warn');
-      badge.textContent = `⚠️ Сервер :8765 выключен — ключ хранится резервно в браузере (${status.mask || 'сохранён'}). Запустите start_server.bat для шифрования DPAPI.`;
+      badge.textContent = `⚠️ Сервер :8765 выключен — ключ хранится резервно в браузере (${status.mask || 'сохранён'}). Нажмите «Включить сервер» ниже для шифрования DPAPI.`;
       if (delBtn) delBtn.hidden = false;
       if (keyInp) keyInp.placeholder = `⚠️ Локально (${status.mask || 'сохранён'}) — введите новый для замены`;
     } else {
-      badge.textContent = status.serverOnline
+      badge.textContent = serverOnline
         ? 'Ключ не задан — при сохранении будет зашифрован через Windows DPAPI на сервере :8765.'
         : 'Сервер :8765 выключен — при сохранении ключ запишется резервно в браузер.';
       if (delBtn) delBtn.hidden = true;
@@ -144,23 +258,86 @@
       }
     }
 
+    closeModelsDropdown();
     if (!isGeminiTab) {
       refreshAiKeyVaultStatus(prov);
+      restoreCachedModelsForProvider(prov);
+    } else {
+      loadedModelsList = [];
+      loadedModelsProvider = prov;
     }
   }
 
   function populateModelsDatalist(models, selectFirstIfEmpty = true) {
-    const dl = document.getElementById('ai-models-datalist');
     const modelInp = document.getElementById('inp-ai-model');
-    const list = Array.isArray(models) ? models : [];
-    const escapeHtml = getEscapeHtml();
-    if (dl) {
-      dl.innerHTML = list.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
+    const raw = Array.isArray(models) ? models : [];
+    const list = [];
+    for (const item of raw) {
+      const id = String(item || '').trim();
+      if (id && !list.includes(id)) list.push(id);
     }
+    loadedModelsList = list;
+    loadedModelsProvider = getSelectedAiProviderId();
+    syncLegacyDatalist(list);
+    saveModelsCacheForProvider(loadedModelsProvider, list);
+
     if (selectFirstIfEmpty && list.length > 0 && modelInp && !modelInp.value.trim()) {
       modelInp.value = list[0];
     }
+    renderModelsDropdown('');
     return list.length;
+  }
+
+  function startLocalServerFromPopup(deps = {}) {
+    const refreshAiRadar = typeof deps.refreshAiRadar === 'function' ? deps.refreshAiRadar : () => {};
+    const btns = [
+      document.getElementById('start-local-server-btn'),
+      document.getElementById('spoiler-start-server-btn')
+    ].filter(Boolean);
+    const statusEl = document.getElementById('start-local-server-status');
+    const copyIdBtn = document.getElementById('copy-ext-id-btn');
+
+    btns.forEach((b) => {
+      b.disabled = true;
+      b.textContent = '⏳ Запускаю сервер :8765...';
+    });
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = 'lqs-test-status';
+      statusEl.textContent = 'Запускаю локальный сервер :8765 в фоне...';
+    }
+    if (copyIdBtn) copyIdBtn.hidden = true;
+
+    chrome.runtime.sendMessage({ type: 'LQS_START_LOCAL_SERVER', force: true }, (resp) => {
+      btns.forEach((b) => {
+        b.disabled = false;
+        b.textContent = '▶ Включить сервер :8765';
+      });
+      if (chrome.runtime.lastError || !resp || !resp.ok) {
+        if (statusEl) {
+          statusEl.hidden = false;
+          statusEl.className = 'lqs-test-status err';
+          if (resp && resp.hostMissing) {
+            statusEl.textContent = '⚠️ Чтобы расширение запускало сервер само, один раз запустите server\\enable_windows_autostart.bat (оно подключит мост Chrome и автозапуск Windows).';
+            if (copyIdBtn) copyIdBtn.hidden = false;
+          } else {
+            statusEl.textContent = `⚠️ ${resp?.error || 'Не удалось запустить сервер :8765'}`;
+          }
+        }
+        return;
+      }
+
+      if (statusEl) {
+        statusEl.hidden = false;
+        statusEl.className = 'lqs-test-status ok';
+        const migratedNote = resp.migratedKey ? ' · API-ключ перенесён в DPAPI-сейф' : '';
+        statusEl.textContent = resp.alreadyRunning
+          ? `✅ Сервер :8765 уже работает${migratedNote}`
+          : `✅ Сервер :8765 успешно запущен!${migratedNote}`;
+      }
+      refreshAiKeyVaultStatus();
+      refreshAiRadar();
+    });
   }
 
   function testSelectedAiProviderAndLoadModels(silent = false) {
@@ -204,7 +381,7 @@
       const vaultTag = resp.usedServerKey ? ' · ключ из DPAPI-сейфа' : '';
       if (hintEl) {
         hintEl.textContent = count > 0
-          ? `✅ Загружено моделей: ${count}${vaultTag}`
+          ? `✅ Загружено моделей: ${count} (нажмите на поле или ▾ для выбора)${vaultTag}`
           : `✅ Ключ принят, список /models пуст${vaultTag}`;
       }
       if (!silent && statusEl) {
@@ -269,6 +446,8 @@
           testStatus.className = 'lqs-test-status';
           testStatus.textContent = '';
         }
+        const hintEl = document.getElementById('ai-models-hint');
+        if (hintEl) hintEl.textContent = '';
         syncAiProviderUi(prov, { autoFillUrl: true, autoFillModel: true });
       });
     }
@@ -276,6 +455,93 @@
     const selGeminiModeEl = document.getElementById('sel-gemini-tab-mode');
     if (selGeminiModeEl) {
       selGeminiModeEl.addEventListener('change', syncGeminiTabModeUi);
+    }
+
+    // Полноценный выбор из всех загруженных моделей без бага фильтрации нативного <datalist>
+    const modelInp = document.getElementById('inp-ai-model');
+    const toggleModelsBtn = document.getElementById('toggle-ai-models-btn');
+    const modelsDropdown = document.getElementById('ai-models-dropdown');
+    const modelCombobox = document.getElementById('ai-model-combobox');
+
+    if (modelInp) {
+      modelInp.addEventListener('focus', () => {
+        if (loadedModelsList.length > 0) {
+          openModelsDropdown('');
+        }
+      });
+      modelInp.addEventListener('click', () => {
+        if (loadedModelsList.length > 0) {
+          openModelsDropdown('');
+        }
+      });
+      modelInp.addEventListener('input', () => {
+        if (loadedModelsList.length > 0) {
+          openModelsDropdown(modelInp.value);
+        }
+      });
+      modelInp.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          closeModelsDropdown();
+        } else if (e.key === 'ArrowDown' && loadedModelsList.length > 0) {
+          openModelsDropdown('');
+        }
+      });
+    }
+
+    if (toggleModelsBtn) {
+      toggleModelsBtn.addEventListener('click', () => {
+        if (modelsDropdown && !modelsDropdown.hidden) {
+          closeModelsDropdown();
+        } else {
+          openModelsDropdown('');
+        }
+      });
+    }
+
+    if (modelsDropdown) {
+      modelsDropdown.addEventListener('click', (e) => {
+        const target = e.target && typeof e.target.closest === 'function'
+          ? e.target.closest('[data-model-id]')
+          : null;
+        if (!target) return;
+        const chosen = target.getAttribute('data-model-id');
+        if (chosen && modelInp) {
+          modelInp.value = chosen;
+        }
+        closeModelsDropdown();
+      });
+    }
+
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('click', (e) => {
+        if (!modelCombobox || !modelsDropdown || modelsDropdown.hidden) return;
+        if (typeof modelCombobox.contains === 'function' && !modelCombobox.contains(e.target)) {
+          closeModelsDropdown();
+        }
+      });
+    }
+
+    const startServerBtn = document.getElementById('start-local-server-btn');
+    if (startServerBtn) {
+      startServerBtn.addEventListener('click', () => startLocalServerFromPopup({ refreshAiRadar }));
+    }
+    const spoilerStartServerBtn = document.getElementById('spoiler-start-server-btn');
+    if (spoilerStartServerBtn) {
+      spoilerStartServerBtn.addEventListener('click', () => startLocalServerFromPopup({ refreshAiRadar }));
+    }
+    const copyExtIdBtn = document.getElementById('copy-ext-id-btn');
+    if (copyExtIdBtn) {
+      copyExtIdBtn.addEventListener('click', async () => {
+        const extId = chrome && chrome.runtime && chrome.runtime.id ? chrome.runtime.id : '';
+        if (!extId) return;
+        try {
+          await navigator.clipboard.writeText(extId);
+          copyExtIdBtn.textContent = `✅ Скопирован: ${extId.slice(0, 10)}...`;
+          setTimeout(() => { copyExtIdBtn.textContent = '📋 Скопировать ID расширения'; }, 2500);
+        } catch {
+          copyExtIdBtn.textContent = extId;
+        }
+      });
     }
 
     const testAiProviderBtn = document.getElementById('test-ai-provider-btn');
@@ -386,12 +652,17 @@
   const api = {
     getSelectedAiProviderId,
     syncGeminiTabModeUi,
+    getLoadedModelsList,
+    renderModelsDropdown,
+    openModelsDropdown,
+    closeModelsDropdown,
     renderAiKeyStorageBadge,
     refreshAiKeyVaultStatus,
     formatUsdShort,
     refreshAiUsageStats,
     syncAiProviderUi,
     populateModelsDatalist,
+    startLocalServerFromPopup,
     testSelectedAiProviderAndLoadModels,
     applyLoadedAiSettings,
     bindAiSettingsEvents

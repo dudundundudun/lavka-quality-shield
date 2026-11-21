@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableExtensions
-title Lavka Quality Shield v2.10.0 - Windows Silent Autostart Installer
+title Lavka Quality Shield v2.10.0 - Windows Silent Autostart & Chrome Bridge Installer
 cd /d "%~dp0"
 
 REM Подсказка: запусти "enable_windows_autostart.bat --update-deps" (или удали
@@ -26,9 +26,9 @@ if /i "%~1"=="/update-deps" set "FORCE_DEPS=1"
 if not exist "%LQS_DATA_DIR%" mkdir "%LQS_DATA_DIR%"
 
 echo ============================================================
-echo   Lavka Quality Shield v2.10.0 - ZERO-CLICK WINDOWS AUTOSTART
+echo   Lavka Quality Shield v2.10.0 - AUTOSTART + CHROME BRIDGE
 echo ============================================================
-echo [1/3] Подготовка изолированного Python-окружения ^(.venv^)...
+echo [1/4] Подготовка изолированного Python-окружения ^(.venv^)...
 
 set "NEED_DEPS=0"
 if "%FORCE_DEPS%"=="1" set "NEED_DEPS=1"
@@ -70,18 +70,23 @@ if "%NEED_DEPS%"=="1" (
 
 if exist "__pycache__" rmdir /s /q "__pycache__"
 
-echo [2/3] Создание тихого фонового автозапуска в Windows Startup...
+echo [2/4] Создание тихого фонового автозапуска в Windows Startup...
 (
   echo Set WshShell = CreateObject^("WScript.Shell"^)
   echo WshShell.CurrentDirectory = "%APP_DIR:~0,-1%"
   echo WshShell.Run """%VENV_PYTHONW%"" -B server.py", 0, False
 ) > "%VBS_PATH%"
 
-echo [3/3] Мгновенный запуск фонового сервера прямо сейчас...
+echo [3/4] Регистрация моста Chrome Native Messaging ^(автозапуск и кнопка из расширения^)...
+"%VENV_PYTHON%" -B "%~dp0native_host\register_native_host.py"
+
+echo [4/4] Мгновенный запуск фонового сервера прямо сейчас...
 wscript.exe "%VBS_PATH%"
 
 echo.
-echo ГОТОВО! Локальный сервер (:8765) настроен на тихий автозапуск из %VENV_DIR%.
+echo ГОТОВО!
+echo  - Сервер (:8765) настроен на тихий автозапуск вместе с Windows.
+echo  - Расширение теперь может само включать сервер (:8765) автоматически и по кнопке.
 echo Чтобы отключить автозапуск — запусти disable_windows_autostart.bat.
 echo ============================================================
 pause

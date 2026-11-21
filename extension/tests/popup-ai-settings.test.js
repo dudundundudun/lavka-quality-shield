@@ -310,8 +310,190 @@ test('popup/ai-settings.js formats USD, syncs provider UI, and renders DPAPI bad
   assert.equal(elements['ai-api-config-box'].hidden, false);
   assert.equal(elements['moduleapi-check-link'].hidden, false);
   assert.equal(elements['ai-base-url-field'].hidden, true);
-  assert.equal(elements['inp-ai-url'].value, 'https://api.moduleapi.pro/v1');
+  assert.equal(elements['inp-ai-url'].value, 'https://moduleapi.pro/v1');
   assert.equal(elements['ai-key-storage-badge'].className, 'lqs-key-status secure');
   assert.equal(elements['delete-ai-key-btn'].hidden, false);
   assert.ok(sentMessages.some((m) => m.type === 'LQS_GET_AI_KEY_STATUS' && m.aiProvider === 'moduleapi'));
+});
+
+test('model combobox shows all 26 loaded models even when claude-fable-5-1 is already selected, and filters only on user query', () => {
+  const elements = {};
+  const makeEl = (id, init = {}) => {
+    const el = {
+      id,
+      value: '',
+      hidden: true,
+      innerHTML: '',
+      textContent: '',
+      attrs: {},
+      setAttribute(k, v) { el.attrs[k] = String(v); },
+      ...init
+    };
+    elements[id] = el;
+    return el;
+  };
+  makeEl('sel-ai-provider', { value: 'moduleapi' });
+  makeEl('inp-ai-model', { value: 'claude-fable-5-1', hidden: false });
+  makeEl('ai-models-dropdown', { hidden: true });
+  makeEl('toggle-ai-models-btn', { hidden: false });
+  makeEl('ai-models-datalist', { hidden: false });
+
+  const storage = {};
+  const sandbox = {
+    console,
+    document: { getElementById: (id) => elements[id] || null },
+    chrome: {
+      runtime: { lastError: null, sendMessage: () => {} },
+      storage: {
+        local: {
+          get: (_k, cb) => cb && cb({ ...storage }),
+          set: (obj, cb) => { Object.assign(storage, obj || {}); if (cb) cb(); }
+        }
+      }
+    }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'shared', 'config.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'shared', 'utils.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'bg', 'ai-providers.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'popup', 'ai-settings.js'), 'utf8'), sandbox);
+
+  const mod = sandbox.LQS_POPUP_AI_SETTINGS;
+  const models26 = [
+    'claude-fable-5-1',
+    'claude-fable-5',
+    'gpt-4o-mini',
+    'gpt-4o',
+    'gemini-2.5-flash',
+    ...Array.from({ length: 21 }, (_, i) => `model-${i + 1}`)
+  ];
+  const count = mod.populateModelsDatalist(models26, true);
+  assert.equal(count, 26);
+
+  // Opening dropdown without filter shows ALL 26 models even though inp-ai-model='claude-fable-5-1'
+  const shownAll = mod.openModelsDropdown('');
+  assert.equal(shownAll, 26);
+  assert.equal(elements['ai-models-dropdown'].hidden, false);
+  assert.match(elements['ai-models-dropdown'].innerHTML, /data-model-id="gpt-4o-mini"/);
+  assert.match(elements['ai-models-dropdown'].innerHTML, /data-model-id="gemini-2\.5-flash"/);
+  assert.match(elements['ai-models-dropdown'].innerHTML, /class="lqs-model-option selected"[^>]*data-model-id="claude-fable-5-1"/);
+
+  // Typing a query filters cleanly
+  const shownFiltered = mod.openModelsDropdown('gpt-4o');
+  assert.equal(shownFiltered, 2);
+  assert.match(elements['ai-models-dropdown'].innerHTML, /data-model-id="gpt-4o-mini"/);
+  assert.doesNotMatch(elements['ai-models-dropdown'].innerHTML, /data-model-id="claude-fable-5-1"/);
+});
+
+test('LQS_START_LOCAL_SERVER enforces popup sender guard, calls nativeMessaging, and auto-migrates local fallback key to DPAPI', async () => {
+  const popupSender = {
+    id: 'test-extension-id-1234567890abcdef',
+    url: 'chrome-extension://test-extension-id-1234567890abcdef/popup.html'
+  };
+  const evilSender = {
+    id: 'test-extension-id-1234567890abcdef',
+    url: 'https://evil.example/'
+  };
+
+  let serverUp = false;
+  let nativeCalls = 0;
+
+  const onMessageListeners = [];
+  const storageData = {
+    lqs_backend_token_v1: 'a'.repeat(64),
+    lqs_settings_v2: {
+      backendUrl: 'http://127.0.0.1:8765',
+      aiProvider: 'moduleapi',
+      aiBaseUrl: 'https://moduleapi.pro/v1',
+      aiApiKey: 'sk-local-fallback-9999',
+      aiKeyMask: 'sk-...9999',
+      aiKeyStoredOnServer: false
+    }
+  };
+
+  const chromeMock = {
+    runtime: {
+      id: 'test-extension-id-1234567890abcdef',
+      lastError: null,
+      getURL: (p) => `chrome-extension://test-extension-id-1234567890abcdef/${String(p || '').replace(/^\/+/, '')}`,
+      getPlatformInfo: (cb) => cb && cb({ os: 'win' }),
+      onInstalled: { addListener: () => {} },
+      onStartup: { addListener: () => {} },
+      onMessage: { addListener: (fn) => onMessageListeners.push(fn) },
+      sendNativeMessage: (host, msg, cb) => {
+        nativeCalls += 1;
+        assert.equal(host, 'com.lavka.quality_shield');
+        assert.equal(msg.action, 'start_server');
+        serverUp = true;
+        cb({ ok: true, running: true, started: true, alreadyRunning: false });
+      }
+    },
+    tabs: {
+      onUpdated: { addListener: () => {} },
+      query: (_q, cb) => cb && cb([]),
+      create: (_o, cb) => cb && cb({ id: 1 }),
+      update: (_id, _o, cb) => cb && cb({ id: 1 }),
+      remove: (_id, cb) => cb && cb(),
+      sendMessage: (_id, _m, cb) => cb && cb({})
+    },
+    storage: {
+      local: {
+        get: (keys, cb) => {
+          if (typeof keys === 'function') return keys({ ...storageData });
+          const out = {};
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const k of list) if (k in storageData) out[k] = storageData[k];
+          if (cb) cb(out);
+        },
+        set: (obj, cb) => { Object.assign(storageData, obj || {}); if (cb) cb(); },
+        remove: (keys, cb) => { for (const k of (Array.isArray(keys) ? keys : [keys])) delete storageData[k]; if (cb) cb(); }
+      }
+    },
+    cookies: { getAll: (_d, cb) => cb && cb([]), set: (_d, cb) => cb && cb({}), remove: (_d, cb) => cb && cb({}) },
+    scripting: { executeScript: async () => [] },
+    alarms: { create: () => {}, clear: () => {}, onAlarm: { addListener: () => {} } }
+  };
+
+  const sandbox = {
+    chrome: chromeMock,
+    console, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController,
+    setTimeout, clearTimeout, setInterval, clearInterval, Date, Math, JSON, Map, Set, Promise, RegExp, Error, Array, Object, Number, String, Boolean,
+    fetch: async (url) => {
+      if (!serverUp) throw new Error('ECONNREFUSED');
+      if (String(url).endsWith('/api/ai-keys/save')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', provider: 'moduleapi', hasKey: true, mask: 'sk-...9999', storedOnServer: true })
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+    }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  const ctx = vm.createContext(sandbox);
+  sandbox.importScripts = (...scripts) => {
+    for (const rel of scripts) {
+      const fullPath = path.join(extDir, rel);
+      vm.runInContext(fs.readFileSync(fullPath, 'utf8'), ctx, { filename: fullPath });
+    }
+  };
+  vm.runInContext(fs.readFileSync(path.join(extDir, 'background.js'), 'utf8'), ctx, { filename: 'background.js' });
+
+  const listener = onMessageListeners[0];
+  const evilResp = await new Promise((resolve) => listener({ type: 'LQS_START_LOCAL_SERVER', force: true }, evilSender, resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(evilResp)), { ok: false, error: 'Forbidden' });
+
+  const okResp = await new Promise((resolve) => listener({ type: 'LQS_START_LOCAL_SERVER', force: true }, popupSender, resolve));
+  const norm = JSON.parse(JSON.stringify(okResp));
+  assert.equal(norm.ok, true);
+  assert.equal(norm.running, true);
+  assert.equal(norm.started, true);
+  assert.equal(norm.migratedKey, true);
+  assert.equal(nativeCalls, 1);
+  assert.equal(storageData.lqs_settings_v2.aiApiKey, '');
+  assert.equal(storageData.lqs_settings_v2.aiKeyStoredOnServer, true);
 });

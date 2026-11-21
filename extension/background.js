@@ -254,7 +254,105 @@ async function getBackendAuthHeaders(backendUrl, extraHeaders = {}) {
   return headers;
 }
 
-async function saveAiKeySecurely(providerId, rawApiKey) {
+const NATIVE_HOST_NAME = 'com.lavka.quality_shield';
+let localServerStartPromise = null;
+let lastAutoServerStartAttemptTs = 0;
+
+async function startLocalServerViaNativeHost({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - lastAutoServerStartAttemptTs < 15000) {
+    return { ok: false, throttled: true, error: 'Повторная автопопытка запуска временно отложена' };
+  }
+  if (localServerStartPromise) {
+    return localServerStartPromise;
+  }
+
+  localServerStartPromise = (async () => {
+    lastAutoServerStartAttemptTs = Date.now();
+    const settings = await getSettings();
+    const backendUrl = (settings.backendUrl || 'http://127.0.0.1:8765').replace(/\/$/, '');
+
+    // Сначала проверяем, не запущен ли сервер уже
+    try {
+      const health = await fetchWithTimeout(`${backendUrl}/api/health`, { method: 'GET' }, 1200);
+      if (health && health.ok) {
+        backendOfflineUntilTs = 0;
+        const migratedKey = await migrateLocalFallbackKeyIfPresent(settings);
+        return { ok: true, running: true, alreadyRunning: true, started: false, migratedKey };
+      }
+    } catch {
+      // Сервер выключен — пробуем запустить через Native Messaging Host
+    }
+
+    if (!chrome.runtime || typeof chrome.runtime.sendNativeMessage !== 'function') {
+      return {
+        ok: false,
+        running: false,
+        hostMissing: true,
+        extensionId: chrome.runtime?.id || '',
+        error: 'Native Messaging недоступен в текущей среде браузера'
+      };
+    }
+
+    const nativeResp = await new Promise((resolve) => {
+      try {
+        chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, { action: 'start_server' }, (resp) => {
+          const err = chrome.runtime.lastError;
+          if (err) {
+            const msg = String(err.message || err);
+            const hostMissing = /not found|forbidden|access/i.test(msg);
+            resolve({
+              ok: false,
+              running: false,
+              hostMissing,
+              extensionId: chrome.runtime?.id || '',
+              error: msg
+            });
+            return;
+          }
+          resolve(resp || { ok: false, running: false, error: 'Пустой ответ от Native Messaging Host' });
+        });
+      } catch (e) {
+        resolve({
+          ok: false,
+          running: false,
+          hostMissing: true,
+          extensionId: chrome.runtime?.id || '',
+          error: e.message || String(e)
+        });
+      }
+    });
+
+    if (nativeResp && nativeResp.ok && nativeResp.running) {
+      backendOfflineUntilTs = 0;
+      const migratedKey = await migrateLocalFallbackKeyIfPresent(settings);
+      return { ...nativeResp, migratedKey };
+    }
+    return nativeResp;
+  })().finally(() => {
+    localServerStartPromise = null;
+  });
+
+  return localServerStartPromise;
+}
+
+async function migrateLocalFallbackKeyIfPresent(settingsInput = null) {
+  try {
+    const settings = settingsInput || await getSettings();
+    const rawLocalKey = String(settings.aiApiKey || '').trim();
+    if (!rawLocalKey || isMaskedApiKey(rawLocalKey) || settings.aiKeyStoredOnServer) {
+      return false;
+    }
+    const prov = settings.aiProvider || 'moduleapi';
+    if (prov === 'gemini_tab') return false;
+    const res = await saveAiKeySecurely(prov, rawLocalKey, { allowAutoStart: false });
+    return Boolean(res && res.ok && res.storedOnServer);
+  } catch {
+    return false;
+  }
+}
+
+async function saveAiKeySecurely(providerId, rawApiKey, { allowAutoStart = true } = {}) {
   const settings = await getSettings();
   const resolved = resolveProviderConfig({ ...settings, aiProvider: providerId || settings.aiProvider });
   const provider = resolved.providerId;
@@ -314,6 +412,43 @@ async function saveAiKeySecurely(providerId, rawApiKey) {
       const errData = await resp.json().catch(() => ({}));
       fallbackReason = errData.detail || `HTTP ${resp.status}`;
     } catch {
+      if (allowAutoStart) {
+        const wake = await startLocalServerViaNativeHost({ force: false });
+        if (wake && wake.ok && wake.running) {
+          try {
+            const retryResp = await fetchWithTimeout(
+              `${backendUrl}/api/ai-keys/save`,
+              {
+                method: 'POST',
+                headers: await getBackendAuthHeaders(backendUrl, { 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ provider, apiKey: cleanKey })
+              },
+              2500
+            );
+            if (retryResp.ok) {
+              backendOfflineUntilTs = 0;
+              const data = await retryResp.json();
+              const mask = data.mask || maskApiKey(cleanKey);
+              await saveSettingsPatch({
+                aiProvider: provider,
+                aiApiKey: '',
+                aiKeyMask: mask,
+                aiKeyStoredOnServer: true
+              });
+              return {
+                ok: true,
+                storedOnServer: true,
+                provider,
+                mask,
+                autoStartedServer: true,
+                updatedAt: data.updatedAt || null
+              };
+            }
+          } catch {
+            // fall through to browser fallback
+          }
+        }
+      }
       backendOfflineUntilTs = Date.now() + 10000;
       fallbackReason = 'Локальный сервер :8765 не запущен';
     }
@@ -1709,11 +1844,13 @@ chrome.runtime.onInstalled.addListener(() => {
   ensureAutopilotWarmup('onInstalled');
   getAccountsVaultMap();
   syncWatchlistAlarm();
+  startLocalServerViaNativeHost({ force: false }).catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureAutopilotWarmup('onStartup');
   syncWatchlistAlarm();
+  startLocalServerViaNativeHost({ force: false }).catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
@@ -1978,6 +2115,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     }
     saveAiKeySecurely(msg.aiProvider || '', msg.aiApiKey || '')
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  if (msg.type === 'LQS_START_LOCAL_SERVER') {
+    if (!isPopupSender(sender)) {
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+    startLocalServerViaNativeHost({ force: Boolean(msg.force) })
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
     return true;

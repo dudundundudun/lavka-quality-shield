@@ -14,7 +14,8 @@
     "tabs",
     "cookies",
     "scripting",
-    "alarms"
+    "alarms",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://lavka.yandex.ru/*",
