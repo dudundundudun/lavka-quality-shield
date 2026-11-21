@@ -846,15 +846,49 @@ function unwrapDdgUrl(rawHref) {
   return /^https?:\/\//i.test(href) ? href : '';
 }
 
+function isCategoryOrSearchListingUrl(rawUrl) {
+  if (!rawUrl) return false;
+  try {
+    const parsed = new URL(String(rawUrl));
+    const path = (parsed.pathname || '').toLowerCase();
+    const search = (parsed.search || '').toLowerCase();
+    // Явные товарные карточки (например /product/..., /good/..., /p/..., /item/..., /tovar/...) пропускаем
+    if (/(?:^|\/)(?:product|products|good|goods|p|item|tovar|card)(?:\/|$)/.test(path)) {
+      return false;
+    }
+    if (/(?:^|\/)(?:catalog|category|categories|brand|brands|search|collection|collections|tag|tags|filter)(?:\/|$)/.test(path)) {
+      return true;
+    }
+    if (/[?&](?:q|term|search|query)=/.test(search)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function extractCompetitorPricesFromSources(sources, lavkaPrice = null, productTitle = '', productAmount = '') {
   if (!Array.isArray(sources) || sources.length === 0) {
     return { competitorMinPrice: null, competitorSummary: '', competitorOffers: [] };
   }
   const found = [];
-  const priceRegex = /(?:от\s+|цена\s+|за\s+)?(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])/gi;
+  const priceRegex = /(\d{2,4}(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?|р\.)(?![а-яa-z])/gi;
+  const targetGrams =
+    (typeof parseVolumeOrWeightGrams === 'function'
+      ? (parseVolumeOrWeightGrams(productAmount) || parseVolumeOrWeightGrams(productTitle))
+      : null);
+
   for (const s of sources) {
     const rawTitle = s.title || '';
     const snippet = s.snippet || '';
+    const url = s.url || '';
+
+    // 1. Не извлекаем цены со страниц категорий, брендов, подборок и поиска
+    if (isCategoryOrSearchListingUrl(url)) {
+      continue;
+    }
+
     if (productTitle) {
       const matchCheck = isSearchResultMatchingProduct(rawTitle, snippet, productTitle, productAmount);
       if (!matchCheck.isSameProduct || !matchCheck.isSameVolume) {
@@ -862,10 +896,22 @@ function extractCompetitorPricesFromSources(sources, lavkaPrice = null, productT
       }
     }
 
+    // 2. Если у целевого товара указан вес/объём, а в DDG-сниппете он не найден — не присваиваем цену
+    if (targetGrams && typeof parseVolumeOrWeightGrams === 'function') {
+      const resGrams = parseVolumeOrWeightGrams(rawTitle) || parseVolumeOrWeightGrams(snippet);
+      if (!resGrams) {
+        continue;
+      }
+    }
+
     const text = `${rawTitle} ${snippet}`;
     const storeName = s.source || 'Магазин';
-    const url = s.url || '';
     for (const m of text.matchAll(priceRegex)) {
+      // 3. Игнорируем цены с предлогом «от » («от 99 ₽» — обычно минимальная цена категории за мелкую фасовку)
+      const beforeChunk = text.slice(Math.max(0, (m.index || 0) - 10), m.index || 0).toLowerCase();
+      if (/(?:^|[^а-яёa-z0-9])от\s+$/.test(beforeChunk)) {
+        continue;
+      }
       const val = parseFloat(m[1].replace(',', '.'));
       if (val >= 20 && val <= 9500) {
         if (lavkaPrice && (val < lavkaPrice * 0.35 || val > lavkaPrice * 3.0)) continue;
@@ -873,7 +919,8 @@ function extractCompetitorPricesFromSources(sources, lavkaPrice = null, productT
           store: storeName,
           price: Math.round(val),
           url,
-          title: (rawTitle || storeName).slice(0, 90)
+          title: (rawTitle || storeName).slice(0, 90),
+          origin: 'ddg'
         });
       }
     }

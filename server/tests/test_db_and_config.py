@@ -151,5 +151,25 @@ class TestSqliteHardeningAndConfigSync(unittest.TestCase):
         self.assertEqual(server.AnalyzeRequest(title="Молоко").aiModel, "")
 
 
+    def test_windows_bat_files_use_crlf_without_bom(self):
+        server_dir = Path(REPO_ROOT) / "server"
+        bat_files = sorted(server_dir.rglob("*.bat"))
+        self.assertGreaterEqual(len(bat_files), 5)
+        for bat_path in bat_files:
+            raw = bat_path.read_bytes()
+            self.assertFalse(
+                raw.startswith(b"\xef\xbb\xbf"),
+                f"{bat_path} must not contain UTF-8 BOM",
+            )
+            crlf_count = raw.count(b"\r\n")
+            lf_only_count = raw.count(b"\n") - crlf_count
+            self.assertGreater(crlf_count, 0, f"{bat_path} must use CRLF line endings")
+            self.assertEqual(
+                lf_only_count,
+                0,
+                f"{bat_path} contains {lf_only_count} standalone LF line endings",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

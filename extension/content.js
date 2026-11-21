@@ -861,6 +861,9 @@
       const oPrice = offer.price;
       const diff = lavkaNow ? lavkaNow - oPrice : 0;
       const medal = idx === 0 ? '🥇 ' : idx === 1 ? '🥈 ' : '🥉 ';
+      const originLabel = offer.origin === 'ddg'
+        ? 'поиск DDG'
+        : ((offer.viaDomRadar || offer.sourceType === 'dom') ? 'DOM-скан' : 'локальная база');
       comparisonRows.push({
         source: `${medal}${offer.store}`,
         price: oPrice,
@@ -868,6 +871,7 @@
         url: offer.url || null,
         offerTitle: offer.title || '',
         sourceRetailer: offer.sourceRetailer || null,
+        sourceOriginLabel: originLabel,
         isCompetitor: true,
         badge: diff > 2
           ? `✅ Выгоднее на -${diff} ₽`
@@ -901,18 +905,23 @@
                   : '';
                 const safeRowUrl = safeHttpUrl(row.url);
                 const retailerTooltipSuffix = row.sourceRetailer ? ` (через Купер — ${row.sourceRetailer})` : '';
-                const rowTooltip = `${row.offerTitle || row.source}${retailerTooltipSuffix}`;
+                const originTooltipSuffix = row.isCompetitor && row.sourceOriginLabel ? ` • Источник: ${row.sourceOriginLabel}` : '';
+                const rowTooltip = `${row.offerTitle || row.source}${retailerTooltipSuffix}${originTooltipSuffix}`;
                 const nameHtml = safeRowUrl
                   ? `<a href="${escapeHtml(safeRowUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f172a;font-weight:700;text-decoration:underline;" title="${escapeHtml(rowTooltip)}">${escapeHtml(row.source)} ↗</a>`
                   : `<span style="font-weight:600;" title="${escapeHtml(rowTooltip)}">${escapeHtml(row.source)}</span>`;
+                const rejectBtnHtml = row.isCompetitor
+                  ? `<button type="button" class="lqs-reject-match-btn" data-slug="${escapeHtml(slug)}" data-source-title="${escapeHtml(title || '')}" data-rejected-url="${escapeHtml(row.url || '')}" data-rejected-title="${escapeHtml(row.offerTitle || row.source || '')}" title="Не тот товар? Навсегда скрыть это совпадение">✕</button>`
+                  : '';
                 return `
-                  <div class="lqs-price-matrix-row ${isBest ? 'is-best-price' : ''}">
+                  <div class="lqs-price-matrix-row ${isBest ? 'is-best-price' : ''}" title="${escapeHtml(rowTooltip)}">
                     <div class="lqs-price-matrix-cell-name">
                       ${isBest ? '🏆 ' : ''}${nameHtml}
                     </div>
                     <div class="lqs-price-matrix-cell-val">
                       ${priceStr}${oldStr}
                       <span class="lqs-price-matrix-badge ${isBest ? 'best' : ''}">${escapeHtml(isBest ? 'ЛУЧШАЯ ЦЕНА' : row.badge)}</span>
+                      ${rejectBtnHtml}
                     </div>
                   </div>
                 `;
@@ -1082,6 +1091,60 @@
     if (radarBarRoot && !radarBarRoot.dataset.lqsScanBound) {
       radarBarRoot.dataset.lqsScanBound = '1';
       radarBarRoot.addEventListener('click', (ev) => {
+        const rejectBtn = ev.target && ev.target.closest ? ev.target.closest('.lqs-reject-match-btn') : null;
+        if (rejectBtn && !rejectBtn.disabled) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const targetSlug = rejectBtn.getAttribute('data-slug') || slug;
+          const latestMeta = extractProductPageMetadata() || meta;
+          const sourceTitle = rejectBtn.getAttribute('data-source-title') || (latestMeta ? latestMeta.title : '');
+          const rejectedUrl = rejectBtn.getAttribute('data-rejected-url') || '';
+          const rejectedTitle = rejectBtn.getAttribute('data-rejected-title') || '';
+          rejectBtn.disabled = true;
+          rejectBtn.textContent = '…';
+          chrome.runtime.sendMessage(
+            {
+              type: 'LQS_REJECT_COMPETITOR_MATCH',
+              payload: {
+                sourceTitle,
+                sourceSlug: targetSlug,
+                rejectedUrl,
+                rejectedTitle
+              }
+            },
+            (resp) => {
+              if (chrome.runtime.lastError || !resp || !resp.ok) {
+                rejectBtn.disabled = false;
+                rejectBtn.textContent = '✕';
+                return;
+              }
+              const cleanRejUrl = String(rejectedUrl || '').trim();
+              const cleanRejTitle = String(rejectedTitle || '').trim().toLowerCase();
+              const pruneOffers = (summaryObj) => {
+                if (!summaryObj || !Array.isArray(summaryObj.competitorOffers)) return;
+                summaryObj.competitorOffers = summaryObj.competitorOffers.filter((o) => {
+                  if (!o) return false;
+                  if (cleanRejUrl && String(o.url || '').trim() === cleanRejUrl) return false;
+                  if (cleanRejTitle && String(o.title || o.store || '').trim().toLowerCase() === cleanRejTitle) return false;
+                  return true;
+                });
+                const priced = summaryObj.competitorOffers.filter((o) => o && o.price > 0);
+                summaryObj.competitorMinPrice = priced.length > 0 ? Math.min(...priced.map((o) => o.price)) : null;
+              };
+              const cachedSum = priceSummaryBySlug.get(targetSlug);
+              if (cachedSum) pruneOffers(cachedSum);
+              if (priceDbMemory && priceDbMemory[targetSlug]) pruneOffers(priceDbMemory[targetSlug]);
+              const activePanel = document.querySelector(`.lqs-product-panel[data-slug="${CSS.escape(targetSlug)}"]`) || panel;
+              if (activePanel) {
+                syncExistingPanelUI(activePanel, currentReviewCache, extractProductPageMetadata() || latestMeta || meta);
+              } else {
+                const rowEl = rejectBtn.closest('.lqs-price-matrix-row');
+                if (rowEl) rowEl.remove();
+              }
+            }
+          );
+          return;
+        }
         const scanBtn = ev.target && ev.target.closest ? ev.target.closest('.lqs-scan-stores-btn') : null;
         if (!scanBtn || scanBtn.disabled) return;
         const targetSlug = scanBtn.getAttribute('data-slug') || slug;

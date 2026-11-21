@@ -858,6 +858,35 @@ div.lqs-product-panel .lqs-price-matrix-badge.best {
   font-weight: 700 !important;
 }
 
+div.lqs-product-panel .lqs-reject-match-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 20px !important;
+  height: 20px !important;
+  margin-left: 4px !important;
+  padding: 0 !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 5px !important;
+  background: #ffffff !important;
+  color: #64748b !important;
+  font-size: 11px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
+}
+
+div.lqs-product-panel .lqs-reject-match-btn:hover:not(:disabled) {
+  background: #fef2f2 !important;
+  border-color: #ef4444 !important;
+  color: #dc2626 !important;
+}
+
+div.lqs-product-panel .lqs-reject-match-btn:disabled {
+  opacity: 0.5 !important;
+  cursor: default !important;
+}
+
 /* ===== Lavka Quality Shield v2.8.2 — Price History Chart (Lavka Theme, Compact) & Native Popover ===== */
 .lqs-price-chart-section {
   margin-top: 8px !important;
